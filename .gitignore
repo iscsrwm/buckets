@@ -1,0 +1,43 @@
+# Build artifacts
+build/
+bin/
+*.o
+*.a
+*.so
+*.dylib
+
+# Compiled executables
+buckets
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Test artifacts
+tests/test_*_manual
+tests/cluster/test_*
+*.test
+coverage/
+*.gcov
+*.gcda
+*.gcno
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*~
+*.sublime-workspace
+.DS_Store
+
+# Development files
+.bin/
+*.log
+core
+core.*
+
+# Temp files
+*.tmp
+.tmp/
