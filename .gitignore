@@ -17,7 +17,9 @@ buckets
 
 # Test artifacts
 tests/test_*_manual
-tests/cluster/test_*
+tests/cluster/test_format
+tests/cluster/test_topology
+tests/cluster/test_endpoint
 *.test
 coverage/
 *.gcov
