@@ -4,7 +4,7 @@
 # Compiler and flags
 CC := gcc
 CFLAGS := -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -pedantic -O2 -fPIC
-LDFLAGS := -lssl -lcrypto -luuid -lz -lpthread -lm
+LDFLAGS := -lssl -lcrypto -luuid -lz -lisal -lpthread -lm
 INCLUDES := -Iinclude -Isrc -Ithird_party/cJSON
 
 # Debug flags
@@ -140,7 +140,7 @@ s3: $(S3_OBJ)
 admin: $(ADMIN_OBJ)
 
 # Tests
-test: test-format test-topology test-endpoint
+test: test-format test-topology test-endpoint test-erasure
 
 test-format: $(TEST_BIN_DIR)/cluster/test_format
 	@echo "Running format tests..."
@@ -166,6 +166,10 @@ test-crypto: $(TEST_BIN_DIR)/crypto/test_runner
 	@echo "Running crypto tests..."
 	@$<
 
+test-erasure: $(TEST_BIN_DIR)/erasure/test_erasure
+	@echo "Running erasure coding tests..."
+	@$<
+
 # Test binaries (Criterion-based tests)
 $(TEST_BIN_DIR)/cluster/test_format: $(TEST_DIR)/cluster/test_format.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
@@ -176,6 +180,11 @@ $(TEST_BIN_DIR)/cluster/test_topology: $(TEST_DIR)/cluster/test_topology.c $(BUI
 	@mkdir -p $(dir $@)
 	@echo "CC TEST $<"
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/erasure/test_erasure: $(TEST_DIR)/erasure/test_erasure.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lisal -lcriterion
 
 # Generic test binary rule
 $(TEST_BIN_DIR)/%: $(TEST_DIR)/%.c $(BUILD_DIR)/libbuckets.a

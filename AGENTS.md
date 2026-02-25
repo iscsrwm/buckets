@@ -70,13 +70,38 @@ make profile       # Adds -pg for gprof profiling
 make test
 
 # Run specific component tests
-make test-core     # Core data structures
-make test-hash     # Hashing algorithms
-make test-crypto   # Cryptography
+make test-format    # Format management (20 tests)
+make test-topology  # Topology management (18 tests)
+make test-endpoint  # Endpoint parsing (22 tests)
+make test-hash      # Hashing algorithms (49 tests)
+make test-crypto    # Cryptography (28 tests)
 
-# Run single test file
-./build/test/core/test_vector      # Run vector tests
-./build/test/hash/test_siphash     # Run SipHash tests
+# Compile and run individual test suites
+mkdir -p build/test/{cluster,hash,crypto}
+
+# Cluster tests
+gcc -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -pedantic \
+    -Iinclude -Isrc -Ithird_party/cJSON \
+    tests/cluster/test_format.c build/libbuckets.a \
+    -o build/test/cluster/test_format \
+    -lcriterion -lssl -lcrypto -luuid -lz -lpthread -lm
+./build/test/cluster/test_format
+
+# Hash tests
+gcc -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -pedantic \
+    -Iinclude -Isrc -Ithird_party/cJSON \
+    tests/hash/test_siphash.c build/libbuckets.a \
+    -o build/test/hash/test_siphash \
+    -lcriterion -lssl -lcrypto -luuid -lz -lpthread -lm
+./build/test/hash/test_siphash
+
+# Crypto tests
+gcc -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -pedantic \
+    -Iinclude -Isrc -Ithird_party/cJSON \
+    tests/crypto/test_blake2b.c build/libbuckets.a \
+    -o build/test/crypto/test_blake2b \
+    -lcriterion -lssl -lcrypto -luuid -lz -lpthread -lm
+./build/test/crypto/test_blake2b
 
 # Run tests with Valgrind (memory leak detection)
 make test-valgrind
@@ -264,12 +289,13 @@ buckets_fatal("Fatal: %s", fatal_msg);        // Unrecoverable (exits)
 
 ## Architecture Rules
 
-1. **No external dependencies** - Self-contained design (only libc, OpenSSL, zlib, libuuid)
+1. **No external dependencies** - Self-contained design (only libc, OpenSSL, zlib, libuuid, ISA-L)
 2. **Component isolation** - Each `src/component/` is independent
 3. **Public API only in headers** - Use `static` for internal functions
 4. **Memory safety first** - Use sanitizers during development
 5. **Performance critical** - Profile before optimizing, document trade-offs
-6. **Document architeture descisions and summaries in the architecture folder.
+6. **Document architecture decisions** - Add to `architecture/*.md` when making significant design choices
+7. **Algorithm selection rationale** - Document why specific algorithms/libraries were chosen
 
 ## Testing Requirements
 
