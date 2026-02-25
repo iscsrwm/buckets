@@ -35,8 +35,8 @@ coverage/
 # Development files
 .bin/
 *.log
-core
-core.*
+/core
+/core.*
 
 # Temp files
 *.tmp
