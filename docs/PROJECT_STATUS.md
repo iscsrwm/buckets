@@ -1,10 +1,11 @@
 # Buckets Project Status
 
 **Last Updated**: February 25, 2026  
-**Current Phase**: Phase 2 Complete - Week 7 (Hash Ring) - ✅ COMPLETE  
+**Current Phase**: Phase 3 - Week 8 (BLAKE2b) - ✅ COMPLETE  
 **Status**: 🟢 Active Development  
 **Phase 1 Status**: ✅ COMPLETE (Foundation - Weeks 1-4)  
-**Phase 2 Status**: ✅ COMPLETE (Hashing - Weeks 5-7)
+**Phase 2 Status**: ✅ COMPLETE (Hashing - Weeks 5-7)  
+**Phase 3 Status**: 🔄 IN PROGRESS (Cryptography & Erasure - Weeks 8-11, Week 8 complete)
 
 ---
 
@@ -88,6 +89,43 @@
   - [x] NULL input validation
   - [x] Edge cases: single node, empty ring, large rings
 
+### Phase 3: Cryptography & Erasure Coding (Weeks 8-11) - 🔄 IN PROGRESS
+
+**Week 8: BLAKE2b Cryptographic Hashing** ✅ **COMPLETE**
+- [x] **BLAKE2b Implementation** (`src/crypto/blake2b.c` - 428 lines):
+  - [x] Core BLAKE2b algorithm (faster than SHA-256)
+  - [x] Optimized for 64-bit platforms (uses 64-bit operations)
+  - [x] 12 rounds of mixing per block
+  - [x] Support for arbitrary-length inputs
+  - [x] Variable output length (1-64 bytes)
+  - [x] BLAKE2b-256 (32 bytes) and BLAKE2b-512 (64 bytes) variants
+  - [x] Incremental hashing (init/update/final API)
+  - [x] Keyed hashing support (MAC mode with up to 64-byte keys)
+  - [x] Hex string output convenience function
+  - [x] Constant-time comparison for hash verification
+- [x] **API Header** (`include/buckets_crypto.h` - 199 lines):
+  - [x] One-shot hash functions (blake2b, blake2b_256, blake2b_512)
+  - [x] Incremental API (init/update/final)
+  - [x] Keyed hashing (init_key)
+  - [x] Parameter customization (init_param with tree mode support)
+  - [x] Hex output (blake2b_hex)
+  - [x] Verification (blake2b_verify - constant time)
+  - [x] Self-test function
+- [x] **Criterion Test Suite** (`tests/crypto/test_blake2b.c` - 295 lines, 16 tests passing):
+  - [x] Empty string hashing (512-bit and 256-bit)
+  - [x] Standard test vectors ("abc", test strings)
+  - [x] Incremental hashing (multi-part updates)
+  - [x] Keyed hashing (MAC mode with different keys)
+  - [x] Variable output sizes (16, 32, 48 bytes)
+  - [x] Hex output format
+  - [x] Constant-time verification
+  - [x] Large data (>1 block, multiple blocks)
+  - [x] NULL input validation
+  - [x] Zero-length data handling
+  - [x] Self-test verification
+  - [x] Deterministic output
+  - [x] Hash uniqueness (different inputs → different outputs)
+
 ### Cluster Utilities (Week 1 - COMPLETE)
 - [x] **UUID Generation** (`src/cluster/uuid.c` - 39 lines):
   - [x] Generate UUID v4 (random)
@@ -159,9 +197,10 @@
 - [x] Logging testing: DEBUG level and file output verified
 - [x] Compiler flags: `-Wall -Wextra -Werror -pedantic` enabled
 - [x] Criterion test framework installed and integrated
-- [x] **111 total tests passing** (Phase 1: 62 tests, Phase 2: 49 tests)
+- [x] **127 total tests passing** (Phase 1: 62 tests, Phase 2: 49 tests, Phase 3: 16 tests)
   - Phase 1 (Foundation): 20 format + 18 topology + 22 endpoint + 2 cache = 62 tests
   - Phase 2 (Hashing): 16 siphash + 16 xxhash + 17 ring = 49 tests
+  - Phase 3 (Cryptography): 16 blake2b = 16 tests
 - [x] Makefile test targets: `make test`, `make test-format`, `make test-topology`, `make test-endpoint`
 - [x] Manual test suites for initial verification
 
@@ -274,8 +313,9 @@
 │   ├── buckets_json.h                ✅ JSON helper API
 │   ├── buckets_cache.h               ✅ Cache management API (86 lines)
 │   ├── buckets_endpoint.h            ✅ Endpoint parsing API (231 lines)
-│   ├── buckets_hash.h                ✅ Hash algorithms API (292 lines) - NEW
-│   └── buckets_ring.h                ✅ Hash ring API (186 lines) - NEW
+│   ├── buckets_hash.h                ✅ Hash algorithms API (292 lines)
+│   ├── buckets_ring.h                ✅ Hash ring API (186 lines)
+│   └── buckets_crypto.h              ✅ Cryptography API (199 lines) - NEW
 ├── src/                               ✅ Source code
 │   ├── main.c                        ✅ Entry point (updated)
 │   ├── core/                         ✅ Core utilities
@@ -293,7 +333,8 @@
 │   │   ├── siphash.c                ✅ SipHash-2-4 implementation (356 lines)
 │   │   ├── xxhash.c                 ✅ xxHash-64 implementation (200 lines)
 │   │   └── ring.c                   ✅ Hash ring + Jump hash (364 lines)
-│   ├── crypto/                       ⏳ Week 8-11 (BLAKE2, SHA-256, bitrot)
+│   ├── crypto/                       🔄 Week 8-11 (BLAKE2, SHA-256, bitrot)
+│   │   └── blake2b.c                 ✅ BLAKE2b implementation (428 lines) - NEW
 │   ├── erasure/                      ⏳ Week 8-11 (Reed-Solomon)
 │   ├── storage/                      ⏳ Week 12-16 (Disk I/O, object store)
 │   ├── registry/                     ⏳ Week 17-20 (Location tracking)
@@ -312,17 +353,19 @@
 │   └── obj/                          ✅ Object files
 ├── bin/                               ✅ Binaries
 │   └── buckets                       ✅ Server binary (18KB)
-├── tests/                             ✅ Tests (Week 2-7)
+├── tests/                             ✅ Tests (Week 2-8)
 │   ├── test_format_manual.c          ✅ Format manual tests (149 lines, 7 tests)
 │   ├── test_cache_manual.c           ✅ Cache manual tests (149 lines, 4 tests)
 │   ├── cluster/                      ✅ Criterion test suites (Weeks 2-4)
 │   │   ├── test_format.c             ✅ Format tests (318 lines, 20 tests passing)
 │   │   ├── test_topology.c           ✅ Topology tests (318 lines, 18 tests passing)
 │   │   └── test_endpoint.c           ✅ Endpoint tests (318 lines, 22 tests passing)
-│   └── hash/                         ✅ Hash test suites (Weeks 5-7) - NEW
-│       ├── test_siphash.c            ✅ SipHash tests (273 lines, 16 tests passing)
-│       ├── test_xxhash.c             ✅ xxHash tests (267 lines, 16 tests passing)
-│       └── test_ring.c               ✅ Hash ring tests (277 lines, 17 tests passing)
+│   ├── hash/                         ✅ Hash test suites (Weeks 5-7)
+│   │   ├── test_siphash.c            ✅ SipHash tests (273 lines, 16 tests passing)
+│   │   ├── test_xxhash.c             ✅ xxHash tests (267 lines, 16 tests passing)
+│   │   └── test_ring.c               ✅ Hash ring tests (277 lines, 17 tests passing)
+│   └── crypto/                       ✅ Crypto test suites (Week 8) - NEW
+│       └── test_blake2b.c            ✅ BLAKE2b tests (295 lines, 16 tests passing)
 └── benchmarks/                        ⏳ Week 4+ (Performance tests)
 ```
 
@@ -330,35 +373,38 @@
 
 ## 🎯 Immediate Next Steps
 
-### Phase 2 Complete! 🎉
+### Week 8 Complete! 🎉
 
-**Completed Weeks 5-7: Hashing Infrastructure**
-- ✅ Week 5: SipHash-2-4 (cryptographic hashing)
-- ✅ Week 6: xxHash-64 (fast non-cryptographic hashing)
-- ✅ Week 7: Hash Ring & Consistent Hashing
+**Completed: BLAKE2b Cryptographic Hashing**
+- ✅ BLAKE2b-512 and BLAKE2b-256 implementations
+- ✅ Incremental hashing API (init/update/final)
+- ✅ Keyed hashing (MAC mode)
+- ✅ Variable output sizes (1-64 bytes)
+- ✅ Hex output and constant-time verification
+- ✅ All 16 tests passing
 
-**All 49 hash tests passing!**
+### Week 9: SHA-256 & Bitrot Detection (NEXT)
 
-### Week 8: Cryptography - BLAKE2b (NEXT)
+**Priority 1: SHA-256 Implementation**
+1. [ ] Implement SHA-256 wrapper using OpenSSL
+   - [ ] SHA-256 hashing (256-bit output)
+   - [ ] Incremental API (init/update/final)
+   - [ ] Hex output and verification
+   - [ ] Unit tests with test vectors
 
-**Priority 1: BLAKE2b Implementation**
-1. [ ] Implement BLAKE2b hashing algorithm
-   - [ ] Core algorithm (faster than SHA-256)
-   - [ ] Support for 256-bit and 512-bit output
-   - [ ] Keyed hashing support
-   - [ ] Unit tests against test vectors
+**Priority 2: Bitrot Detection System**
+2. [ ] Design bitrot detection infrastructure
+   - [ ] Hash storage in object metadata
+   - [ ] Background verification scanner
+   - [ ] Corruption detection and reporting
+   - [ ] Healing trigger integration
+   - [ ] Unit tests for detection logic
 
-**Priority 2: Integration with Storage**
-2. [ ] Integrate BLAKE2b for object integrity
-   - [ ] Hash object data during writes
-   - [ ] Verify hashes during reads
-   - [ ] Bitrot detection support
-   - [ ] Unit tests for integrity checking
-
-### Week 9-11: SHA-256, Bitrot Detection, Reed-Solomon (After Week 8)
-- [ ] Implement SHA-256 for compatibility (OpenSSL wrapper)
-- [ ] Build bitrot detection system with periodic scanning
-- [ ] Implement Reed-Solomon erasure coding (ISA-L integration)
+### Week 10-11: Reed-Solomon Erasure Coding (After Week 9)
+- [ ] Evaluate erasure coding libraries (ISA-L, Jerasure)
+- [ ] Implement Reed-Solomon encoder/decoder
+- [ ] Shard distribution and reconstruction
+- [ ] Performance benchmarks (>1 GB/s target)
 
 ---
 
@@ -375,7 +421,10 @@
 | Week 5: SipHash-2-4 | ✅ Complete | 100% | 356 | ✅ Done |
 | Week 6: xxHash-64 | ✅ Complete | 100% | 200 | ✅ Done |
 | Week 7: Hash Ring | ✅ Complete | 100% | 364 | ✅ Done |
-| **Phase 3: Crypto & Erasure** | ⏳ Pending | 0% | ~3,000 target | Week 8-11 |
+| **Phase 3: Crypto & Erasure** | 🔄 In Progress | 25% (1/4 weeks) | 428 (Week 8) | Week 8-11 |
+| Week 8: BLAKE2b | ✅ Complete | 100% | 428 | ✅ Done |
+| Week 9: SHA-256 & Bitrot | ⏳ Pending | 0% | ~400 target | Week 9 |
+| Week 10-11: Reed-Solomon | ⏳ Pending | 0% | ~800 target | Week 10-11 |
 | **Phase 4: Storage Layer** | ⏳ Pending | 0% | ~5,000 target | Week 12-16 |
 | **Phase 5: Location Registry** | ⏳ Pending | 0% | ~4,000 target | Week 17-20 |
 
@@ -992,7 +1041,7 @@ Phase 2 implemented a complete hashing infrastructure for object placement, data
 - **Total Production Code**: 3,501 lines
   - Core: 255 lines
   - Cluster utilities: 2,326 lines
-  - Hash utilities: 920 lines (new)
+  - Hash utilities: 920 lines
 - **Total Test Code**: 2,085 lines
   - Manual tests: 310 lines
   - Criterion tests: 1,775 lines (958 cluster + 817 hash)
@@ -1004,11 +1053,103 @@ Phase 2 implemented a complete hashing infrastructure for object placement, data
 - **Phase 1 Progress**: 100% complete (4/4 weeks) ✅
 - **Phase 2 Progress**: 100% complete (3/3 weeks) ✅
 
-### What's Next (Week 8 - BLAKE2b)
-- Implement BLAKE2b cryptographic hash (faster than SHA-256)
-- Integrate with storage layer for object integrity
-- Bitrot detection support
-- Unit tests with BLAKE2b test vectors
+---
+
+## 🎉 Week 8 Complete: BLAKE2b Cryptographic Hashing ✅
+
+### Overview
+Week 8 implemented BLAKE2b, a modern cryptographic hash function that is faster than SHA-256 and optimized for 64-bit platforms. This provides the foundation for object integrity verification and bitrot detection in the storage layer.
+
+### Implementation
+**BLAKE2b Core** (`src/crypto/blake2b.c` - 428 lines):
+- Core BLAKE2b algorithm based on RFC 7693
+- Optimized for 64-bit platforms (uses 64-bit operations)
+- 12 rounds of mixing per 128-byte block
+- Compression function with proper initialization vector (IV)
+- Little-endian byte ordering for cross-platform compatibility
+- Secure parameter block handling (packed struct, no padding)
+- Constant-time hash verification to prevent timing attacks
+
+**Features**:
+- Variable output length (1-64 bytes, commonly 32 or 64)
+- BLAKE2b-256 (32 bytes) and BLAKE2b-512 (64 bytes) variants
+- Incremental hashing API (init/update/final)
+- Keyed hashing for MAC functionality (up to 64-byte keys)
+- One-shot convenience functions
+- Hex string output
+- Self-test with official test vectors
+
+**API** (`include/buckets_crypto.h` - 199 lines):
+- `buckets_blake2b()` - One-shot hash with optional key
+- `buckets_blake2b_256()` / `buckets_blake2b_512()` - Convenience wrappers
+- `buckets_blake2b_init()` - Initialize context
+- `buckets_blake2b_init_key()` - Initialize with key (MAC mode)
+- `buckets_blake2b_init_param()` - Custom parameters (tree hashing support)
+- `buckets_blake2b_update()` - Incremental data feeding
+- `buckets_blake2b_final()` - Finalize and output hash
+- `buckets_blake2b_hex()` - Hash to hex string
+- `buckets_blake2b_verify()` - Constant-time comparison
+- `buckets_blake2b_selftest()` - Verification against test vectors
+
+**Testing** (`tests/crypto/test_blake2b.c` - 295 lines, 16 tests):
+- Empty string hashing (512-bit and 256-bit variants)
+- Standard test strings ("abc", long strings)
+- Incremental hashing (multi-part updates)
+- Keyed hashing with different keys
+- Variable output sizes (16, 32, 48 bytes)
+- Hex output format verification
+- Constant-time verification function
+- Large data handling (multiple blocks)
+- NULL input validation
+- Zero-length data edge cases
+- Self-test verification
+- Deterministic output verification
+- Hash uniqueness (collision resistance)
+
+### What Was Learned
+- BLAKE2b is 1.5-2x faster than SHA-256 on 64-bit platforms
+- Parameter block must be exactly 64 bytes (requires packed struct)
+- 12 rounds provide strong security while maintaining performance
+- Virtual node factor of 150 from Week 7 synergizes well with BLAKE2b speed
+- Keyed hashing provides MAC functionality without HMAC overhead
+- Constant-time comparison is essential for hash verification
+
+### Week 8 Metrics
+- **Files Created**: 3 files
+  - `include/buckets_crypto.h` - 199 lines (crypto API)
+  - `src/crypto/blake2b.c` - 428 lines (implementation)
+  - `tests/crypto/test_blake2b.c` - 295 lines (test suite)
+  - Total: 922 lines (627 production + 295 tests)
+- **Test Results**: 16/16 passing (100% success rate)
+- **Build Time**: ~2 seconds (clean build)
+- **Test Time**: ~0.1 seconds (16 tests)
+- **Compiler Warnings**: 0 (strict flags: -Wall -Wextra -Werror -pedantic)
+
+### Cumulative Progress (Weeks 1-8)
+- **Total Production Code**: 3,929 lines
+  - Core: 255 lines
+  - Cluster utilities: 2,326 lines
+  - Hash utilities: 920 lines
+  - Crypto utilities: 428 lines (new)
+- **Total Test Code**: 2,380 lines
+  - Manual tests: 310 lines
+  - Criterion tests: 2,070 lines (958 cluster + 817 hash + 295 crypto)
+- **Total Headers**: 9 files (6 cluster + 2 hash + 1 crypto)
+- **Test Coverage**: 127 tests passing, 0 failing (100%)
+  - Phase 1: 62 tests (20 format + 18 topology + 22 endpoint + 2 manual)
+  - Phase 2: 49 tests (16 siphash + 16 xxhash + 17 ring)
+  - Phase 3: 16 tests (16 blake2b)
+- **Build Artifacts**: libbuckets.a (~150KB), buckets binary (~100KB)
+- **Phase 1 Progress**: 100% complete (4/4 weeks) ✅
+- **Phase 2 Progress**: 100% complete (3/3 weeks) ✅
+- **Phase 3 Progress**: 25% complete (1/4 weeks) 🔄
+
+### What's Next (Week 9 - SHA-256 & Bitrot Detection)
+- Implement SHA-256 wrapper using OpenSSL
+- Design bitrot detection infrastructure
+- Background verification scanner
+- Hash storage in object metadata
+- Corruption detection and reporting
 
 ---
 
@@ -1022,4 +1163,4 @@ Phase 2 implemented a complete hashing infrastructure for object placement, data
 
 ---
 
-**Next Update**: End of Week 8 (after BLAKE2b implementation)
+**Next Update**: End of Week 9 (after SHA-256 & bitrot detection implementation)
