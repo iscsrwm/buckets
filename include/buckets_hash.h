@@ -198,6 +198,93 @@ buckets_error_t buckets_uuid_str_to_siphash_key(const char *uuid_str,
                                                 u64 *k0,
                                                 u64 *k1);
 
+/* ============================================================================
+ * xxHash-64 - High-Speed Non-Cryptographic Hash
+ * ============================================================================
+ * 
+ * xxHash is an extremely fast hash algorithm designed for speed.
+ * 
+ * Properties:
+ * - Very fast: 10+ GB/s on modern CPUs (6-7x faster than SipHash)
+ * - Good distribution: passes all SMHasher tests
+ * - Not cryptographic: susceptible to collision attacks
+ * - Deterministic: same input = same output
+ * - Portable: works on all platforms
+ * 
+ * Use cases:
+ * - Data integrity checks (checksums)
+ * - Hash tables and bloom filters
+ * - Fast content addressing
+ * - Non-security-critical hashing
+ * 
+ * Reference: https://github.com/Cyan4973/xxHash
+ */
+
+/**
+ * xxHash state structure
+ * 
+ * Internal state for incremental hashing.
+ */
+typedef struct buckets_xxhash_state {
+    u64 v1, v2, v3, v4;     /* Accumulators */
+    u64 total_len;          /* Total bytes processed */
+    u64 seed;               /* Seed value */
+    u8 buf[32];             /* Buffer for partial blocks */
+    size_t buf_len;         /* Bytes in buffer */
+} buckets_xxhash_state_t;
+
+/**
+ * Initialize xxHash state with seed
+ * 
+ * @param state State structure to initialize
+ * @param seed Seed value (use 0 for default)
+ */
+void buckets_xxhash_init(buckets_xxhash_state_t *state, u64 seed);
+
+/**
+ * Update xxHash state with data
+ * 
+ * Can be called multiple times to hash data incrementally.
+ * 
+ * @param state State structure
+ * @param data Input data
+ * @param len Length of input data
+ */
+void buckets_xxhash_update(buckets_xxhash_state_t *state,
+                           const void *data,
+                           size_t len);
+
+/**
+ * Finalize xxHash and produce 64-bit hash
+ * 
+ * @param state State structure
+ * @return 64-bit hash value
+ */
+u64 buckets_xxhash_final(buckets_xxhash_state_t *state);
+
+/**
+ * One-shot xxHash-64 computation
+ * 
+ * Convenience function that init+update+final in one call.
+ * 
+ * @param seed Seed value (use 0 for default)
+ * @param data Input data
+ * @param len Length of input data
+ * @return 64-bit hash value
+ */
+u64 buckets_xxhash64(u64 seed, const void *data, size_t len);
+
+/**
+ * Fast checksum for data blocks
+ * 
+ * Computes xxHash-64 with seed=0 for data integrity checks.
+ * 
+ * @param data Input data
+ * @param len Length of input data
+ * @return 64-bit checksum
+ */
+u64 buckets_checksum(const void *data, size_t len);
+
 #ifdef __cplusplus
 }
 #endif
