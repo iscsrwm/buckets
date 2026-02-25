@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="images/BucketsLogoDark.png" alt="Buckets Logo" width="400"/>
+</p>
+
 # Buckets
 
 A high-performance, S3-compatible object storage system written in C with support for fine-grained scalability.
