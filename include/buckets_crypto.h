@@ -192,6 +192,70 @@ bool buckets_blake2b_verify(const void *a, const void *b, size_t len);
  */
 int buckets_blake2b_selftest(void);
 
+/* ========================================================================
+ * SHA-256 (Secure Hash Algorithm 256-bit)
+ * ========================================================================
+ * 
+ * SHA-256 wrapper using OpenSSL for S3 compatibility and industry-standard
+ * hashing. Use BLAKE2b for internal operations (faster), SHA-256 for
+ * external compatibility (S3 ETags, AWS checksums).
+ */
+
+/* SHA-256 constants */
+#define BUCKETS_SHA256_DIGEST_LENGTH 32  /* 256 bits = 32 bytes */
+
+/**
+ * SHA-256 one-shot hash
+ * 
+ * Compute SHA-256 hash of data in a single call.
+ * 
+ * @param out Output buffer (must be at least 32 bytes)
+ * @param data Input data
+ * @param datalen Length of input data
+ * @return 0 on success, -1 on error
+ * 
+ * Example:
+ *   u8 hash[BUCKETS_SHA256_DIGEST_LENGTH];
+ *   buckets_sha256(hash, data, datalen);
+ */
+int buckets_sha256(void *out, const void *data, size_t datalen);
+
+/**
+ * SHA-256 hash as hexadecimal string
+ * 
+ * Convenience function that hashes data and converts to hex string.
+ * 
+ * @param out Output buffer (must be at least 65 bytes: 32*2 + null)
+ * @param data Input data
+ * @param datalen Length of input data
+ * @return 0 on success, -1 on error
+ * 
+ * Example:
+ *   char hexhash[65];
+ *   buckets_sha256_hex(hexhash, data, datalen);
+ */
+int buckets_sha256_hex(char *out, const void *data, size_t datalen);
+
+/**
+ * Compare two SHA-256 hashes in constant time
+ * 
+ * Timing-safe comparison to prevent timing attacks.
+ * 
+ * @param a First hash (32 bytes)
+ * @param b Second hash (32 bytes)
+ * @return true if hashes match, false otherwise
+ */
+bool buckets_sha256_verify(const void *a, const void *b);
+
+/**
+ * Self-test for SHA-256 implementation
+ * 
+ * Runs test vectors to verify correctness.
+ * 
+ * @return 0 on success, -1 if tests fail
+ */
+int buckets_sha256_selftest(void);
+
 #ifdef __cplusplus
 }
 #endif
