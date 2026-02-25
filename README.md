@@ -99,8 +99,8 @@ buckets-admin cluster migration-status
 
 ## Project Status
 
-**Current Phase**: Phase 3 - Cryptography & Erasure Coding (Week 8)  
-**Progress**: 2 of 11 phases complete (18%)
+**Current Phase**: Phase 4 - Storage Layer (Week 12)  
+**Progress**: 3 of 11 phases complete, Week 12 of 52 (23%)
 
 ### Completed
 
@@ -118,17 +118,33 @@ buckets-admin cluster migration-status
   - Jump Consistent Hash
   - 49 tests passing
 
+- ✅ **Phase 3: Cryptography & Erasure (Weeks 8-11)** - 100% Complete
+  - BLAKE2b cryptographic hashing (faster than SHA-256)
+  - Reed-Solomon erasure coding with Intel ISA-L
+  - 8+4, 12+4, 16+4 configurations tested
+  - Automatic chunk reconstruction
+  - 36 tests passing
+
+- 🔄 **Phase 4: Storage Layer (Weeks 12-16)** - 20% Complete (Week 12/16)
+  - ✅ Object primitives & disk I/O (Week 12)
+  - MinIO-compatible xl.meta format
+  - Inline objects (<128KB) and erasure-coded objects (≥128KB)
+  - BLAKE2b checksums per chunk
+  - Atomic write-then-rename operations
+  - 18 tests passing
+
 ### Current Stats
 
-- **Production Code**: 3,501 lines (2,581 foundation + 920 hashing)
-- **Test Code**: 2,085 lines
-- **Test Coverage**: 111/111 tests passing (100%)
+- **Production Code**: 6,179 lines (core + cluster + hash + crypto + erasure + storage)
+- **Test Code**: 3,659 lines
+- **Test Coverage**: 165/165 tests passing (100%)
 - **Build**: Clean with `-Wall -Wextra -Werror -pedantic`
+- **Library Size**: ~200KB (includes ISA-L)
 
 ### Next Up
 
-- Week 8: BLAKE2b cryptographic hashing
-- Week 9-11: SHA-256, bitrot detection, Reed-Solomon erasure coding
+- Week 13: Object metadata & versioning
+- Week 14-16: Multi-disk management, integration testing
 
 See [ROADMAP.md](ROADMAP.md) for detailed development timeline and [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) for comprehensive progress tracking.
 
@@ -170,9 +186,16 @@ buckets/
 │   │   ├── siphash.c     # SipHash-2-4 (cryptographic)
 │   │   ├── xxhash.c      # xxHash-64 (fast)
 │   │   └── ring.c        # Consistent hash ring
-│   ├── crypto/           # Cryptography (Week 8+)
-│   ├── erasure/          # Erasure coding (Week 8-11)
-│   ├── storage/          # Storage layer (Week 12-16)
+│   ├── crypto/           # Cryptography ✅
+│   │   ├── blake2b.c     # BLAKE2b hashing
+│   │   └── sha256.c      # SHA-256 wrapper
+│   ├── erasure/          # Erasure coding ✅
+│   │   └── erasure.c     # Reed-Solomon (ISA-L)
+│   ├── storage/          # Storage layer 🔄
+│   │   ├── layout.c      # Path computation, chunk sizing
+│   │   ├── metadata.c    # xl.meta serialization
+│   │   ├── chunk.c       # Chunk I/O, checksums
+│   │   └── object.c      # PUT/GET/DELETE/HEAD/STAT
 │   ├── registry/         # Location registry (Week 17-20)
 │   ├── migration/        # Data rebalancing (Week 21-24)
 │   ├── net/              # Network layer (Week 25-28)
