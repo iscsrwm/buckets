@@ -140,7 +140,7 @@ s3: $(S3_OBJ)
 admin: $(ADMIN_OBJ)
 
 # Tests
-test: test-format test-topology
+test: test-format test-topology test-endpoint
 
 test-format: $(TEST_BIN_DIR)/cluster/test_format
 	@echo "Running format tests..."
@@ -148,6 +148,10 @@ test-format: $(TEST_BIN_DIR)/cluster/test_format
 
 test-topology: $(TEST_BIN_DIR)/cluster/test_topology
 	@echo "Running topology tests..."
+	@$<
+
+test-endpoint: $(TEST_BIN_DIR)/cluster/test_endpoint
+	@echo "Running endpoint tests..."
 	@$<
 
 test-core: $(TEST_BIN_DIR)/core/test_runner
