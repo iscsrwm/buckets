@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="images/BucketsLogoDark.png" alt="Buckets Logo" width="400"/>
+  <img src="images/BucketsLogoDark.png" alt="Buckets Logo" width="600"/>
 </p>
 
 # Buckets
