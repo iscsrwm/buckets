@@ -281,10 +281,10 @@ buckets_fatal("Fatal: %s", fatal_msg);        // Unrecoverable (exits)
 
 ## Reference Code
 
-MinIO Go code is in `minio/` for reference:
-- `minio/cmd/erasure-sets.go` - Current hash placement
-- `minio/cmd/format-erasure.go` - Disk format structures
-- `minio/cmd/xl-storage-format-v2.go` - Object metadata
+MinIO Go code is in `/home/a002687/minio-reference/` for reference:
+- `cmd/erasure-sets.go` - Current hash placement
+- `cmd/format-erasure.go` - Disk format structures
+- `cmd/xl-storage-format-v2.go` - Object metadata
 
 When porting from MinIO, preserve logic but adapt to C idioms.
 

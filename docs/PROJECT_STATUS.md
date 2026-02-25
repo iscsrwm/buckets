@@ -238,12 +238,7 @@
 │   └── cluster/                      ✅ Criterion test suites
 │       ├── test_format.c             ✅ Format tests (318 lines, 20 tests passing)
 │       └── test_topology.c           ✅ Topology tests (318 lines, 18 tests passing) - NEW
-├── benchmarks/                        ⏳ Week 4+ (Performance tests)
-└── minio/                             📚 Reference code
-    └── cmd/                          📚 MinIO Go implementation
-        ├── erasure-sets.go           📚 Hash-based placement (reference)
-        ├── format-erasure.go         📚 Format structures (reference)
-        └── xl-storage-format-v2.go   📚 Object metadata (reference)
+└── benchmarks/                        ⏳ Week 4+ (Performance tests)
 ```
 
 ---
@@ -427,11 +422,11 @@ buckets_result_t buckets_function_name(const char *name);
 ### Architecture
 - [SCALE_AND_DATA_PLACEMENT.md](../architecture/SCALE_AND_DATA_PLACEMENT.md) - Complete design spec
 
-### MinIO Reference Code
-- `minio/cmd/erasure-sets.go` - Current hash-based placement
-- `minio/cmd/erasure-server-pool.go` - Pool management
-- `minio/cmd/format-erasure.go` - Disk format structures
-- `minio/cmd/xl-storage-format-v2.go` - Object metadata format
+### MinIO Reference Code (in `/home/a002687/minio-reference/`)
+- `cmd/erasure-sets.go` - Current hash-based placement
+- `cmd/erasure-server-pool.go` - Pool management
+- `cmd/format-erasure.go` - Disk format structures
+- `cmd/xl-storage-format-v2.go` - Object metadata format
 
 ### External Resources
 - SipHash: https://github.com/veorq/SipHash
