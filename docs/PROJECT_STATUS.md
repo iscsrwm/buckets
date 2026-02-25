@@ -1,11 +1,12 @@
 # Buckets Project Status
 
 **Last Updated**: February 25, 2026  
-**Current Phase**: Phase 3 - Week 10-11 (Reed-Solomon) - ✅ COMPLETE  
+**Current Phase**: Phase 4 - Week 12 (Storage Layer) - ✅ COMPLETE  
 **Status**: 🟢 Active Development  
 **Phase 1 Status**: ✅ COMPLETE (Foundation - Weeks 1-4)  
 **Phase 2 Status**: ✅ COMPLETE (Hashing - Weeks 5-7)  
-**Phase 3 Status**: ✅ COMPLETE (Cryptography & Erasure - Weeks 8-11)
+**Phase 3 Status**: ✅ COMPLETE (Cryptography & Erasure - Weeks 8-11)  
+**Phase 4 Status**: 🔄 IN PROGRESS (Storage Layer - Week 12/16 complete)
 
 ---
 
@@ -197,10 +198,11 @@
 - [x] Logging testing: DEBUG level and file output verified
 - [x] Compiler flags: `-Wall -Wextra -Werror -pedantic` enabled
 - [x] Criterion test framework installed and integrated
-- [x] **127 total tests passing** (Phase 1: 62 tests, Phase 2: 49 tests, Phase 3: 16 tests)
+- [x] **165 total tests passing** (Phase 1: 62 tests, Phase 2: 49 tests, Phase 3: 36 tests, Phase 4: 18 tests)
   - Phase 1 (Foundation): 20 format + 18 topology + 22 endpoint + 2 cache = 62 tests
   - Phase 2 (Hashing): 16 siphash + 16 xxhash + 17 ring = 49 tests
-  - Phase 3 (Cryptography): 16 blake2b = 16 tests
+  - Phase 3 (Cryptography & Erasure): 16 blake2b + 20 erasure = 36 tests
+  - Phase 4 (Storage Layer): 18 storage = 18 tests
 - [x] Makefile test targets: `make test`, `make test-format`, `make test-topology`, `make test-endpoint`
 - [x] Manual test suites for initial verification
 
@@ -450,6 +452,89 @@
 - [x] **ISA-L Integration**: Direct API usage for maximum control
 - [x] **Makefile Updates**: Added erasure test target with ISA-L linking
 
+### Phase 4: Storage Layer (Weeks 12-16) - 🔄 IN PROGRESS
+
+**Week 12: Object Primitives & Disk I/O** ✅ **COMPLETE**
+- [x] **Architecture Documentation** (`architecture/STORAGE_LAYER.md` - 1,650 lines):
+  - [x] MinIO-compatible xl.meta format specification
+  - [x] Inline vs erasure-coded object strategy (<128KB threshold)
+  - [x] Path computation using xxHash-64 (deployment ID seed)
+  - [x] Directory structure: `.buckets/data/<prefix>/<hash>/xl.meta` + chunks
+  - [x] Atomic write-then-rename pattern for consistency
+  - [x] BLAKE2b-256 checksums for each chunk
+  - [x] 8+4 Reed-Solomon default configuration
+- [x] **Storage API Header** (`include/buckets_storage.h` - 354 lines):
+  - [x] Object operations: put, get, delete, head, stat
+  - [x] xl.meta structure with stat, erasure, checksums, metadata
+  - [x] Storage configuration (data_dir, inline_threshold, EC params)
+  - [x] Path utilities (compute_object_path, compute_hash_prefix, compute_object_hash)
+  - [x] Layout helpers (should_inline, calculate_chunk_size, select_erasure_config)
+- [x] **Layout Utilities** (`src/storage/layout.c` - 224 lines):
+  - [x] xxHash-64 path computation with deployment ID seed
+  - [x] 2-hex-char directory prefix (256 top-level dirs: 00-ff)
+  - [x] Object directory creation with recursive mkdir
+  - [x] Object existence checks
+  - [x] Chunk size calculation with SIMD alignment (16-byte boundary)
+  - [x] Inline threshold checks (<128KB)
+  - [x] Erasure config selection based on cluster size
+  - [x] ISO 8601 timestamp generation
+- [x] **Metadata Management** (`src/storage/metadata.c` - 409 lines):
+  - [x] xl.meta to JSON serialization (MinIO-compatible format)
+  - [x] JSON to xl.meta deserialization with validation
+  - [x] Atomic read/write operations (write-then-rename)
+  - [x] Memory management (proper cleanup of nested structures)
+  - [x] Checksum array handling
+  - [x] User metadata (content-type, custom headers)
+  - [x] Inline data base64 encoding/decoding
+- [x] **Chunk I/O** (`src/storage/chunk.c` - 150 lines):
+  - [x] Chunk file read with atomic I/O
+  - [x] Chunk file write with atomic write-then-rename
+  - [x] BLAKE2b-256 checksum computation
+  - [x] Checksum verification
+  - [x] Chunk deletion
+  - [x] Chunk existence checks
+  - [x] Naming convention: `part.<chunk-index>` (e.g., part.1, part.2)
+- [x] **Object Operations** (`src/storage/object.c` - 468 lines):
+  - [x] Storage initialization and cleanup
+  - [x] Configuration management (get_config)
+  - [x] Base64 encode/decode for inline objects
+  - [x] **PUT operation**:
+    - [x] Inline objects: base64 encode → write xl.meta only
+    - [x] Large objects: erasure encode (8+4) → compute checksums → write chunks + xl.meta
+  - [x] **GET operation**:
+    - [x] Read xl.meta
+    - [x] Inline objects: base64 decode
+    - [x] Large objects: read chunks → verify checksums → erasure decode
+  - [x] **DELETE operation**: Remove xl.meta and all chunks
+  - [x] **HEAD operation**: Return full xl.meta metadata
+  - [x] **STAT operation**: Return size and modTime only
+- [x] **Criterion Test Suite** (`tests/storage/test_object.c` - 480 lines, 18 tests passing):
+  - [x] Storage initialization (valid config, NULL config)
+  - [x] Small object write/read roundtrip (<128KB)
+  - [x] Inline object with metadata (content-type)
+  - [x] Inline size threshold (127KB vs 129KB)
+  - [x] Large object write/read (1MB with erasure coding)
+  - [x] Large object chunk verification (checksums, algorithm)
+  - [x] Multiple large objects (5 files with different patterns)
+  - [x] Delete inline object
+  - [x] Delete large object
+  - [x] Delete nonexistent object (error handling)
+  - [x] Head object (metadata only)
+  - [x] Stat object (size and modTime)
+  - [x] NULL parameter validation (put/get)
+  - [x] Get nonexistent object
+  - [x] Overwrite inline object
+  - [x] Overwrite large object
+- [x] **Total Storage Layer**: 1,605 lines of implementation + 480 lines of tests = 2,085 lines
+
+**Week 12 Metrics**:
+- **Files Created**: 6 files (1 header, 5 implementations, 1 test suite)
+- **Lines of Code**: 2,085 (1,605 implementation + 480 tests)
+- **Tests Written**: 18 tests (100% passing)
+- **Test Coverage**: Inline objects, large objects, checksums, error handling
+- **Build Time**: ~3 seconds (clean build with storage layer)
+- **Dependencies**: ISA-L (erasure), OpenSSL (BLAKE2b), cJSON (xl.meta)
+
 ---
 
 ## 📊 Progress Metrics
@@ -469,7 +554,8 @@
 | Week 8: BLAKE2b | ✅ Complete | 100% | 428 | ✅ Done |
 | Week 9: SHA-256 | ✅ Complete | 100% | 99 | ✅ Done |
 | Week 10-11: Reed-Solomon | ✅ Complete | 100% | 546 | ✅ Done |
-| **Phase 4: Storage Layer** | ⏳ Pending | 0% | ~5,000 target | Week 12-16 |
+| **Phase 4: Storage Layer** | 🔄 In Progress | 20% (1/5 weeks) | 1,605 / ~5,000 target | Week 12-16 |
+| Week 12: Object Primitives | ✅ Complete | 100% | 1,605 | ✅ Done |
 | **Phase 5: Location Registry** | ⏳ Pending | 0% | ~4,000 target | Week 17-20 |
 
 ### Week 1 Completion Metrics
@@ -1210,36 +1296,33 @@ Week 8 implemented BLAKE2b, a modern cryptographic hash function that is faster 
 - **Compiler Warnings**: 0 (strict flags: -Wall -Wextra -Werror -pedantic)
 - **Library Integration**: ISA-L 2.31.0 installed and linked
 
-### Cumulative Progress (Weeks 1-11, Phase 3 Complete)
-- **Total Production Code**: 4,574 lines
+### Cumulative Progress (Weeks 1-12, Phase 4 Week 1 Complete)
+- **Total Production Code**: 6,179 lines
   - Core: 255 lines
   - Cluster utilities: 2,326 lines
   - Hash utilities: 920 lines
   - Crypto utilities: 527 lines (blake2b: 428, sha256: 99)
-  - Erasure coding: 546 lines (new)
-- **Total Test Code**: 3,179 lines
+  - Erasure coding: 546 lines
+  - Storage layer: 1,605 lines (layout: 224, metadata: 409, chunk: 150, object: 468, plus 354 header)
+- **Total Test Code**: 3,659 lines
   - Manual tests: 310 lines
-  - Criterion tests: 2,869 lines (958 cluster + 817 hash + 470 crypto + 624 erasure)
-- **Total Headers**: 11 files (6 cluster + 2 hash + 2 crypto + 1 erasure)
-- **Test Coverage**: 159 tests passing, 1 skipped (99.4% pass rate)
-  - Phase 1: 60 tests (20 format, 18 topology, 22 endpoint - 1 known skip in format)
+  - Criterion tests: 3,349 lines (958 cluster + 817 hash + 470 crypto + 624 erasure + 480 storage)
+- **Total Headers**: 12 files (6 cluster + 2 hash + 2 crypto + 1 erasure + 1 storage)
+- **Test Coverage**: 165 tests passing, 1 skipped (99.4% pass rate)
+  - Phase 1: 62 tests (20 format + 18 topology + 22 endpoint + 2 cache - 1 known skip in format)
   - Phase 2: 49 tests (16 siphash + 16 xxhash + 17 ring)
-  - Phase 3: 48 tests (16 blake2b + 12 sha256 + 20 erasure)
-- **Build Artifacts**: libbuckets.a (~180KB with ISA-L), buckets binary (~100KB)
+  - Phase 3: 36 tests (16 blake2b + 20 erasure)
+  - Phase 4: 18 tests (storage layer)
+- **Build Artifacts**: libbuckets.a (~200KB with ISA-L + storage), buckets binary (~110KB)
 - **Phase 1 Progress**: 100% complete (4/4 weeks) ✅
 - **Phase 2 Progress**: 100% complete (3/3 weeks) ✅
 - **Phase 3 Progress**: 100% complete (4/4 weeks) ✅
-- **Overall Progress**: 21% complete (11/52 weeks)
+- **Phase 4 Progress**: 20% complete (1/5 weeks) 🔄
+- **Overall Progress**: 23% complete (12/52 weeks)
 
-### What's Next (Phase 4: Storage Layer - Weeks 12-16)
+### What's Next (Phase 4: Storage Layer - Weeks 13-16)
 
-**Week 12: Disk I/O & Object Primitives**
-- Basic object read/write operations
-- Chunk-based storage on disk
-- Directory structure for objects
-- Atomic write operations
-
-**Week 13: Object Metadata**
+**Week 13: Object Metadata & Versioning**
 - Extended attributes for metadata
 - Object versioning support
 - Metadata caching layer
@@ -1267,4 +1350,4 @@ Week 8 implemented BLAKE2b, a modern cryptographic hash function that is faster 
 
 ---
 
-**Next Update**: End of Week 12 (after Disk I/O & Object Primitives)
+**Next Update**: End of Week 13 (after Object Metadata & Versioning)
