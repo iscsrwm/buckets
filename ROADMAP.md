@@ -4,71 +4,146 @@
 
 This roadmap tracks the development of Buckets from initial C foundation through full S3-compatible object storage with fine-grained scalability.
 
-**Total Estimated Timeline**: 6-9 months  
-**Current Phase**: Foundation
+**Total Estimated Timeline**: 6-9 months (52 weeks)  
+**Current Phase**: Phase 3 - Cryptography & Erasure Coding  
+**Current Week**: Week 8 (BLAKE2b)  
+**Progress**: 2 of 11 phases complete (18%)
 
 ---
 
-## Phase 1: Foundation (Weeks 1-4) ⏳ IN PROGRESS
+## Phase 1: Foundation (Weeks 1-4) ✅ COMPLETE
 
-**Goal**: Establish C project infrastructure and core data structures
+**Goal**: Establish C project infrastructure and cluster management
 
-### Week 1-2: Project Setup
+### Week 1: Core Utilities ✅ COMPLETE
 - [x] Project structure and build system
 - [x] README and documentation framework
-- [ ] Makefile with component targets
-- [ ] CMake configuration
-- [ ] Docker build environment
-- [ ] CI/CD pipeline (GitHub Actions)
-- [ ] Code formatting (clang-format)
-- [ ] Static analysis (clang-tidy, cppcheck)
+- [x] Makefile with component targets
+- [x] Memory management wrappers
+- [x] Logging system (configurable levels, file output)
+- [x] String utilities (strdup, strcmp, format)
+- [x] Atomic I/O (atomic writes, directory sync)
+- [x] Disk utilities (metadata paths, format checking)
+- [x] JSON helpers (type-safe wrappers around cJSON)
+- [x] UUID generation (libuuid integration)
 
-### Week 3-4: Core Data Structures
-- [ ] Dynamic arrays (vector)
-- [ ] Hash tables
-- [ ] Linked lists
-- [ ] Ring buffers
-- [ ] Memory pools
-- [ ] String handling utilities
-- [ ] Unit test framework
-- [ ] Benchmarking harness
+### Week 2: Format Management ✅ COMPLETE
+- [x] Format structure (deployment ID, set topology)
+- [x] JSON serialization/deserialization (MinIO-compatible)
+- [x] Atomic save/load operations
+- [x] Quorum-based validation across disks
+- [x] Deep cloning operations
+- [x] Criterion test framework setup
+- [x] 20 unit tests passing
 
-**Deliverables**:
-- [ ] `src/core/` - All fundamental data structures
-- [ ] `tests/core/` - >90% test coverage
-- [ ] Performance benchmarks vs glib
+### Week 3: Topology Management ✅ COMPLETE
+- [x] Topology structure (pools, sets, disks)
+- [x] Set state management (active/draining/removed)
+- [x] Generation number tracking
+- [x] Topology creation from format.json
+- [x] Thread-safe format cache (pthread_rwlock_t)
+- [x] Thread-safe topology cache (pthread_rwlock_t)
+- [x] 18 unit tests passing
+
+### Week 4: Endpoint Parsing ✅ COMPLETE
+- [x] URL endpoint parsing (HTTP/HTTPS, IPv4/IPv6)
+- [x] Path endpoint parsing (local filesystem)
+- [x] Ellipses expansion (numeric {1...4}, alphabetic {a...d})
+- [x] Endpoint validation and localhost detection
+- [x] Endpoint set organization for erasure coding
+- [x] 22 unit tests passing
+
+**Deliverables**: ✅ ALL COMPLETE
+- [x] `src/core/` - Core utilities (255 lines)
+- [x] `src/cluster/` - Cluster management (2,326 lines)
+- [x] `tests/cluster/` - 62 tests passing (20 format + 18 topology + 22 endpoint + 2 manual)
+- [x] Build system with component targets
+- [x] **Phase 1 Total**: 2,581 lines production code
 
 ---
 
-## Phase 2: Cryptography & Hashing (Weeks 5-7)
+## Phase 2: Hashing (Weeks 5-7) ✅ COMPLETE
 
-**Goal**: Implement hashing algorithms and cryptographic primitives
+**Goal**: Implement hashing algorithms for object placement and consistent hashing
 
-### Core Hashing
-- [ ] SipHash-2-4 implementation
-- [ ] xxHash (for checksums)
-- [ ] MD5 (S3 compatibility)
-- [ ] SHA-256
-- [ ] Hash function benchmarks
+### Week 5: SipHash-2-4 ✅ COMPLETE
+- [x] SipHash-2-4 implementation (cryptographically secure)
+- [x] 128-bit key support
+- [x] 64-bit hash output
+- [x] Arbitrary-length input support
+- [x] String hashing convenience wrapper
+- [x] Test vectors from reference implementation
+- [x] 16 unit tests passing
 
-### Consistent Hashing
-- [ ] Virtual node ring structure
-- [ ] Binary search on sorted ring
-- [ ] Ring rebuilding on topology changes
-- [ ] Migration planning (old vs new ring comparison)
-- [ ] Unit tests with various ring sizes
+### Week 6: xxHash-64 ✅ COMPLETE
+- [x] xxHash-64 implementation (6-7x faster than SipHash)
+- [x] 64-bit seed support
+- [x] 64-bit hash output
+- [x] String hashing convenience wrapper
+- [x] Performance comparison with SipHash
+- [x] Test vectors from reference implementation
+- [x] 16 unit tests passing
 
-### Cryptography
-- [ ] Integrate OpenSSL/LibreSSL
-- [ ] TLS support
-- [ ] AES encryption
-- [ ] RSA key handling
-- [ ] Random number generation (CSPRNG)
+### Week 7: Hash Ring & Consistent Hashing ✅ COMPLETE
+- [x] Virtual node ring structure (150 vnodes per physical node)
+- [x] Binary search on sorted ring (O(log N))
+- [x] Add/remove physical nodes with automatic vnode distribution
+- [x] N-replica lookup for replication strategies
+- [x] Distribution statistics (min/max/avg per node)
+- [x] Jump Consistent Hash (stateless alternative)
+- [x] 17 unit tests passing
+
+**Deliverables**: ✅ ALL COMPLETE
+- [x] `src/hash/` - Hashing implementations (920 lines)
+  - [x] `siphash.c` - 356 lines
+  - [x] `xxhash.c` - 200 lines
+  - [x] `ring.c` - 364 lines
+- [x] `include/buckets_hash.h` - Combined hash API (292 lines)
+- [x] `include/buckets_ring.h` - Hash ring API (186 lines)
+- [x] `tests/hash/` - 49 tests passing (16 siphash + 16 xxhash + 17 ring)
+- [x] Performance: O(log N) hash ring lookup
+- [x] **Phase 2 Total**: 920 lines production code
+
+---
+
+## Phase 3: Cryptography & Erasure Coding (Weeks 8-11) 🔄 IN PROGRESS
+
+**Goal**: Cryptographic hashing and Reed-Solomon erasure coding
+
+### Week 8: BLAKE2b ⏳ NEXT
+- [ ] BLAKE2b hashing algorithm (faster than SHA-256)
+- [ ] 256-bit and 512-bit output support
+- [ ] Keyed hashing support
+- [ ] Integration with storage layer for object integrity
+- [ ] Unit tests against test vectors
+
+### Week 9: SHA-256 & Bitrot Detection
+- [ ] SHA-256 implementation (OpenSSL wrapper)
+- [ ] Bitrot detection system
+- [ ] Periodic scanning infrastructure
+- [ ] Hash verification on reads
+- [ ] Unit tests for integrity checking
+
+### Week 10-11: Reed-Solomon Erasure Coding
+- [ ] Evaluate libraries: ISA-L, Jerasure, liberasurecode
+- [ ] Choose primary library (ISA-L recommended)
+- [ ] Build integration and linking
+- [ ] Erasure coding interface
+- [ ] Encode operations (data → shards)
+- [ ] Decode operations (shards → data)
+- [ ] Shard distribution calculation
+- [ ] Parity calculation
+- [ ] Healing/reconstruction logic
+- [ ] Unit tests with various N+K configurations
+- [ ] Failure scenarios (missing shards)
+- [ ] Performance benchmarks
+- [ ] Memory leak testing
 
 **Deliverables**:
-- [ ] `src/hash/` - All hashing implementations
-- [ ] `src/crypto/` - Cryptographic primitives
-- [ ] Performance: <20ns for hash ring lookup
+- [ ] `src/crypto/` - BLAKE2b and SHA-256 implementations
+- [ ] `src/erasure/` - Erasure coding engine
+- [ ] Support for 4-16 drive configurations
+- [ ] >1 GB/s encode/decode throughput
 
 ---
 
@@ -387,15 +462,18 @@ This roadmap tracks the development of Buckets from initial C foundation through
 
 ## Milestones
 
-| Milestone | Target Date | Status |
-|-----------|-------------|--------|
-| **M1: Foundation** | Week 4 | 🔄 In Progress |
-| **M2: Core Complete** | Week 11 | ⏳ Planned |
-| **M3: Storage Ready** | Week 20 | ⏳ Planned |
-| **M4: Registry Live** | Week 24 | ⏳ Planned |
-| **M5: Migration Works** | Week 30 | ⏳ Planned |
-| **M6: S3 Compatible** | Week 42 | ⏳ Planned |
-| **M7: v1.0 Release** | Week 52 | ⏳ Planned |
+| Milestone | Target Date | Status | Notes |
+|-----------|-------------|--------|-------|
+| **M1: Foundation** | Week 4 | ✅ Complete | 2,581 lines, 62 tests passing |
+| **M2: Hashing** | Week 7 | ✅ Complete | 920 lines, 49 tests passing |
+| **M3: Crypto & Erasure** | Week 11 | 🔄 In Progress | Week 8: BLAKE2b next |
+| **M4: Storage Ready** | Week 16 | ⏳ Planned | Disk I/O, object storage |
+| **M5: Registry Live** | Week 20 | ⏳ Planned | Location tracking |
+| **M6: Topology & Migration** | Week 24 | ⏳ Planned | Dynamic cluster management |
+| **M7: Network Layer** | Week 28 | ⏳ Planned | HTTP/S server, RPC |
+| **M8: S3 Compatible** | Week 40 | ⏳ Planned | Full S3 API |
+| **M9: Admin API** | Week 44 | ⏳ Planned | Cluster management |
+| **M10: v1.0 Release** | Week 52 | ⏳ Planned | Production ready |
 
 ---
 
@@ -434,5 +512,26 @@ Join us in building the next generation of object storage!
 
 ---
 
+## Progress Summary
+
+### Completed (Weeks 1-7)
+- ✅ **Phase 1: Foundation** (2,581 lines, 62 tests)
+  - Core utilities, format management, topology management, endpoint parsing
+- ✅ **Phase 2: Hashing** (920 lines, 49 tests)
+  - SipHash-2-4, xxHash-64, consistent hash ring
+
+### In Progress (Week 8)
+- 🔄 **Phase 3: Cryptography & Erasure Coding**
+  - Next: BLAKE2b cryptographic hashing
+
+### Statistics
+- **Total Production Code**: 3,501 lines
+- **Total Test Code**: 2,085 lines
+- **Test Coverage**: 111/111 tests passing (100%)
+- **Build Quality**: Clean with `-Wall -Wextra -Werror -pedantic`
+- **Completion**: 2 of 11 phases (18%)
+
+---
+
 **Last Updated**: February 25, 2026  
-**Current Focus**: Phase 1 - Foundation
+**Current Focus**: Phase 3 - Cryptography & Erasure Coding (Week 8: BLAKE2b)

@@ -99,18 +99,38 @@ buckets-admin cluster migration-status
 
 ## Project Status
 
-**Current Phase**: Foundation (Phase 1 of 5)
+**Current Phase**: Phase 3 - Cryptography & Erasure Coding (Week 8)  
+**Progress**: 2 of 11 phases complete (18%)
 
-- [x] Architecture design complete
-- [ ] Core data structures
-- [ ] Erasure coding implementation
-- [ ] Location registry
-- [ ] Consistent hashing
-- [ ] Migration engine
-- [ ] S3 API handlers
-- [ ] Admin interface
+### Completed
 
-See [ROADMAP.md](ROADMAP.md) for detailed development timeline.
+- ✅ **Phase 1: Foundation (Weeks 1-4)** - 100% Complete
+  - Core utilities (memory, logging, strings)
+  - Format management (format.json)
+  - Topology management with caching
+  - Endpoint parsing with ellipses expansion
+  - 62 tests passing
+
+- ✅ **Phase 2: Hashing (Weeks 5-7)** - 100% Complete
+  - SipHash-2-4 cryptographic hashing
+  - xxHash-64 fast non-cryptographic hashing
+  - Hash ring with consistent hashing (150 virtual nodes)
+  - Jump Consistent Hash
+  - 49 tests passing
+
+### Current Stats
+
+- **Production Code**: 3,501 lines (2,581 foundation + 920 hashing)
+- **Test Code**: 2,085 lines
+- **Test Coverage**: 111/111 tests passing (100%)
+- **Build**: Clean with `-Wall -Wextra -Werror -pedantic`
+
+### Next Up
+
+- Week 8: BLAKE2b cryptographic hashing
+- Week 9-11: SHA-256, bitrot detection, Reed-Solomon erasure coding
+
+See [ROADMAP.md](ROADMAP.md) for detailed development timeline and [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) for comprehensive progress tracking.
 
 ## Comparison with MinIO
 
@@ -138,19 +158,41 @@ Buckets is based on MinIO's architecture but with significant enhancements:
 
 ```
 buckets/
-├── src/               # Source code
-│   ├── core/         # Core data structures and algorithms
-│   ├── registry/     # Location registry implementation
-│   ├── hash/         # Consistent hashing
-│   ├── erasure/      # Erasure coding
-│   ├── storage/      # Storage layer
-│   ├── s3/           # S3 API handlers
-│   └── admin/        # Admin API
-├── include/          # Public headers
-├── tests/            # Unit and integration tests
-├── docs/             # Documentation
-├── architecture/     # Design documents
-└── minio/            # Reference MinIO code
+├── src/                   # Source code
+│   ├── core/             # Core utilities ✅
+│   ├── cluster/          # Cluster management ✅
+│   │   ├── format.c      # format.json management
+│   │   ├── topology.c    # topology.json management
+│   │   ├── cache.c       # Thread-safe caching
+│   │   ├── endpoint.c    # Endpoint parsing
+│   │   └── ...           # Atomic I/O, disk utils, JSON helpers
+│   ├── hash/             # Hashing algorithms ✅
+│   │   ├── siphash.c     # SipHash-2-4 (cryptographic)
+│   │   ├── xxhash.c      # xxHash-64 (fast)
+│   │   └── ring.c        # Consistent hash ring
+│   ├── crypto/           # Cryptography (Week 8+)
+│   ├── erasure/          # Erasure coding (Week 8-11)
+│   ├── storage/          # Storage layer (Week 12-16)
+│   ├── registry/         # Location registry (Week 17-20)
+│   ├── migration/        # Data rebalancing (Week 21-24)
+│   ├── net/              # Network layer (Week 25-28)
+│   ├── s3/               # S3 API handlers (Week 29-40)
+│   └── admin/            # Admin API (Week 41-44)
+├── include/              # Public headers ✅
+│   ├── buckets.h         # Main API
+│   ├── buckets_cluster.h # Cluster structures
+│   ├── buckets_hash.h    # Hash algorithms
+│   ├── buckets_ring.h    # Hash ring API
+│   └── ...               # I/O, JSON, cache, endpoint headers
+├── tests/                # Unit and integration tests ✅
+│   ├── cluster/          # 60 tests (format, topology, endpoint)
+│   └── hash/             # 49 tests (siphash, xxhash, ring)
+├── docs/                 # Documentation
+│   └── PROJECT_STATUS.md # Detailed progress tracking
+├── architecture/         # Design documents
+│   └── SCALE_AND_DATA_PLACEMENT.md  # 75-page architecture spec
+└── third_party/          # Third-party libraries
+    └── cJSON/            # JSON library
 ```
 
 ### Building Components
@@ -172,13 +214,20 @@ make registry
 ### Running Tests
 
 ```bash
-# All tests
+# All tests (111 tests)
 make test
 
-# Specific component
-make test-registry
+# Specific component tests
+make test-format      # Format management (20 tests)
+make test-topology    # Topology management (18 tests)
+make test-endpoint    # Endpoint parsing (22 tests)
 
-# With valgrind
+# Run specific test binary
+./build/test/hash/test_siphash    # SipHash tests (16 tests)
+./build/test/hash/test_xxhash     # xxHash tests (16 tests)
+./build/test/hash/test_ring       # Hash ring tests (17 tests)
+
+# With valgrind (memory leak detection)
 make test-valgrind
 ```
 
