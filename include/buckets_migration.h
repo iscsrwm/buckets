@@ -104,6 +104,25 @@ typedef struct {
 } buckets_scanner_stats_t;
 
 /* ===================================================================
+ * Throttle (Week 28)
+ * ===================================================================*/
+
+/**
+ * Throttle structure
+ * 
+ * Token bucket algorithm for bandwidth limiting.
+ * Public structure allows zero-copy embedding in job or worker structures.
+ */
+typedef struct {
+    i64 tokens;                     /* Available tokens (bytes) */
+    i64 rate_bytes_per_sec;         /* Refill rate (bytes/sec) */
+    i64 burst_bytes;                /* Maximum burst size (bytes) */
+    i64 last_refill_us;             /* Last refill time (microseconds) */
+    bool enabled;                   /* Throttling enabled flag */
+    pthread_mutex_t lock;           /* Thread safety */
+} buckets_throttle_t;
+
+/* ===================================================================
  * Migration Job
  * ===================================================================*/
 
@@ -155,6 +174,12 @@ struct buckets_migration_job {
     /* Components */
     buckets_scanner_state_t *scanner;       /* Scanner (SCANNING state) */
     buckets_worker_pool_t *worker_pool;     /* Worker pool (MIGRATING state) */
+    buckets_throttle_t *throttle;           /* Bandwidth throttle (optional) */
+    
+    /* Checkpointing */
+    time_t last_checkpoint_time;            /* Last checkpoint save time */
+    i64 last_checkpoint_objects;            /* Objects migrated at last checkpoint */
+    char checkpoint_path[256];              /* Path to checkpoint file */
     
     /* Event callback */
     buckets_migration_event_callback_t callback;
@@ -431,6 +456,26 @@ int buckets_migration_job_save(buckets_migration_job_t *job, const char *path);
 buckets_migration_job_t* buckets_migration_job_load(const char *path);
 
 /**
+ * Resume migration from checkpoint (Week 30)
+ * 
+ * Loads checkpoint and restores job state with provided topologies and disks.
+ * Sets job to PAUSED state - caller should call resume() to continue.
+ * 
+ * @param checkpoint_path Path to checkpoint file
+ * @param old_topology Source topology
+ * @param new_topology Target topology
+ * @param disk_paths Array of disk paths
+ * @param disk_count Number of disks
+ * @return Job handle or NULL on error
+ */
+buckets_migration_job_t* buckets_migration_job_resume_from_checkpoint(
+    const char *checkpoint_path,
+    buckets_cluster_topology_t *old_topology,
+    buckets_cluster_topology_t *new_topology,
+    char **disk_paths,
+    int disk_count);
+
+/**
  * Cleanup job
  * 
  * @param job Job handle
@@ -440,20 +485,6 @@ void buckets_migration_job_cleanup(buckets_migration_job_t *job);
 /* ===================================================================
  * Throttle API (Week 28)
  * ===================================================================*/
-
-/**
- * Throttle structure
- * 
- * Token bucket algorithm for bandwidth limiting.
- */
-typedef struct {
-    i64 tokens;                     // Available tokens (bytes)
-    i64 rate_bytes_per_sec;         // Refill rate (bytes/sec)
-    i64 burst_bytes;                // Maximum burst size (bytes)
-    i64 last_refill_us;             // Last refill time (microseconds)
-    bool enabled;                   // Throttling enabled flag
-    pthread_mutex_t lock;           // Thread safety
-} buckets_throttle_t;
 
 /**
  * Initialize throttle

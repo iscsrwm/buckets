@@ -130,6 +130,54 @@ static void update_progress(buckets_migration_job_t *job)
     pthread_mutex_unlock(&job->lock);
 }
 
+/**
+ * Check if checkpoint should be saved
+ * 
+ * Criteria: Every 1000 objects OR every 5 minutes
+ */
+static bool should_checkpoint(buckets_migration_job_t *job)
+{
+    time_t now = time(NULL);
+    i64 objects_since_checkpoint = job->migrated_objects - job->last_checkpoint_objects;
+    time_t time_since_checkpoint = now - job->last_checkpoint_time;
+    
+    /* Checkpoint every 1000 objects */
+    if (objects_since_checkpoint >= 1000) {
+        return true;
+    }
+    
+    /* Checkpoint every 5 minutes (300 seconds) */
+    if (time_since_checkpoint >= 300) {
+        return true;
+    }
+    
+    return false;
+}
+
+/**
+ * Save checkpoint if needed
+ */
+static void save_checkpoint_if_needed(buckets_migration_job_t *job)
+{
+    if (!should_checkpoint(job)) {
+        return;
+    }
+    
+    buckets_info("Job %s: Saving checkpoint (objects: %lld, time: %llds since last)",
+                 job->job_id,
+                 (long long)job->migrated_objects,
+                 (long long)(time(NULL) - job->last_checkpoint_time));
+    
+    int ret = buckets_migration_job_save(job, job->checkpoint_path);
+    if (ret == BUCKETS_OK) {
+        job->last_checkpoint_time = time(NULL);
+        job->last_checkpoint_objects = job->migrated_objects;
+        buckets_info("Job %s: Checkpoint saved to %s", job->job_id, job->checkpoint_path);
+    } else {
+        buckets_warn("Job %s: Failed to save checkpoint: %d", job->job_id, ret);
+    }
+}
+
 /* ===================================================================
  * Public API
  * ===================================================================*/
@@ -179,6 +227,13 @@ buckets_migration_job_t* buckets_migration_job_create(i64 source_gen,
     /* Components initialized on demand */
     job->scanner = NULL;
     job->worker_pool = NULL;
+    job->throttle = NULL;  /* Throttle is optional */
+    
+    /* Checkpointing */
+    job->last_checkpoint_time = 0;
+    job->last_checkpoint_objects = 0;
+    snprintf(job->checkpoint_path, sizeof(job->checkpoint_path),
+             "/tmp/%s.checkpoint", job->job_id);
     
     /* No callback by default */
     job->callback = NULL;
@@ -212,6 +267,8 @@ int buckets_migration_job_start(buckets_migration_job_t *job)
     }
     
     job->start_time = time(NULL);
+    job->last_checkpoint_time = job->start_time;  /* Initialize checkpoint timer */
+    job->last_checkpoint_objects = 0;
     
     /* Initialize scanner */
     job->scanner = buckets_scanner_init(job->disk_paths, job->disk_count,
@@ -387,6 +444,9 @@ int buckets_migration_job_wait(buckets_migration_job_t *job)
         if (state == BUCKETS_MIGRATION_STATE_MIGRATING) {
             update_progress(job);
             
+            /* Save checkpoint if needed (every 1000 objects or 5 minutes) */
+            save_checkpoint_if_needed(job);
+            
             /* Fire progress callback */
             if (job->callback) {
                 job->callback(job, "progress", job->callback_user_data);
@@ -398,6 +458,10 @@ int buckets_migration_job_wait(buckets_migration_job_t *job)
                 
                 /* All tasks processed - mark complete */
                 transition_state(job, BUCKETS_MIGRATION_STATE_COMPLETED);
+                
+                /* Save final checkpoint */
+                buckets_migration_job_save(job, job->checkpoint_path);
+                
                 break;
             }
         }
@@ -626,6 +690,55 @@ buckets_migration_job_t* buckets_migration_job_load(const char *path)
                  job->job_id,
                  (long long)source_gen, (long long)target_gen,
                  (long long)job->migrated_objects, (long long)job->total_objects);
+    
+    return job;
+}
+
+buckets_migration_job_t* buckets_migration_job_resume_from_checkpoint(
+    const char *checkpoint_path,
+    buckets_cluster_topology_t *old_topology,
+    buckets_cluster_topology_t *new_topology,
+    char **disk_paths,
+    int disk_count)
+{
+    if (!checkpoint_path || !old_topology || !new_topology || !disk_paths || disk_count <= 0) {
+        return NULL;
+    }
+    
+    /* Load checkpoint */
+    buckets_migration_job_t *job = buckets_migration_job_load(checkpoint_path);
+    if (!job) {
+        buckets_error("Failed to load checkpoint from %s", checkpoint_path);
+        return NULL;
+    }
+    
+    /* Restore topologies and disk paths (not stored in checkpoint) */
+    job->old_topology = old_topology;
+    job->new_topology = new_topology;
+    job->disk_paths = disk_paths;
+    job->disk_count = disk_count;
+    
+    /* Initialize checkpoint path */
+    memcpy(job->checkpoint_path, checkpoint_path, 
+           strlen(checkpoint_path) < sizeof(job->checkpoint_path) ? 
+           strlen(checkpoint_path) : sizeof(job->checkpoint_path) - 1);
+    
+    /* Initialize checkpoint tracking */
+    job->last_checkpoint_time = time(NULL);
+    job->last_checkpoint_objects = job->migrated_objects;
+    
+    buckets_info("Job %s: Resuming from checkpoint (%lld/%lld objects migrated)",
+                 job->job_id,
+                 (long long)job->migrated_objects,
+                 (long long)job->total_objects);
+    
+    /* If job was in MIGRATING state when saved, transition to PAUSED */
+    /* Caller should call buckets_migration_job_resume() to continue */
+    if (job->state == BUCKETS_MIGRATION_STATE_MIGRATING) {
+        job->state = BUCKETS_MIGRATION_STATE_PAUSED;
+        buckets_info("Job %s: Loaded in PAUSED state, call resume() to continue", 
+                     job->job_id);
+    }
     
     return job;
 }

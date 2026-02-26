@@ -459,12 +459,16 @@ Test(orchestrator, job_persistence)
     g_ctx.job = buckets_migration_job_create(42, 43, g_ctx.old_topo, g_ctx.new_topo,
                                               g_ctx.disk_paths, g_ctx.disk_count);
     
-    /* Save should work (placeholder) */
+    /* Save should work */
     int ret = buckets_migration_job_save(g_ctx.job, "/tmp/test-job.json");
-    cr_assert_eq(ret, BUCKETS_OK, "Save should succeed (placeholder)");
+    cr_assert_eq(ret, BUCKETS_OK, "Save should succeed");
     
-    /* Load should work (placeholder) */
+    /* Load should work (Week 29 implementation) */
     buckets_migration_job_t *loaded = buckets_migration_job_load("/tmp/test-job.json");
-    /* Currently returns NULL (not implemented) */
-    cr_assert_null(loaded, "Load returns NULL (not implemented yet)");
+    cr_assert_not_null(loaded, "Load should succeed");
+    cr_assert_eq(loaded->source_generation, 42, "Source generation should match");
+    cr_assert_eq(loaded->target_generation, 43, "Target generation should match");
+    
+    /* Cleanup loaded job */
+    buckets_migration_job_cleanup(loaded);
 }

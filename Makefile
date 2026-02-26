@@ -217,6 +217,10 @@ test-checkpoint: $(TEST_BIN_DIR)/migration/test_checkpoint
 	@echo "Running migration checkpoint tests..."
 	@$<
 
+test-integration: $(TEST_BIN_DIR)/migration/test_integration
+	@echo "Running migration integration tests..."
+	@$<
+
 # Test binaries (Criterion-based tests)
 $(TEST_BIN_DIR)/cluster/test_format: $(TEST_DIR)/cluster/test_format.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
@@ -274,6 +278,11 @@ $(TEST_BIN_DIR)/migration/test_throttle: $(TEST_DIR)/migration/test_throttle.c $
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
 
 $(TEST_BIN_DIR)/migration/test_checkpoint: $(TEST_DIR)/migration/test_checkpoint.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/migration/test_integration: $(TEST_DIR)/migration/test_integration.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
 	@echo "CC TEST $<"
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
