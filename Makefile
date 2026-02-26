@@ -5,7 +5,7 @@
 CC := gcc
 CFLAGS := -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -pedantic -O2 -fPIC
 LDFLAGS := -lssl -lcrypto -luuid -lz -lisal -lpthread -lm
-INCLUDES := -Iinclude -Isrc -Ithird_party/cJSON
+INCLUDES := -Iinclude -Isrc -Ithird_party/cJSON -Ithird_party/mongoose
 
 # Debug flags
 DEBUG_FLAGS := -g -O0 -DDEBUG -fsanitize=address -fsanitize=undefined
@@ -34,10 +34,11 @@ NET_SRC := $(wildcard $(SRC_DIR)/net/*.c)
 S3_SRC := $(wildcard $(SRC_DIR)/s3/*.c)
 ADMIN_SRC := $(wildcard $(SRC_DIR)/admin/*.c)
 CJSON_SRC := third_party/cJSON/cJSON.c
+MONGOOSE_SRC := third_party/mongoose/mongoose.c
 
 ALL_SRC := $(CORE_SRC) $(CLUSTER_SRC) $(HASH_SRC) $(CRYPTO_SRC) $(ERASURE_SRC) \
            $(STORAGE_SRC) $(REGISTRY_SRC) $(TOPOLOGY_SRC) $(MIGRATION_SRC) \
-           $(NET_SRC) $(S3_SRC) $(ADMIN_SRC) $(CJSON_SRC)
+           $(NET_SRC) $(S3_SRC) $(ADMIN_SRC) $(CJSON_SRC) $(MONGOOSE_SRC)
 
 # Object files
 CORE_OBJ := $(CORE_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
@@ -53,10 +54,11 @@ NET_OBJ := $(NET_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 S3_OBJ := $(S3_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 ADMIN_OBJ := $(ADMIN_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 CJSON_OBJ := $(OBJ_DIR)/cJSON.o
+MONGOOSE_OBJ := $(OBJ_DIR)/mongoose.o
 
 ALL_OBJ := $(CORE_OBJ) $(CLUSTER_OBJ) $(HASH_OBJ) $(CRYPTO_OBJ) $(ERASURE_OBJ) \
            $(STORAGE_OBJ) $(REGISTRY_OBJ) $(TOPOLOGY_OBJ) $(MIGRATION_OBJ) \
-           $(NET_OBJ) $(S3_OBJ) $(ADMIN_OBJ) $(CJSON_OBJ)
+           $(NET_OBJ) $(S3_OBJ) $(ADMIN_OBJ) $(CJSON_OBJ) $(MONGOOSE_OBJ)
 
 # Test files
 TEST_SRC := $(wildcard $(TEST_DIR)/**/*.c)
@@ -105,6 +107,7 @@ directories:
 	@mkdir -p $(OBJ_DIR)/erasure $(OBJ_DIR)/storage $(OBJ_DIR)/registry
 	@mkdir -p $(OBJ_DIR)/topology $(OBJ_DIR)/migration $(OBJ_DIR)/net
 	@mkdir -p $(OBJ_DIR)/s3 $(OBJ_DIR)/admin
+	@mkdir -p $(TEST_BIN_DIR)/net $(TEST_BIN_DIR)/migration
 
 # Library target
 libbuckets: $(BUILD_DIR)/libbuckets.a $(BUILD_DIR)/libbuckets.so
@@ -134,6 +137,11 @@ $(OBJ_DIR)/cJSON.o: third_party/cJSON/cJSON.c
 	@echo "CC $<"
 	@$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
+# Compile mongoose (relaxed warnings for third-party code)
+$(OBJ_DIR)/mongoose.o: third_party/mongoose/mongoose.c
+	@echo "CC $<"
+	@$(CC) -std=gnu11 -D_GNU_SOURCE -O2 -fPIC -Wno-unused-variable -Wno-implicit-function-declaration -Wno-int-to-pointer-cast -Ithird_party/mongoose -c $< -o $@
+
 # Component-specific builds
 .PHONY: core cluster hash crypto erasure storage registry topology migration net s3 admin
 
@@ -151,7 +159,7 @@ s3: $(S3_OBJ)
 admin: $(ADMIN_OBJ)
 
 # Tests
-test: test-format test-topology test-endpoint test-erasure test-scanner test-worker test-orchestrator test-throttle test-checkpoint
+test: test-format test-topology test-endpoint test-erasure test-scanner test-worker test-orchestrator test-throttle test-checkpoint test-http-server test-router
 
 test-format: $(TEST_BIN_DIR)/cluster/test_format
 	@echo "Running format tests..."
@@ -226,6 +234,14 @@ test-checkpoint: $(TEST_BIN_DIR)/migration/test_checkpoint
 
 test-integration: $(TEST_BIN_DIR)/migration/test_integration
 	@echo "Running migration integration tests..."
+	@$<
+
+test-http-server: $(TEST_BIN_DIR)/net/test_http_server
+	@echo "Running HTTP server tests..."
+	@$<
+
+test-router: $(TEST_BIN_DIR)/net/test_router
+	@echo "Running router tests..."
 	@$<
 
 # Test binaries (Criterion-based tests)
@@ -320,6 +336,16 @@ $(TEST_BIN_DIR)/migration/test_checkpoint: $(TEST_DIR)/migration/test_checkpoint
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
 
 $(TEST_BIN_DIR)/migration/test_integration: $(TEST_DIR)/migration/test_integration.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/net/test_http_server: $(TEST_DIR)/net/test_http_server.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/net/test_router: $(TEST_DIR)/net/test_router.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
 	@echo "CC TEST $<"
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
