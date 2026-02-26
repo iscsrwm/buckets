@@ -2,7 +2,7 @@
 
 **Last Updated**: February 26, 2026  
 **Current Phase**: Phase 9 - S3 API Layer (Weeks 35-42) - 🔄 In Progress  
-**Current Week**: Week 39 Part 1 ✅ COMPLETE  
+**Current Week**: Week 39 Part 1 ✅ COMPLETE + Multi-Node Config ✅ COMPLETE  
 **Status**: 🟢 Active Development  
 **Overall Progress**: 39/52 weeks (75% complete)  
 **Phase 1 Status**: ✅ COMPLETE (Foundation - Weeks 1-4)  
@@ -3533,6 +3533,159 @@ Phase 7 implemented a complete background migration engine for rebalancing objec
 - ListParts: Query uploaded parts with pagination
 - Unit tests for multipart operations
 - Integration testing with AWS SDK/MinIO mc client
+
+---
+
+### Multi-Node Configuration Support ✅ **COMPLETE**
+
+**Goal**: Enable multi-node cluster configuration through JSON files, laying the groundwork for distributed object storage testing and operation.
+
+**Completed Features**:
+1. **JSON Configuration System** (`include/buckets_config.h`, `src/config/config.c`):
+   - Load and parse JSON configuration files with validation
+   - Structured configuration types for all components:
+     - `buckets_node_config_t`: Node identity and network settings
+     - `buckets_disk_config_t`: Storage disk paths
+     - `buckets_cluster_config_t`: Cluster topology and peer information
+     - `buckets_erasure_config_t`: Erasure coding parameters (K, M)
+     - `buckets_server_config_t`: HTTP server bind settings
+   - Comprehensive validation with detailed error messages
+   - Helper functions for JSON array parsing and string duplication
+
+2. **Server Command-Line Interface** (enhanced `src/main.c`):
+   - Added `--config <file>` flag for loading JSON configurations
+   - Legacy `--port <port>` flag still supported for backward compatibility
+   - Automatic configuration validation before server startup
+   - Graceful fallback to single-node mode if multi-disk init fails
+   - Informative startup logs showing all configuration parameters
+
+3. **Multi-Disk Storage Integration**:
+   - Automatic initialization of `buckets_multidisk_t` from config disk paths
+   - Graceful handling when disks are not formatted (format.json missing)
+   - Warning messages guide users to format disks before cluster operation
+   - Server continues in single-node mode if multi-disk init fails
+
+4. **Example Configuration Files**:
+   - `config/node1.json`: Node 1 on port 9001 with 4 disks
+   - `config/node2.json`: Node 2 on port 9002 with 4 disks
+   - `config/node3.json`: Node 3 on port 9003 with 4 disks
+   - Each config defines peer relationships for 3-node cluster
+   - Erasure coding configured as K=2, M=2 (2+2 parity)
+   - Single erasure set with 4 disks per set
+
+5. **Configuration Structure**:
+   ```json
+   {
+     "node": {
+       "id": "node1",
+       "address": "localhost",
+       "port": 9001,
+       "data_dir": "/tmp/buckets-node1"
+     },
+     "storage": {
+       "disks": [
+         "/tmp/buckets-node1/disk1",
+         "/tmp/buckets-node1/disk2",
+         "/tmp/buckets-node1/disk3",
+         "/tmp/buckets-node1/disk4"
+       ]
+     },
+     "cluster": {
+       "enabled": true,
+       "peers": ["localhost:9002", "localhost:9003"],
+       "sets": 1,
+       "disks_per_set": 4
+     },
+     "erasure": {
+       "enabled": true,
+       "data_shards": 2,
+       "parity_shards": 2
+     },
+     "server": {
+       "bind_address": "0.0.0.0",
+       "bind_port": 9001
+     }
+   }
+   ```
+
+6. **Build System Updates** (Makefile):
+   - Added `CONFIG_SRC` and `CONFIG_OBJ` targets
+   - Created `build/obj/config/` directory for object files
+   - Integrated config module into `libbuckets.a` and `libbuckets.so`
+
+**File Summary**:
+- **New file**: `include/buckets_config.h` (95 lines)
+  - Configuration structure definitions
+  - API for load, free, validate operations
+- **New file**: `src/config/config.c` (371 lines)
+  - JSON parsing with cJSON library
+  - Configuration validation logic
+  - Detailed logging for config loading
+- **New files**: `config/node1.json`, `config/node2.json`, `config/node3.json` (34 lines each)
+  - Example 3-node cluster configurations
+- **Modified**: `src/main.c` (+120 lines)
+  - `--config` flag parsing
+  - Configuration loading and validation
+  - Multi-disk initialization from config
+  - Enhanced startup logging
+- **Modified**: `Makefile` (+6 lines)
+  - CONFIG_SRC and CONFIG_OBJ variables
+  - Build directory creation for config/
+
+**Design Decisions**:
+1. **JSON Configuration Format**: Human-readable, widely supported, easy to edit
+   - Alternative: TOML/YAML (less common in C projects)
+   - cJSON library already integrated, no new dependencies
+   
+2. **Graceful Degradation**: Server starts even if multi-disk fails
+   - Allows testing S3 API without formatted disks
+   - Clear warnings guide users to format disks
+   - Production deployments would require formatted disks
+   
+3. **Type Safety**: Separate types prevent name conflicts
+   - `buckets_disk_config_t` vs `buckets_storage_config_t` (from storage layer)
+   - Clear distinction between config file structure and runtime structures
+   
+4. **Configuration Validation**: Fail fast with detailed errors
+   - Validate before attempting to start server
+   - Prevent cryptic runtime errors from invalid configs
+   - Check required fields, value ranges, logical consistency
+
+**Testing**:
+- Successfully loaded all three node configurations
+- Verified configuration validation catches invalid values
+- Started 3-node cluster simultaneously on ports 9001, 9002, 9003
+- Each node correctly identified itself with unique node ID
+- Cluster mode and erasure coding settings correctly loaded
+- Legacy `--port` mode still works for backward compatibility
+- Graceful handling of unformatted disks (warning, not error)
+
+**Verified Functionality**:
+```bash
+# Node 1
+$ ./bin/buckets server --config config/node1.json
+[INFO] Loading configuration from: config/node1.json
+[INFO] Node: node1 (localhost:9001)
+[INFO] Cluster: enabled (2 peers, 1 sets, 4 disks/set)
+[INFO] Erasure: enabled (K=2, M=2)
+[INFO] Server started successfully!
+[INFO] S3 API available at: http://localhost:9001/
+
+# Node 2 and Node 3 work identically on ports 9002 and 9003
+```
+
+**Next Steps**:
+- Implement disk formatting command: `buckets format --config <file>`
+- Initialize topology and registry on server startup
+- Integrate topology manager for cluster coordination
+- Connect S3 operations to distributed storage layer
+- Implement object placement across erasure sets
+- Test actual object distribution across 3-node cluster
+
+**Reference Implementation**:
+- MinIO's configuration system uses YAML with environment variable overrides
+- Buckets uses JSON for simplicity and cJSON library compatibility
+- Configuration validation patterns inspired by MinIO's startup checks
 
 ---
 
