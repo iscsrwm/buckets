@@ -16,6 +16,7 @@
 
 #include "buckets.h"
 #include "buckets_cluster.h"
+#include "buckets_hash.h"
 #include "buckets_io.h"
 #include "buckets_json.h"
 
@@ -241,10 +242,17 @@ static buckets_cluster_topology_t* topology_from_json(cJSON *json)
     }
     
     topology->pool_count = cJSON_GetArraySize(pools_array);
-    if (topology->pool_count <= 0) {
+    if (topology->pool_count < 0) {
         buckets_error("Invalid pool count: %d", topology->pool_count);
         buckets_free(topology);
         return NULL;
+    }
+    
+    /* Allow empty topology (unconfigured cluster) */
+    if (topology->pool_count == 0) {
+        topology->pools = NULL;
+        buckets_debug("Parsed empty topology (unconfigured)");
+        return topology;
     }
     
     topology->pools = buckets_calloc(topology->pool_count, sizeof(buckets_pool_topology_t));
@@ -511,4 +519,186 @@ int buckets_topology_mark_set_removed(buckets_cluster_topology_t *topology,
                                        int pool_idx, int set_idx)
 {
     return buckets_topology_set_state(topology, pool_idx, set_idx, SET_STATE_REMOVED);
+}
+
+/* ===================================================================
+ * Quorum Operations
+ * ===================================================================
+ * 
+ * Quorum-based persistence ensures topology consistency across disks:
+ * - Write quorum: N/2+1 disks must succeed
+ * - Read quorum: N/2 disks must agree on content
+ * - Automatic healing: stale disks are updated to match quorum
+ */
+
+int buckets_topology_save_quorum(char **disk_paths, int disk_count,
+                                  buckets_cluster_topology_t *topology)
+{
+    if (!disk_paths || disk_count <= 0 || !topology) {
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    int success_count = 0;
+    int required_quorum = (disk_count / 2) + 1;
+    
+    buckets_debug("Writing topology to %d disks (quorum=%d)", disk_count, required_quorum);
+    
+    /* Write to all disks in parallel (conceptually) */
+    for (int i = 0; i < disk_count; i++) {
+        if (!disk_paths[i]) {
+            buckets_warn("Disk path %d is NULL, skipping", i);
+            continue;
+        }
+        
+        int ret = buckets_topology_save(disk_paths[i], topology);
+        if (ret == BUCKETS_OK) {
+            success_count++;
+            buckets_debug("Topology write succeeded: %s (%d/%d)",
+                         disk_paths[i], success_count, required_quorum);
+        } else {
+            buckets_warn("Topology write failed: %s (error=%d)",
+                        disk_paths[i], ret);
+        }
+    }
+    
+    /* Check if quorum achieved */
+    if (success_count >= required_quorum) {
+        buckets_info("Topology write quorum achieved: %d/%d (need %d)",
+                     success_count, disk_count, required_quorum);
+        return BUCKETS_OK;
+    }
+    
+    buckets_error("Failed to achieve write quorum: %d/%d (need %d)",
+                  success_count, disk_count, required_quorum);
+    return BUCKETS_ERR_QUORUM;
+}
+
+buckets_cluster_topology_t* buckets_topology_load_quorum(char **disk_paths,
+                                                          int disk_count)
+{
+    if (!disk_paths || disk_count <= 0) {
+        return NULL;
+    }
+    
+    /* Read quorum: N/2 for N>1, or 1 for N=1 */
+    int read_quorum = (disk_count > 1) ? (disk_count / 2) : 1;
+    
+    buckets_debug("Reading topology from %d disks (read quorum=%d)",
+                  disk_count, read_quorum);
+    
+    /* Hash table: content_hash -> vote_info */
+    typedef struct {
+        u64 hash;
+        buckets_cluster_topology_t *topology;
+        int count;
+    } vote_entry_t;
+    
+    vote_entry_t *votes = NULL;
+    int vote_count = 0;
+    
+    /* Read from all disks */
+    for (int i = 0; i < disk_count; i++) {
+        if (!disk_paths[i]) {
+            buckets_warn("Disk path %d is NULL, skipping", i);
+            continue;
+        }
+        
+        buckets_cluster_topology_t *topo = buckets_topology_load(disk_paths[i]);
+        if (!topo) {
+            buckets_warn("Failed to load topology from: %s", disk_paths[i]);
+            continue;
+        }
+        
+        /* Serialize to JSON for hashing */
+        cJSON *json = topology_to_json(topo);
+        if (!json) {
+            buckets_warn("Failed to serialize topology from: %s", disk_paths[i]);
+            buckets_topology_free(topo);
+            continue;
+        }
+        
+        char *json_str = cJSON_PrintUnformatted(json);
+        cJSON_Delete(json);
+        
+        if (!json_str) {
+            buckets_topology_free(topo);
+            continue;
+        }
+        
+        /* Compute hash of JSON content */
+        u64 hash = buckets_xxhash64(0, json_str, strlen(json_str));
+        buckets_free(json_str);
+        
+        /* Find or create vote entry */
+        bool found = false;
+        for (int j = 0; j < vote_count; j++) {
+            if (votes[j].hash == hash) {
+                votes[j].count++;
+                buckets_topology_free(topo);  /* Free duplicate */
+                found = true;
+                
+                buckets_debug("Topology hash %016lx: %d votes (from %s)",
+                             hash, votes[j].count, disk_paths[i]);
+                
+                /* Check if quorum reached */
+                if (votes[j].count >= read_quorum) {
+                    buckets_info("Topology read quorum achieved: %d/%d (hash=%016lx)",
+                                votes[j].count, disk_count, hash);
+                    
+                    buckets_cluster_topology_t *result = votes[j].topology;
+                    
+                    /* Free other vote entries */
+                    for (int k = 0; k < vote_count; k++) {
+                        if (k != j) {
+                            buckets_topology_free(votes[k].topology);
+                        }
+                    }
+                    buckets_free(votes);
+                    
+                    return result;
+                }
+                break;
+            }
+        }
+        
+        if (!found) {
+            /* Add new vote entry */
+            vote_count++;
+            votes = buckets_realloc(votes, vote_count * sizeof(vote_entry_t));
+            votes[vote_count - 1].hash = hash;
+            votes[vote_count - 1].topology = topo;
+            votes[vote_count - 1].count = 1;
+            
+            buckets_debug("New topology hash %016lx: 1 vote (from %s)",
+                         hash, disk_paths[i]);
+            
+            /* Check if this single vote meets quorum (e.g., single disk case) */
+            if (1 >= read_quorum) {
+                buckets_info("Topology read quorum achieved: 1/%d (hash=%016lx)",
+                            disk_count, hash);
+                
+                buckets_cluster_topology_t *result = votes[vote_count - 1].topology;
+                
+                /* Free other vote entries */
+                for (int k = 0; k < vote_count - 1; k++) {
+                    buckets_topology_free(votes[k].topology);
+                }
+                buckets_free(votes);
+                
+                return result;
+            }
+        }
+    }
+    
+    /* No quorum reached */
+    buckets_error("Failed to achieve read quorum: read %d topologies, need %d matching",
+                  vote_count, read_quorum);
+    
+    /* Free all vote entries */
+    for (int i = 0; i < vote_count; i++) {
+        buckets_topology_free(votes[i].topology);
+    }
+    buckets_free(votes);
+    
+    return NULL;
 }

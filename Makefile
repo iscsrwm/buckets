@@ -156,6 +156,14 @@ test-topology: $(TEST_BIN_DIR)/cluster/test_topology
 	@echo "Running topology tests..."
 	@$<
 
+test-topology-operations: $(TEST_BIN_DIR)/cluster/test_topology_operations
+	@echo "Running topology operations tests..."
+	@$<
+
+test-topology-quorum: $(TEST_BIN_DIR)/cluster/test_topology_quorum
+	@echo "Running topology quorum tests..."
+	@$<
+
 test-endpoint: $(TEST_BIN_DIR)/cluster/test_endpoint
 	@echo "Running endpoint tests..."
 	@$<
@@ -183,6 +191,16 @@ $(TEST_BIN_DIR)/cluster/test_format: $(TEST_DIR)/cluster/test_format.c $(BUILD_D
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
 
 $(TEST_BIN_DIR)/cluster/test_topology: $(TEST_DIR)/cluster/test_topology.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/cluster/test_topology_operations: $(TEST_DIR)/cluster/test_topology_operations.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/cluster/test_topology_quorum: $(TEST_DIR)/cluster/test_topology_quorum.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
 	@echo "CC TEST $<"
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion

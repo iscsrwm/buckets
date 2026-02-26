@@ -99,8 +99,8 @@ buckets-admin cluster migration-status
 
 ## Project Status
 
-**Current Phase**: Phase 5 - Location Registry (Week 17)  
-**Progress**: 4 phases complete, Week 17 of 52 (33%)
+**Current Phase**: Phase 6 - Topology Management (Week 22)  
+**Progress**: 5 phases complete, Week 22 of 52 (42%)
 
 ### Completed
 
@@ -138,40 +138,56 @@ buckets-admin cluster migration-status
   - Performance benchmarks: 5-10 GB/s encode, 27-51 GB/s decode
   - 33 tests passing
 
-- 🔄 **Phase 5: Location Registry (Weeks 17-20)** - 25% Complete (Week 17/20)
+- ✅ **Phase 5: Location Registry (Weeks 17-20)** - 100% Complete
   - ✅ Registry core implementation (Week 17)
+  - ✅ Batch operations & benchmarks (Week 18)
+  - ✅ Storage layer fixes (Week 19)
+  - ✅ Production integration (Week 20)
   - Thread-safe LRU cache (1M entries, 5-min TTL)
   - Write-through cache with persistent storage
   - Self-hosted on Buckets (.buckets-registry bucket)
-  - JSON serialization with storage integration
-  - 8 tests passing (5 simple + 3 integration)
-  - Comprehensive architecture documentation
+  - Automatic tracking of PUT/GET/DELETE operations
+  - Cache hit latency: 0.323 μs
+  - 15 tests passing (100%)
+
+- 🔄 **Phase 6: Topology Management (Weeks 21-24)** - 67% Complete (Week 22/24)
+  - ✅ Dynamic topology operations (Week 21)
+    - Add pool, add set, state transitions
+    - Generation tracking
+    - 8 tests passing
+  - ✅ Quorum persistence (Week 22)
+    - Write quorum (N/2+1 disks)
+    - Read quorum with consensus (N/2 matching)
+    - 12 tests passing
+  - ⏳ Topology manager API (Week 23)
+  - ⏳ Production readiness (Week 24)
 
 ### Current Stats
 
-- **Production Code**: 10,186 lines
+- **Production Code**: 10,933 lines
   - Core: 255 lines
-  - Cluster: 2,326 lines
+  - Cluster: 2,630 lines
   - Hash: 920 lines
   - Crypto: 527 lines
   - Erasure: 546 lines
-  - Storage: 4,132 lines
-  - Registry: 1,173 lines
-- **Test Code**: 4,488 lines
-- **Test Coverage**: 188/188 tests passing (100%)
+  - Storage: 4,171 lines
+  - Registry: 1,266 lines
+  - Benchmarks: 618 lines
+- **Test Code**: 5,555 lines
+- **Test Coverage**: 220/220 tests passing (100%)
 - **Build**: Clean with `-Wall -Wextra -Werror -pedantic`
-- **Library Size**: ~260KB (includes ISA-L)
+- **Library Size**: ~250KB (includes ISA-L)
 
 ### Performance Highlights
 
 - **Erasure Coding**: 5-10 GB/s encode, 27-51 GB/s decode (Intel ISA-L)
 - **Hashing**: BLAKE2b 880 MB/s (1.6x faster than SHA-256)
 - **Reconstruction**: 31-52 GB/s with missing disks
-- **Registry Lookups**: <5ms target (cache hit ~1 μs, cache miss ~1-5 ms)
+- **Registry Lookups**: 0.323 μs cache hit, ~1-5ms cache miss
 
 ### Next Up
 
-- Week 18-20: Registry batch operations, range queries, integration with object operations
+- Week 23-24: Topology manager API, peer coordination, production readiness
 
 See [ROADMAP.md](ROADMAP.md) for detailed development timeline and [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) for comprehensive progress tracking.
 

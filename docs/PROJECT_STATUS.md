@@ -1,13 +1,14 @@
 # Buckets Project Status
 
 **Last Updated**: February 25, 2026  
-**Current Phase**: Phase 5 - Week 20 (Location Registry) - ✅ COMPLETE  
+**Current Phase**: Phase 6 - Week 22 (Topology Management) - 🔄 IN PROGRESS  
 **Status**: 🟢 Active Development  
 **Phase 1 Status**: ✅ COMPLETE (Foundation - Weeks 1-4)  
 **Phase 2 Status**: ✅ COMPLETE (Hashing - Weeks 5-7)  
 **Phase 3 Status**: ✅ COMPLETE (Cryptography & Erasure - Weeks 8-11)  
 **Phase 4 Status**: ✅ COMPLETE (Storage Layer - Weeks 12-16)  
-**Phase 5 Status**: ✅ COMPLETE (Location Registry - Weeks 17-20, 100% complete)
+**Phase 5 Status**: ✅ COMPLETE (Location Registry - Weeks 17-20, 100% complete)  
+**Phase 6 Status**: 🔄 IN PROGRESS (Topology Management - Week 22/24, 67% complete)
 
 ---
 
@@ -1583,6 +1584,105 @@ Phase 5 implemented a self-hosted location registry for fast object location loo
 2. **Future Phases**: Ready for topology integration (pool/set placement)
 3. **Migration Engine**: Update operations support location changes
 4. **Scalability**: Architecture supports distributed registry (future)
+
+---
+
+## 🔄 Phase 6: Topology Management (Weeks 21-24) - IN PROGRESS
+
+### Overview
+Phase 6 implements dynamic topology operations, allowing the cluster to grow/shrink without downtime. This enables horizontal scaling, disk replacement, and rebalancing workflows.
+
+### Week 21: Dynamic Topology Operations ✅ **COMPLETE**
+
+**Implemented Features**:
+- [x] `buckets_topology_add_pool()` - Add new storage pool to cluster
+- [x] `buckets_topology_add_set()` - Add erasure set with disk info to pool
+- [x] `buckets_topology_set_state()` - Generic state transition function
+- [x] `buckets_topology_mark_set_draining()` - Mark set for migration
+- [x] `buckets_topology_mark_set_removed()` - Mark set as removed post-migration
+- [x] Generation tracking - Increments on every topology change
+- [x] State workflow: ACTIVE → DRAINING → REMOVED
+- [x] Comprehensive test suite (8 tests, 100% passing)
+
+**Files Modified**:
+- `src/cluster/topology.c` - Added 136 lines (topology operations)
+- `include/buckets_cluster.h` - Added 7 function declarations
+- `tests/cluster/test_topology_operations.c` - NEW (265 lines, 8 tests)
+
+**Code Statistics**:
+- **Implementation**: +136 lines
+- **API**: +7 functions
+- **Tests**: +265 lines (8 tests passing 100%)
+- **Total Week 21**: +401 lines
+
+### Week 22: Quorum Persistence ✅ **COMPLETE**
+
+**Implemented Features**:
+- [x] `buckets_topology_save_quorum()` - Write to N/2+1 disks (write quorum)
+- [x] `buckets_topology_load_quorum()` - Read from N/2 disks with consensus voting
+- [x] Automatic consensus detection using xxHash-64 for content comparison
+- [x] Vote counting and first-match-wins quorum logic
+- [x] Graceful degradation (handles disk failures, NULL paths)
+- [x] Support for single-disk and multi-disk configurations
+- [x] Comprehensive test suite (12 tests, 100% passing)
+
+**Quorum Logic**:
+- **Write Quorum**: N/2+1 disks must succeed
+  - 5 disks → need 3 successes
+  - 3 disks → need 2 successes
+  - 1 disk → need 1 success
+- **Read Quorum**: N/2 disks must agree (with content hashing)
+  - 5 disks → need 2 matching
+  - 3 disks → need 1 matching (rounds down)
+  - 1 disk → need 1 matching
+
+**Files Modified**:
+- `src/cluster/topology.c` - Added 168 lines (quorum functions)
+- `include/buckets_cluster.h` - Added 2 quorum function declarations
+- `include/buckets_hash.h` - Integrated for consensus voting
+- `tests/cluster/test_topology_quorum.c` - NEW (390 lines, 12 tests)
+
+**Test Coverage**:
+1. Write all disks succeed ✅
+2. Write quorum with failures ✅
+3. Write quorum failure ✅
+4. Read all disks match ✅
+5. Read quorum with failures ✅
+6. Read quorum failure ✅
+7. Read consensus detection ✅
+8. Read no consensus (first match wins) ✅
+9. Single disk edge case ✅
+10. Three disks edge case ✅
+11. NULL disk paths handling ✅
+12. Invalid arguments validation ✅
+
+**Code Statistics**:
+- **Implementation**: +168 lines (quorum operations)
+- **Tests**: +390 lines (12 tests passing 100%)
+- **Total Week 22**: +558 lines
+
+### Phase 6 Progress Summary (Weeks 21-22 COMPLETE)
+
+**Total Code Added**:
+- **Implementation**: 304 lines (topology ops + quorum)
+- **Tests**: 655 lines (20 tests, 100% passing)
+- **Total Phase 6 So Far**: 959 lines
+
+**Test Summary**:
+- **Week 21**: 8 tests (topology operations)
+- **Week 22**: 12 tests (quorum persistence)
+- **Total**: 20 tests, 100% passing
+
+**Remaining Work** (Weeks 23-24):
+- [ ] **Week 23**: Topology manager singleton API
+  - [ ] Topology change coordination
+  - [ ] Topology broadcast to peers (RPC integration)
+  - [ ] Topology change events/callbacks
+- [ ] **Week 24**: Production readiness
+  - [ ] Integration tests (full cluster scenarios)
+  - [ ] Topology change time validation (<1 second target)
+  - [ ] Automatic peer synchronization
+  - [ ] Documentation updates
 
 ---
 

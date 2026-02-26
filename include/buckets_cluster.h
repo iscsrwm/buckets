@@ -105,6 +105,11 @@ int buckets_topology_set_state(buckets_cluster_topology_t *topology,
                                 int pool_idx, int set_idx,
                                 buckets_set_state_t new_state);
 
+/* Topology quorum operations */
+int buckets_topology_save_quorum(char **disk_paths, int disk_count,
+                                  buckets_cluster_topology_t *topology);
+buckets_cluster_topology_t* buckets_topology_load_quorum(char **disk_paths, int disk_count);
+
 /* ===== Endpoints ===== */
 
 typedef struct {
