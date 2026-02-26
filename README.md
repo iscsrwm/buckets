@@ -262,7 +262,7 @@ buckets/
 │   ├── buckets_storage.h # Storage layer
 │   └── buckets_registry.h # Location registry
 ├── tests/                # Unit and integration tests ✅
-│   ├── cluster/          # 62 tests (format, topology, endpoint, cache)
+│   ├── cluster/          # 80 tests (format, topology, endpoint, cache, manager, integration)
 │   ├── hash/             # 49 tests (siphash, xxhash, ring)
 │   ├── crypto/           # 28 tests (blake2b, sha256)
 │   ├── erasure/          # 20 tests (reed-solomon)
@@ -299,16 +299,20 @@ make registry
 ### Running Tests
 
 ```bash
-# All tests (188 tests)
+# All tests (242 tests)
 make test
 
 # Specific component tests
-make test-format      # Format management (20 tests)
-make test-topology    # Topology management (18 tests)
-make test-endpoint    # Endpoint parsing (22 tests)
-make test-hash        # Hash algorithms (49 tests)
-make test-crypto      # Cryptography (28 tests)
-make test-erasure     # Erasure coding (20 tests)
+make test-format              # Format management (20 tests)
+make test-topology            # Topology core (18 tests)
+make test-topology-operations # Topology operations (8 tests)
+make test-topology-quorum     # Quorum persistence (12 tests)
+make test-topology-manager    # Topology manager (11 tests)
+make test-topology-integration # Integration tests (9 tests)
+make test-endpoint            # Endpoint parsing (22 tests)
+make test-hash                # Hash algorithms (49 tests)
+make test-crypto              # Cryptography (28 tests)
+make test-erasure             # Erasure coding (20 tests)
 
 # Run specific test binary
 ./build/test/registry/test_registry_simple      # Registry simple (5 tests)
