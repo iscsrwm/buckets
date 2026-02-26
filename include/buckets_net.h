@@ -515,6 +515,209 @@ int buckets_health_checker_set_callback(buckets_health_checker_t *checker,
  */
 void buckets_health_checker_free(buckets_health_checker_t *checker);
 
+/* ===================================================================
+ * RPC Message Format (Week 34)
+ * ===================================================================*/
+
+/* Forward declaration for cJSON */
+struct cJSON;
+
+/**
+ * RPC request structure
+ */
+typedef struct {
+    char id[64];                   /* UUID request ID */
+    char method[128];              /* RPC method name (e.g., "topology.update") */
+    struct cJSON *params;          /* JSON parameters */
+    time_t timestamp;              /* Request timestamp */
+} buckets_rpc_request_t;
+
+/**
+ * RPC response structure
+ */
+typedef struct {
+    char id[64];                   /* UUID request ID (matches request) */
+    struct cJSON *result;          /* JSON result (NULL if error) */
+    int error_code;                /* Error code (0 if success) */
+    char error_message[256];       /* Error message (empty if success) */
+    time_t timestamp;              /* Response timestamp */
+} buckets_rpc_response_t;
+
+/**
+ * RPC handler function type
+ * 
+ * @param method RPC method name
+ * @param params JSON parameters
+ * @param result Output: JSON result (handler allocates)
+ * @param error_code Output: error code (0 = success)
+ * @param error_message Output: error message buffer (256 bytes)
+ * @param user_data User data
+ * @return BUCKETS_OK on success
+ */
+typedef int (*buckets_rpc_handler_t)(const char *method,
+                                      struct cJSON *params,
+                                      struct cJSON **result,
+                                      int *error_code,
+                                      char *error_message,
+                                      void *user_data);
+
+/**
+ * RPC context (opaque)
+ */
+typedef struct buckets_rpc_context buckets_rpc_context_t;
+
+/**
+ * Create RPC context
+ * 
+ * @param pool Connection pool for RPC calls
+ * @return RPC context or NULL on error
+ */
+buckets_rpc_context_t* buckets_rpc_context_create(buckets_conn_pool_t *pool);
+
+/**
+ * Register RPC method handler
+ * 
+ * @param ctx RPC context
+ * @param method Method name (e.g., "topology.update")
+ * @param handler Handler function
+ * @param user_data User data passed to handler
+ * @return BUCKETS_OK on success
+ */
+int buckets_rpc_register_handler(buckets_rpc_context_t *ctx,
+                                  const char *method,
+                                  buckets_rpc_handler_t handler,
+                                  void *user_data);
+
+/**
+ * Call RPC method on peer
+ * 
+ * @param ctx RPC context
+ * @param peer_endpoint Peer endpoint (e.g., "http://host:port")
+ * @param method RPC method name
+ * @param params JSON parameters (may be NULL)
+ * @param response Output: RPC response (caller must free with buckets_rpc_response_free)
+ * @param timeout_ms Timeout in milliseconds (0 = default 5000ms)
+ * @return BUCKETS_OK on success
+ */
+int buckets_rpc_call(buckets_rpc_context_t *ctx,
+                     const char *peer_endpoint,
+                     const char *method,
+                     struct cJSON *params,
+                     buckets_rpc_response_t **response,
+                     int timeout_ms);
+
+/**
+ * Dispatch RPC request (used by server)
+ * 
+ * @param ctx RPC context
+ * @param request RPC request
+ * @param response Output: RPC response (caller must free with buckets_rpc_response_free)
+ * @return BUCKETS_OK on success
+ */
+int buckets_rpc_dispatch(buckets_rpc_context_t *ctx,
+                         buckets_rpc_request_t *request,
+                         buckets_rpc_response_t **response);
+
+/**
+ * Parse RPC request from JSON string
+ * 
+ * @param json JSON string
+ * @param request Output: parsed request (caller must free with buckets_rpc_request_free)
+ * @return BUCKETS_OK on success
+ */
+int buckets_rpc_request_parse(const char *json, buckets_rpc_request_t **request);
+
+/**
+ * Serialize RPC request to JSON string
+ * 
+ * @param request RPC request
+ * @param json Output: JSON string (caller must free)
+ * @return BUCKETS_OK on success
+ */
+int buckets_rpc_request_serialize(buckets_rpc_request_t *request, char **json);
+
+/**
+ * Parse RPC response from JSON string
+ * 
+ * @param json JSON string
+ * @param response Output: parsed response (caller must free with buckets_rpc_response_free)
+ * @return BUCKETS_OK on success
+ */
+int buckets_rpc_response_parse(const char *json, buckets_rpc_response_t **response);
+
+/**
+ * Serialize RPC response to JSON string
+ * 
+ * @param response RPC response
+ * @param json Output: JSON string (caller must free)
+ * @return BUCKETS_OK on success
+ */
+int buckets_rpc_response_serialize(buckets_rpc_response_t *response, char **json);
+
+/**
+ * Free RPC request
+ * 
+ * @param request RPC request
+ */
+void buckets_rpc_request_free(buckets_rpc_request_t *request);
+
+/**
+ * Free RPC response
+ * 
+ * @param response RPC response
+ */
+void buckets_rpc_response_free(buckets_rpc_response_t *response);
+
+/**
+ * Free RPC context
+ * 
+ * @param ctx RPC context
+ */
+void buckets_rpc_context_free(buckets_rpc_context_t *ctx);
+
+/* ===================================================================
+ * Broadcast Primitives (Week 34)
+ * ===================================================================*/
+
+/**
+ * Broadcast result
+ */
+typedef struct {
+    int total;                     /* Total peers in broadcast */
+    int success;                   /* Number of successful responses */
+    int failed;                    /* Number of failed calls */
+    buckets_rpc_response_t **responses;  /* Array of responses (success only) */
+    char **failed_peers;           /* Array of failed peer endpoints */
+} buckets_broadcast_result_t;
+
+/**
+ * Broadcast RPC to all peers
+ * 
+ * Sends RPC to all peers in grid and collects responses.
+ * Partial failures are acceptable (check result->success vs result->failed).
+ * 
+ * @param ctx RPC context
+ * @param grid Peer grid with target peers
+ * @param method RPC method name
+ * @param params JSON parameters (may be NULL)
+ * @param result Output: broadcast result (caller must free with buckets_broadcast_result_free)
+ * @param timeout_ms Timeout per peer in milliseconds (0 = default 5000ms)
+ * @return BUCKETS_OK on success (even if some peers fail)
+ */
+int buckets_rpc_broadcast(buckets_rpc_context_t *ctx,
+                          buckets_peer_grid_t *grid,
+                          const char *method,
+                          struct cJSON *params,
+                          buckets_broadcast_result_t **result,
+                          int timeout_ms);
+
+/**
+ * Free broadcast result
+ * 
+ * @param result Broadcast result
+ */
+void buckets_broadcast_result_free(buckets_broadcast_result_t *result);
+
 #ifdef __cplusplus
 }
 #endif

@@ -90,7 +90,9 @@ help:
 	@echo "  test-orchestrator - Test migration orchestrator"
 	@echo "  test-throttle - Test migration throttle"
 	@echo "  test-checkpoint - Test migration checkpoint"
-	@echo "  test-valgrind- Run tests with valgrind"
+	@echo "  test-rpc      - Test RPC message format"
+	@echo "  test-broadcast- Test RPC broadcast"
+	@echo "  test-valgrind - Run tests with valgrind"
 	@echo "  debug        - Build with debug symbols"
 	@echo "  profile      - Build with profiling"
 	@echo "  clean        - Remove build artifacts"
@@ -159,7 +161,7 @@ s3: $(S3_OBJ)
 admin: $(ADMIN_OBJ)
 
 # Tests
-test: test-format test-topology test-endpoint test-erasure test-scanner test-worker test-orchestrator test-throttle test-checkpoint test-http-server test-router test-conn-pool test-peer-grid
+test: test-format test-topology test-endpoint test-erasure test-scanner test-worker test-orchestrator test-throttle test-checkpoint test-http-server test-router test-conn-pool test-peer-grid test-rpc test-broadcast
 
 test-format: $(TEST_BIN_DIR)/cluster/test_format
 	@echo "Running format tests..."
@@ -250,6 +252,14 @@ test-conn-pool: $(TEST_BIN_DIR)/net/test_conn_pool
 
 test-peer-grid: $(TEST_BIN_DIR)/net/test_peer_grid
 	@echo "Running peer grid tests..."
+	@$<
+
+test-rpc: $(TEST_BIN_DIR)/net/test_rpc
+	@echo "Running RPC tests..."
+	@$<
+
+test-broadcast: $(TEST_BIN_DIR)/net/test_broadcast
+	@echo "Running broadcast tests..."
 	@$<
 
 # Test binaries (Criterion-based tests)
@@ -364,6 +374,16 @@ $(TEST_BIN_DIR)/net/test_conn_pool: $(TEST_DIR)/net/test_conn_pool.c $(BUILD_DIR
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
 
 $(TEST_BIN_DIR)/net/test_peer_grid: $(TEST_DIR)/net/test_peer_grid.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/net/test_rpc: $(TEST_DIR)/net/test_rpc.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/net/test_broadcast: $(TEST_DIR)/net/test_broadcast.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
 	@echo "CC TEST $<"
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
