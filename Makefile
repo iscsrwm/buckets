@@ -33,12 +33,13 @@ MIGRATION_SRC := $(wildcard $(SRC_DIR)/migration/*.c)
 NET_SRC := $(wildcard $(SRC_DIR)/net/*.c)
 S3_SRC := $(wildcard $(SRC_DIR)/s3/*.c)
 ADMIN_SRC := $(wildcard $(SRC_DIR)/admin/*.c)
+CONFIG_SRC := $(wildcard $(SRC_DIR)/config/*.c)
 CJSON_SRC := third_party/cJSON/cJSON.c
 MONGOOSE_SRC := third_party/mongoose/mongoose.c
 
 ALL_SRC := $(CORE_SRC) $(CLUSTER_SRC) $(HASH_SRC) $(CRYPTO_SRC) $(ERASURE_SRC) \
            $(STORAGE_SRC) $(REGISTRY_SRC) $(TOPOLOGY_SRC) $(MIGRATION_SRC) \
-           $(NET_SRC) $(S3_SRC) $(ADMIN_SRC) $(CJSON_SRC) $(MONGOOSE_SRC)
+           $(NET_SRC) $(S3_SRC) $(ADMIN_SRC) $(CONFIG_SRC) $(CJSON_SRC) $(MONGOOSE_SRC)
 
 # Object files
 CORE_OBJ := $(CORE_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
@@ -53,12 +54,13 @@ MIGRATION_OBJ := $(MIGRATION_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 NET_OBJ := $(NET_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 S3_OBJ := $(S3_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 ADMIN_OBJ := $(ADMIN_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+CONFIG_OBJ := $(CONFIG_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 CJSON_OBJ := $(OBJ_DIR)/cJSON.o
 MONGOOSE_OBJ := $(OBJ_DIR)/mongoose.o
 
 ALL_OBJ := $(CORE_OBJ) $(CLUSTER_OBJ) $(HASH_OBJ) $(CRYPTO_OBJ) $(ERASURE_OBJ) \
            $(STORAGE_OBJ) $(REGISTRY_OBJ) $(TOPOLOGY_OBJ) $(MIGRATION_OBJ) \
-           $(NET_OBJ) $(S3_OBJ) $(ADMIN_OBJ) $(CJSON_OBJ) $(MONGOOSE_OBJ)
+           $(NET_OBJ) $(S3_OBJ) $(ADMIN_OBJ) $(CONFIG_OBJ) $(CJSON_OBJ) $(MONGOOSE_OBJ)
 
 # Test files
 TEST_SRC := $(wildcard $(TEST_DIR)/**/*.c)
@@ -108,7 +110,7 @@ directories:
 	@mkdir -p $(OBJ_DIR)/core $(OBJ_DIR)/cluster $(OBJ_DIR)/hash $(OBJ_DIR)/crypto
 	@mkdir -p $(OBJ_DIR)/erasure $(OBJ_DIR)/storage $(OBJ_DIR)/registry
 	@mkdir -p $(OBJ_DIR)/topology $(OBJ_DIR)/migration $(OBJ_DIR)/net
-	@mkdir -p $(OBJ_DIR)/s3 $(OBJ_DIR)/admin
+	@mkdir -p $(OBJ_DIR)/s3 $(OBJ_DIR)/admin $(OBJ_DIR)/config
 	@mkdir -p $(TEST_BIN_DIR)/net $(TEST_BIN_DIR)/migration $(TEST_BIN_DIR)/s3
 
 # Library target
