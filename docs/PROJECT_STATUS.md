@@ -3675,7 +3675,7 @@ $ ./bin/buckets server --config config/node1.json
 ```
 
 **Next Steps**:
-- Implement disk formatting command: `buckets format --config <file>`
+- Implement disk formatting command: `buckets format --config <file>` ✅ DONE
 - Initialize topology and registry on server startup
 - Integrate topology manager for cluster coordination
 - Connect S3 operations to distributed storage layer
@@ -3686,6 +3686,168 @@ $ ./bin/buckets server --config config/node1.json
 - MinIO's configuration system uses YAML with environment variable overrides
 - Buckets uses JSON for simplicity and cJSON library compatibility
 - Configuration validation patterns inspired by MinIO's startup checks
+
+---
+
+### Disk Formatting Command ✅ **COMPLETE**
+
+**Goal**: Implement `buckets format --config <file>` command to prepare disks for cluster operation by creating format.json and topology.json metadata files.
+
+**Completed Features**:
+1. **Format Command** (`src/main.c`):
+   - New `format` command with `--config` and `--force` options
+   - `format_disks_from_config()` helper function (131 lines)
+   - Validates configuration before formatting
+   - Checks if disks already formatted (prevents accidental data loss)
+   - `--force` flag allows reformatting (with warning)
+
+2. **Format Initialization**:
+   - Generates unique deployment ID (cluster UUID) using `buckets_format_new()`
+   - Creates format structure with erasure set topology
+   - Assigns unique disk UUID to each disk in the set
+   - Saves format.json to each disk with `buckets_format_save()`
+
+3. **Topology Initialization**:
+   - Creates topology from format using `buckets_topology_from_format()`
+   - Initializes pool/set hierarchy based on configuration
+   - Saves topology.json to each disk with `buckets_topology_save()`
+   - Sets generation counter to 0 (increments on topology changes)
+
+4. **Format Structure** (format.json):
+   ```json
+   {
+     "version": "1",
+     "format": "erasure",
+     "id": "353ad490-e978-4cfc-a7b6-8c9a877439ec",
+     "xl": {
+       "version": "3",
+       "this": "be1088fa-...",
+       "distributionAlgo": "SIPMOD+PARITY",
+       "sets": [
+         ["disk1-uuid", "disk2-uuid", "disk3-uuid", "disk4-uuid"]
+       ]
+     }
+   }
+   ```
+
+5. **Topology Structure** (topology.json):
+   ```json
+   {
+     "version": 1,
+     "generation": 1,
+     "deploymentId": "353ad490-...",
+     "vnodeFactor": 150,
+     "pools": [{
+       "idx": 0,
+       "sets": [{
+         "idx": 0,
+         "state": "active",
+         "disks": [
+           {"uuid": "disk1-uuid", "endpoint": "", "capacity": "0"},
+           ...
+         ]
+       }]
+     }]
+   }
+   ```
+
+6. **Server Integration**:
+   - Server now successfully loads formatted disks
+   - Multi-disk initialization reports set/disk configuration
+   - Logs: "Multi-disk initialization complete: 1 sets, 4 disks per set"
+   - Each node has unique deployment ID
+
+**File Summary**:
+- **Modified**: `src/main.c` (+186 lines)
+  - format_disks_from_config() function
+  - Format command handler
+  - Enhanced usage help text
+
+**Usage**:
+```bash
+# Format disks for node1
+$ ./bin/buckets format --config config/node1.json
+[INFO] Formatting 4 disks for cluster
+[INFO] Created format with deployment_id: 353ad490-e978-4cfc-a7b6-8c9a877439ec
+[INFO] Formatting disk /tmp/buckets-node1/disk1 (set 0, disk 0, uuid=be1088fa...)
+[INFO] Saved format to disk: /tmp/buckets-node1/disk1
+[INFO] Successfully formatted all disks
+
+# Attempt to reformat (prevented)
+$ ./bin/buckets format --config config/node1.json
+[WARN] Disk /tmp/buckets-node1/disk1 is already formatted
+Error: Some disks are already formatted.
+Use --force to reformat (WARNING: destroys existing data)
+
+# Force reformat
+$ ./bin/buckets format --config config/node1.json --force
+[WARN] Force formatting enabled - existing data will be destroyed!
+[INFO] Created format with deployment_id: 2a604167-6085-4299-beef-20d85d7f0f93
+[INFO] Successfully formatted all disks
+```
+
+**Design Decisions**:
+1. **Unique Deployment ID per Node**: Each node gets its own deployment ID
+   - Alternative: Shared deployment ID across all nodes (requires coordination)
+   - Current approach allows independent initialization
+   - Nodes can be added/removed without coordination ceremony
+   
+2. **Format Validation**: Prevent accidental reformatting
+   - Requires explicit `--force` flag to overwrite existing format
+   - Warns user that data will be destroyed
+   - Protects against accidental data loss
+   
+3. **Atomic Format Files**: format.json and topology.json written atomically
+   - Uses `buckets_json_save()` with atomic write flag
+   - Prevents corrupted metadata from partial writes
+   - Safe for concurrent access
+
+**Testing**:
+- Formatted 3 nodes with 4 disks each (12 disks total)
+- Each node received unique deployment ID
+- format.json created correctly on all disks with proper erasure set topology
+- topology.json created with pool/set hierarchy
+- Server successfully loads formatted disks
+- Multi-disk initialization works: "1 sets, 4 disks per set"
+- All 3 nodes start simultaneously and serve S3 API
+- Reformat protection works (blocks without --force)
+- Force reformat works (creates new deployment ID)
+
+**Verified Functionality**:
+```bash
+# Check format.json
+$ cat /tmp/buckets-node1/disk1/.buckets.sys/format.json | jq .
+{
+  "version": "1",
+  "format": "erasure",
+  "id": "353ad490-e978-4cfc-a7b6-8c9a877439ec",
+  "xl": {
+    "version": "3",
+    "this": "be1088fa-b9e0-4569-8d9c-50e213d3db64",
+    "distributionAlgo": "SIPMOD+PARITY",
+    "sets": [["be1088fa-...", "0c5918e8-...", "9baf54c0-...", "54ad8dad-..."]]
+  }
+}
+
+# Check topology.json
+$ cat /tmp/buckets-node1/disk1/.buckets.sys/topology.json | jq .pools[0].sets[0].disks | head
+[
+  {"uuid": "be1088fa-...", "endpoint": "", "capacity": "0"},
+  {"uuid": "0c5918e8-...", "endpoint": "", "capacity": "0"},
+  ...
+]
+```
+
+**Next Steps**:
+- Initialize topology and registry on server startup (currently formatted but not loaded)
+- Connect S3 PUT/GET operations to multi-disk storage layer
+- Implement distributed object placement using SIPMOD+PARITY algorithm
+- Test actual object writes across erasure-coded disk sets
+
+**Reference Implementation**:
+- MinIO's `cmd/format-erasure.go` for format structure
+- MinIO's disk initialization uses shared deployment ID (requires quorum)
+- Buckets uses independent deployment IDs (simplified bootstrapping)
 
 ---
 
