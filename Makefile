@@ -84,6 +84,7 @@ help:
 	@echo "  test-core    - Test core components"
 	@echo "  test-hash    - Test hashing"
 	@echo "  test-scanner - Test migration scanner"
+	@echo "  test-worker  - Test migration workers"
 	@echo "  test-valgrind- Run tests with valgrind"
 	@echo "  debug        - Build with debug symbols"
 	@echo "  profile      - Build with profiling"
@@ -147,7 +148,7 @@ s3: $(S3_OBJ)
 admin: $(ADMIN_OBJ)
 
 # Tests
-test: test-format test-topology test-endpoint test-erasure test-scanner
+test: test-format test-topology test-endpoint test-erasure test-scanner test-worker
 
 test-format: $(TEST_BIN_DIR)/cluster/test_format
 	@echo "Running format tests..."
@@ -197,6 +198,10 @@ test-scanner: $(TEST_BIN_DIR)/migration/test_scanner
 	@echo "Running migration scanner tests..."
 	@$<
 
+test-worker: $(TEST_BIN_DIR)/migration/test_worker
+	@echo "Running migration worker tests..."
+	@$<
+
 # Test binaries (Criterion-based tests)
 $(TEST_BIN_DIR)/cluster/test_format: $(TEST_DIR)/cluster/test_format.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
@@ -234,6 +239,11 @@ $(TEST_BIN_DIR)/erasure/test_erasure: $(TEST_DIR)/erasure/test_erasure.c $(BUILD
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lisal -lcriterion
 
 $(TEST_BIN_DIR)/migration/test_scanner: $(TEST_DIR)/migration/test_scanner.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/migration/test_worker: $(TEST_DIR)/migration/test_worker.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
 	@echo "CC TEST $<"
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion

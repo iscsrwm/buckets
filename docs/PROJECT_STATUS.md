@@ -1,7 +1,7 @@
 # Buckets Project Status
 
 **Last Updated**: February 25, 2026  
-**Current Phase**: Phase 7 - Week 25 (Background Migration) - ✅ COMPLETE  
+**Current Phase**: Phase 7 - Week 26 (Background Migration) - ✅ COMPLETE  
 **Status**: 🟢 Active Development  
 **Phase 1 Status**: ✅ COMPLETE (Foundation - Weeks 1-4)  
 **Phase 2 Status**: ✅ COMPLETE (Hashing - Weeks 5-7)  
@@ -9,7 +9,7 @@
 **Phase 4 Status**: ✅ COMPLETE (Storage Layer - Weeks 12-16)  
 **Phase 5 Status**: ✅ COMPLETE (Location Registry - Weeks 17-20, 100% complete)  
 **Phase 6 Status**: ✅ COMPLETE (Topology Management - Weeks 21-24, 100% complete)  
-**Phase 7 Status**: 🔄 IN PROGRESS (Background Migration - Weeks 25-30, Week 25 complete)
+**Phase 7 Status**: 🔄 IN PROGRESS (Background Migration - Weeks 25-30, Weeks 25-26 complete)
 
 ---
 
@@ -2090,11 +2090,106 @@ Phase 7 implements background data migration for rebalancing objects after topol
 - **Scan speed**: Limited by disk I/O (directory traversal)
 - **Sorting**: O(n log n) qsort by size at end
 
-**Next Steps** (Week 26):
-- Migration workers (parallel object movement)
-- Worker pool (16 threads)
-- Task queue (producer-consumer)
-- Object movement operations (read, write, delete)
+**Next Steps** (Week 26): COMPLETE ✅
+
+### Week 26: Migration Workers ✅ **COMPLETE**
+
+**Goal**: Parallel object movement with thread pool
+
+**Implemented Features**:
+- [x] Worker pool with configurable thread count (default: 16)
+- [x] Thread-safe task queue (producer-consumer pattern)
+- [x] Migration operations (read → write → registry update → delete)
+- [x] Retry logic with exponential backoff (3 attempts, 100ms-5s)
+- [x] Progress tracking and statistics (per-worker and global)
+- [x] Graceful shutdown and cleanup
+- [x] Comprehensive test suite (12 tests, 100% passing)
+
+**Architecture**:
+- **Task Queue**: Circular buffer with condition variables for blocking operations
+- **Worker Threads**: Each thread independently pops tasks and executes migrations
+- **Retry Strategy**: 3 attempts with exponential backoff (100ms → 200ms → 400ms, max 5s)
+- **Statistics**: Thread-safe tracking of completed/failed tasks, bytes migrated, throughput
+- **Shutdown**: Broadcast signals to wake all threads, join cleanly
+
+**Functions Implemented**:
+1. `buckets_worker_pool_create()` - Initialize pool with topologies and disk paths
+2. `buckets_worker_pool_start()` - Start worker threads
+3. `buckets_worker_pool_submit()` - Submit tasks to queue
+4. `buckets_worker_pool_wait()` - Wait for all tasks to complete
+5. `buckets_worker_pool_stop()` - Graceful shutdown
+6. `buckets_worker_pool_get_stats()` - Retrieve statistics
+7. `buckets_worker_pool_free()` - Cleanup pool
+
+**Internal Implementation**:
+- `task_queue_t` - Thread-safe circular buffer with mutex/cond vars
+- `task_queue_init/push/pop/shutdown/free()` - Queue operations
+- `execute_migration()` - Full migration workflow (4 steps)
+- `execute_migration_with_retry()` - Retry wrapper with backoff
+- `worker_thread_main()` - Worker thread loop
+- `read_source_object()` - Read from old location (placeholder for storage API)
+- `write_destination_object()` - Write to new location (placeholder for storage API)
+- `update_registry()` - Update location registry (placeholder for registry API)
+- `delete_source_object()` - Cleanup old location (placeholder for storage API)
+
+**Files Created/Modified**:
+- `include/buckets_migration.h` - Added worker pool API (85 lines)
+  - Worker pool opaque type
+  - Worker statistics structure
+  - 7 public API functions
+- `src/migration/worker.c` - NEW (692 lines)
+  - Task queue implementation (180 lines)
+  - Worker pool state (20 lines)
+  - Migration operations (200 lines)
+  - Worker thread logic (80 lines)
+  - Public API (212 lines)
+- `tests/migration/test_worker.c` - NEW (522 lines, 12 tests)
+
+**Test Coverage** (12 tests, 100% passing):
+1. Worker pool creation ✅
+2. NULL argument validation ✅
+3. Start worker threads ✅
+4. Submit empty task queue (error case) ✅
+5. Submit single task ✅
+6. Submit multiple tasks (10) ✅
+7. Get worker statistics ✅
+8. Stop worker pool ✅
+9. Large task batch (100 tasks, 16 workers) ✅
+10. Default worker count (0 → 16) ✅
+11. Worker pool cleanup ✅
+12. Submit before start (error case) ✅
+
+**Code Statistics**:
+- **Header additions**: 85 lines (worker pool API)
+- **Implementation**: 692 lines (worker.c)
+- **Tests**: 522 lines (12 comprehensive tests)
+- **Total Week 26**: **1,299 lines**
+
+**Performance Characteristics**:
+- **Parallelism**: N worker threads (configurable, default 16)
+- **Queue capacity**: 10,000 tasks
+- **Retry policy**: 3 attempts, exponential backoff (100ms base, 2x multiplier, 5s max)
+- **Thread safety**: Mutex-protected queue and stats
+- **Blocking**: Producer blocks if queue full, consumer blocks if empty
+- **Throughput tracking**: MB/s calculated from bytes migrated and elapsed time
+
+**Design Decisions**:
+1. **Producer-Consumer Pattern**: Classic threading pattern with condition variables
+2. **Placeholder Operations**: Storage operations are stubs (will integrate with storage API later)
+3. **Non-Fatal Source Deletion**: If source delete fails, continue (cleanup can happen later)
+4. **Nanosleep for Retries**: Uses `nanosleep()` instead of `usleep()` for portability
+5. **Graceful Shutdown**: Queue shutdown wakes all threads, allowing clean exit
+
+**Integration Notes**:
+- Week 26 operations are currently placeholders
+- Week 27+ will integrate with actual storage layer (`buckets_object_read/write/delete`)
+- Registry updates will use `buckets_registry_record()` when integrated
+
+**Next Steps** (Week 27):
+- Migration orchestration (job management)
+- State machine (IDLE → SCANNING → MIGRATING → COMPLETE/FAILED)
+- Pause/resume capability
+- Job persistence and recovery
 
 ---
 

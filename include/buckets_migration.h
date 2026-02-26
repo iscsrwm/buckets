@@ -186,6 +186,100 @@ int buckets_scanner_get_stats(buckets_scanner_state_t *scanner,
 void buckets_scanner_cleanup(buckets_scanner_state_t *scanner);
 
 /* ===================================================================
+ * Worker Pool
+ * ===================================================================*/
+
+/**
+ * Worker pool state (opaque)
+ */
+typedef struct buckets_worker_pool buckets_worker_pool_t;
+
+/**
+ * Worker statistics
+ */
+typedef struct {
+    i64 tasks_completed;        /* Tasks successfully migrated */
+    i64 tasks_failed;           /* Tasks that failed after retries */
+    i64 bytes_migrated;         /* Total bytes migrated */
+    i64 active_workers;         /* Workers currently processing */
+    i64 idle_workers;           /* Workers waiting for tasks */
+    double throughput_mbps;     /* Current throughput in MB/s */
+} buckets_worker_stats_t;
+
+/* ===================================================================
+ * Worker Pool API
+ * ===================================================================*/
+
+/**
+ * Create worker pool
+ * 
+ * @param num_workers Number of worker threads (default: 16)
+ * @param old_topology Source topology
+ * @param new_topology Target topology
+ * @param disk_paths Array of disk paths
+ * @param disk_count Number of disks
+ * @return Worker pool or NULL on error
+ */
+buckets_worker_pool_t* buckets_worker_pool_create(int num_workers,
+                                                    buckets_cluster_topology_t *old_topology,
+                                                    buckets_cluster_topology_t *new_topology,
+                                                    char **disk_paths,
+                                                    int disk_count);
+
+/**
+ * Start worker threads
+ * 
+ * @param pool Worker pool
+ * @return BUCKETS_OK on success
+ */
+int buckets_worker_pool_start(buckets_worker_pool_t *pool);
+
+/**
+ * Submit tasks to worker pool
+ * 
+ * @param pool Worker pool
+ * @param tasks Array of migration tasks
+ * @param task_count Number of tasks
+ * @return BUCKETS_OK on success
+ */
+int buckets_worker_pool_submit(buckets_worker_pool_t *pool,
+                                 buckets_migration_task_t *tasks,
+                                 int task_count);
+
+/**
+ * Wait for all tasks to complete
+ * 
+ * @param pool Worker pool
+ * @return BUCKETS_OK on success
+ */
+int buckets_worker_pool_wait(buckets_worker_pool_t *pool);
+
+/**
+ * Stop worker pool (graceful shutdown)
+ * 
+ * @param pool Worker pool
+ * @return BUCKETS_OK on success
+ */
+int buckets_worker_pool_stop(buckets_worker_pool_t *pool);
+
+/**
+ * Get worker statistics
+ * 
+ * @param pool Worker pool
+ * @param stats Output statistics
+ * @return BUCKETS_OK on success
+ */
+int buckets_worker_pool_get_stats(buckets_worker_pool_t *pool,
+                                    buckets_worker_stats_t *stats);
+
+/**
+ * Free worker pool
+ * 
+ * @param pool Worker pool
+ */
+void buckets_worker_pool_free(buckets_worker_pool_t *pool);
+
+/* ===================================================================
  * Migration Job API (Preview - will implement in Week 27)
  * ===================================================================*/
 
