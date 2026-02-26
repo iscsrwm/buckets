@@ -27,6 +27,8 @@
 #include "buckets.h"
 #include "buckets_cluster.h"
 #include "buckets_migration.h"
+#include "buckets_io.h"
+#include "cJSON.h"
 
 /* ===================================================================
  * State Machine Helpers
@@ -482,8 +484,52 @@ int buckets_migration_job_save(buckets_migration_job_t *job, const char *path)
         return BUCKETS_ERR_INVALID_ARG;
     }
     
-    /* TODO: Implement JSON serialization (Week 29) */
-    buckets_info("Job %s: Save to %s (not implemented)", job->job_id, path);
+    pthread_mutex_lock(&job->lock);
+    
+    // Create checkpoint JSON
+    cJSON *root = cJSON_CreateObject();
+    if (!root) {
+        pthread_mutex_unlock(&job->lock);
+        return BUCKETS_ERR_NOMEM;
+    }
+    
+    // Job identification
+    cJSON_AddStringToObject(root, "job_id", job->job_id);
+    cJSON_AddNumberToObject(root, "source_generation", (double)job->source_generation);
+    cJSON_AddNumberToObject(root, "target_generation", (double)job->target_generation);
+    
+    // State
+    cJSON_AddNumberToObject(root, "state", (double)job->state);
+    cJSON_AddNumberToObject(root, "checkpoint_time", (double)time(NULL));
+    cJSON_AddNumberToObject(root, "start_time", (double)job->start_time);
+    
+    // Progress
+    cJSON_AddNumberToObject(root, "total_objects", (double)job->total_objects);
+    cJSON_AddNumberToObject(root, "migrated_objects", (double)job->migrated_objects);
+    cJSON_AddNumberToObject(root, "failed_objects", (double)job->failed_objects);
+    cJSON_AddNumberToObject(root, "bytes_total", (double)job->bytes_total);
+    cJSON_AddNumberToObject(root, "bytes_migrated", (double)job->bytes_migrated);
+    
+    pthread_mutex_unlock(&job->lock);
+    
+    // Serialize to string
+    char *json_str = cJSON_Print(root);
+    cJSON_Delete(root);
+    
+    if (!json_str) {
+        return BUCKETS_ERR_NOMEM;
+    }
+    
+    // Write atomically to file
+    int ret = buckets_atomic_write(path, json_str, strlen(json_str));
+    cJSON_free(json_str);
+    
+    if (ret != BUCKETS_OK) {
+        buckets_error("Job %s: Failed to save checkpoint to %s", job->job_id, path);
+        return ret;
+    }
+    
+    buckets_info("Job %s: Checkpoint saved to %s", job->job_id, path);
     
     return BUCKETS_OK;
 }
@@ -494,10 +540,94 @@ buckets_migration_job_t* buckets_migration_job_load(const char *path)
         return NULL;
     }
     
-    /* TODO: Implement JSON deserialization (Week 29) */
-    buckets_info("Load from %s (not implemented)", path);
+    // Read checkpoint file
+    void *json_data = NULL;
+    size_t json_len = 0;
     
-    return NULL;
+    int ret = buckets_atomic_read(path, &json_data, &json_len);
+    if (ret != BUCKETS_OK) {
+        buckets_error("Failed to load checkpoint from %s", path);
+        return NULL;
+    }
+    
+    // Parse JSON
+    cJSON *root = cJSON_Parse((char*)json_data);
+    buckets_free(json_data);
+    
+    if (!root) {
+        buckets_error("Failed to parse checkpoint JSON from %s", path);
+        return NULL;
+    }
+    
+    // Extract job ID
+    cJSON *job_id_json = cJSON_GetObjectItem(root, "job_id");
+    if (!job_id_json || !cJSON_IsString(job_id_json)) {
+        buckets_error("Checkpoint missing job_id");
+        cJSON_Delete(root);
+        return NULL;
+    }
+    
+    // Extract generations
+    cJSON *source_gen_json = cJSON_GetObjectItem(root, "source_generation");
+    cJSON *target_gen_json = cJSON_GetObjectItem(root, "target_generation");
+    
+    if (!source_gen_json || !target_gen_json) {
+        buckets_error("Checkpoint missing generation numbers");
+        cJSON_Delete(root);
+        return NULL;
+    }
+    
+    i64 source_gen = (i64)cJSON_GetNumberValue(source_gen_json);
+    i64 target_gen = (i64)cJSON_GetNumberValue(target_gen_json);
+    
+    // Create job structure (Note: topologies and disk paths need to be set by caller)
+    buckets_migration_job_t *job = buckets_calloc(1, sizeof(buckets_migration_job_t));
+    if (!job) {
+        cJSON_Delete(root);
+        return NULL;
+    }
+    
+    // Copy job ID
+    strncpy(job->job_id, cJSON_GetStringValue(job_id_json), sizeof(job->job_id) - 1);
+    
+    job->source_generation = source_gen;
+    job->target_generation = target_gen;
+    
+    // Extract state
+    cJSON *state_json = cJSON_GetObjectItem(root, "state");
+    if (state_json) {
+        job->state = (buckets_migration_state_t)cJSON_GetNumberValue(state_json);
+    }
+    
+    // Extract timestamps
+    cJSON *start_time_json = cJSON_GetObjectItem(root, "start_time");
+    if (start_time_json) {
+        job->start_time = (time_t)cJSON_GetNumberValue(start_time_json);
+    }
+    
+    // Extract progress
+    cJSON *total_json = cJSON_GetObjectItem(root, "total_objects");
+    cJSON *migrated_json = cJSON_GetObjectItem(root, "migrated_objects");
+    cJSON *failed_json = cJSON_GetObjectItem(root, "failed_objects");
+    cJSON *bytes_total_json = cJSON_GetObjectItem(root, "bytes_total");
+    cJSON *bytes_migrated_json = cJSON_GetObjectItem(root, "bytes_migrated");
+    
+    if (total_json) job->total_objects = (i64)cJSON_GetNumberValue(total_json);
+    if (migrated_json) job->migrated_objects = (i64)cJSON_GetNumberValue(migrated_json);
+    if (failed_json) job->failed_objects = (i64)cJSON_GetNumberValue(failed_json);
+    if (bytes_total_json) job->bytes_total = (i64)cJSON_GetNumberValue(bytes_total_json);
+    if (bytes_migrated_json) job->bytes_migrated = (i64)cJSON_GetNumberValue(bytes_migrated_json);
+    
+    cJSON_Delete(root);
+    
+    pthread_mutex_init(&job->lock, NULL);
+    
+    buckets_info("Loaded checkpoint: %s (gen %lld->%lld, %lld/%lld objects)",
+                 job->job_id,
+                 (long long)source_gen, (long long)target_gen,
+                 (long long)job->migrated_objects, (long long)job->total_objects);
+    
+    return job;
 }
 
 void buckets_migration_job_cleanup(buckets_migration_job_t *job)
