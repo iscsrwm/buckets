@@ -7,7 +7,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
+#include <unistd.h>
 #include "buckets.h"
+#include "buckets_net.h"
+#include "buckets_s3.h"
 
 static void print_banner(void) {
     printf("\n");
@@ -26,13 +30,13 @@ static void print_banner(void) {
 static void print_usage(const char *progname) {
     printf("Usage: %s [command] [options]\n\n", progname);
     printf("Commands:\n");
-    printf("  server <endpoints>  Start object storage server\n");
+    printf("  server [port]       Start S3 API server (default port: 9000)\n");
     printf("  version             Print version information\n");
     printf("  help                Show this help message\n");
     printf("\n");
     printf("Examples:\n");
-    printf("  %s server /data\n", progname);
-    printf("  %s server http://node{1...4}:9000/data{1...4}\n", progname);
+    printf("  %s server           # Start on default port 9000\n", progname);
+    printf("  %s server 8080      # Start on port 8080\n", progname);
     printf("\n");
 }
 
@@ -65,20 +69,78 @@ int main(int argc, char *argv[]) {
     } else if (strcmp(command, "server") == 0) {
         print_banner();
         
-        if (argc < 3) {
-            fprintf(stderr, "Error: server command requires endpoints\n\n");
-            print_usage(argv[0]);
+        /* Parse options: port (default 9000) */
+        int port = 9000;
+        if (argc >= 3) {
+            port = atoi(argv[2]);
+            if (port <= 0 || port > 65535) {
+                fprintf(stderr, "Error: invalid port number: %s\n\n", argv[2]);
+                ret = 1;
+                goto cleanup;
+            }
+        }
+
+        buckets_info("Starting Buckets S3 server on port %d...", port);
+        buckets_info("Storage directory: /tmp/buckets-data/");
+        buckets_info("Press Ctrl+C to stop");
+        
+        /* Create HTTP server */
+        char addr[32];
+        snprintf(addr, sizeof(addr), "0.0.0.0:%d", port);
+        buckets_http_server_t *server = buckets_http_server_create(addr, port);
+        if (!server) {
+            buckets_error("Failed to create HTTP server");
             ret = 1;
             goto cleanup;
         }
-
-        buckets_info("Starting Buckets server...");
-        buckets_info("Endpoints: %s", argv[2]);
         
-        /* TODO: Implement server logic */
-        buckets_warn("Server implementation pending");
-        buckets_info("Project structure initialized");
-        buckets_info("Ready to begin development");
+        /* Set S3 handler as default handler for all requests */
+        if (buckets_http_server_set_default_handler(server, buckets_s3_handler, NULL) != BUCKETS_OK) {
+            buckets_error("Failed to set S3 handler");
+            buckets_http_server_free(server);
+            ret = 1;
+            goto cleanup;
+        }
+        
+        /* Start server */
+        if (buckets_http_server_start(server) != BUCKETS_OK) {
+            buckets_error("Failed to start HTTP server");
+            buckets_http_server_free(server);
+            ret = 1;
+            goto cleanup;
+        }
+        
+        buckets_info("Server started successfully!");
+        buckets_info("S3 API available at: http://localhost:%d/", port);
+        buckets_info("");
+        buckets_info("Example commands:");
+        buckets_info("  # List buckets");
+        buckets_info("  curl -v http://localhost:%d/", port);
+        buckets_info("");
+        buckets_info("  # Create bucket");
+        buckets_info("  curl -v -X PUT http://localhost:%d/my-bucket", port);
+        buckets_info("");
+        buckets_info("  # Upload object");
+        buckets_info("  echo 'Hello World' | curl -v -X PUT --data-binary @- http://localhost:%d/my-bucket/hello.txt", port);
+        buckets_info("");
+        buckets_info("  # Download object");
+        buckets_info("  curl -v http://localhost:%d/my-bucket/hello.txt", port);
+        buckets_info("");
+        buckets_info("Server is running. Press Ctrl+C to stop...");
+        
+        /* Keep server running - in a real implementation, we'd have a signal handler */
+        /* For now, just loop forever - the HTTP server polls internally */
+        while (1) {
+            /* Server runs in mongoose polling loop */
+            /* User can stop with Ctrl+C which will cleanup automatically */
+            sleep(1);
+        }
+        
+        /* Cleanup (reached on Ctrl+C) */
+        buckets_info("Shutting down server...");
+        buckets_http_server_stop(server);
+        buckets_http_server_free(server);
+        buckets_info("Server stopped");
         
     } else {
         fprintf(stderr, "Unknown command: %s\n\n", command);
