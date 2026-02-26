@@ -18,6 +18,9 @@
 
 #include "buckets.h"
 #include "buckets_s3.h"
+#include "buckets_storage.h"
+#include "buckets_cluster.h"
+#include "buckets_registry.h"
 
 #define MD5_DIGEST_LENGTH 16
 
@@ -163,46 +166,20 @@ int buckets_s3_put_object(buckets_s3_request_t *req, buckets_s3_response_t *res)
         return BUCKETS_OK;
     }
     
-    /* For Week 35, we'll store in a simple file-based structure */
-    /* In production, this would use buckets_object_write() */
+    /* Use distributed storage layer */
+    const char *content_type = req->content_type[0] != '\0' ? req->content_type : NULL;
+    const void *data = req->body ? req->body : "";
+    size_t size = req->body_len;
     
-    /* Create bucket directory if needed */
-    char bucket_path[2048];
-    snprintf(bucket_path, sizeof(bucket_path), "/tmp/buckets-data/%s", req->bucket);
-    
-    char cmd[2560];
-    snprintf(cmd, sizeof(cmd), "mkdir -p %s", bucket_path);
-    if (system(cmd) != 0) {
+    int ret = buckets_put_object(req->bucket, req->key, data, size, content_type);
+    if (ret != 0) {
+        buckets_error("Failed to write object to distributed storage: %s/%s", 
+                     req->bucket, req->key);
         buckets_s3_xml_error(res, "InternalError",
-                            "Failed to create bucket directory",
-                            req->bucket);
-        return BUCKETS_OK;
-    }
-    
-    /* Write object to file */
-    char object_path[3072];
-    snprintf(object_path, sizeof(object_path), "%s/%s", bucket_path, req->key);
-    
-    FILE *fp = fopen(object_path, "wb");
-    if (!fp) {
-        buckets_s3_xml_error(res, "InternalError",
-                            "Failed to write object",
+                            "Failed to write object to storage",
                             req->key);
         return BUCKETS_OK;
     }
-    
-    if (req->body && req->body_len > 0) {
-        size_t written = fwrite(req->body, 1, req->body_len, fp);
-        if (written != req->body_len) {
-            fclose(fp);
-            buckets_s3_xml_error(res, "InternalError",
-                                "Failed to write object data",
-                                req->key);
-            return BUCKETS_OK;
-        }
-    }
-    
-    fclose(fp);
     
     /* Calculate ETag */
     if (req->body && req->body_len > 0) {
@@ -215,8 +192,8 @@ int buckets_s3_put_object(buckets_s3_request_t *req, buckets_s3_response_t *res)
     /* Generate success response */
     buckets_s3_xml_success(res, "PutObjectResult");
     
-    buckets_debug("PUT object: %s/%s (%zu bytes, ETag: %s)",
-                  req->bucket, req->key, req->body_len, res->etag);
+    buckets_info("PUT object: %s/%s (%zu bytes, ETag: %s) - written to distributed storage",
+                 req->bucket, req->key, req->body_len, res->etag);
     
     return BUCKETS_OK;
 }
@@ -242,65 +219,27 @@ int buckets_s3_get_object(buckets_s3_request_t *req, buckets_s3_response_t *res)
         return BUCKETS_OK;
     }
     
-    /* Read object from file */
-    char object_path[3072];
-    snprintf(object_path, sizeof(object_path), "/tmp/buckets-data/%s/%s",
-             req->bucket, req->key);
+    /* Use distributed storage layer */
+    void *object_data = NULL;
+    size_t object_size = 0;
     
-    FILE *fp = fopen(object_path, "rb");
-    if (!fp) {
-        /* Object not found */
+    int ret = buckets_get_object(req->bucket, req->key, &object_data, &object_size);
+    if (ret != 0) {
+        /* Object not found or error */
         buckets_s3_xml_error(res, "NoSuchKey",
                             "The specified key does not exist",
                             req->key);
         return BUCKETS_OK;
     }
     
-    /* Get file size */
-    fseek(fp, 0, SEEK_END);
-    long file_size = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    
-    if (file_size < 0) {
-        fclose(fp);
-        buckets_s3_xml_error(res, "InternalError",
-                            "Failed to read object",
-                            req->key);
-        return BUCKETS_OK;
-    }
-    
-    /* Allocate buffer for object data */
-    char *object_data = buckets_malloc(file_size + 1);
-    if (!object_data) {
-        fclose(fp);
-        buckets_s3_xml_error(res, "InternalError",
-                            "Out of memory",
-                            req->key);
-        return BUCKETS_OK;
-    }
-    
-    /* Read object data */
-    size_t bytes_read = fread(object_data, 1, file_size, fp);
-    fclose(fp);
-    
-    if (bytes_read != (size_t)file_size) {
-        buckets_free(object_data);
-        buckets_s3_xml_error(res, "InternalError",
-                            "Failed to read object data",
-                            req->key);
-        return BUCKETS_OK;
-    }
-    
-    object_data[file_size] = '\0';
-    
     /* Calculate ETag */
-    buckets_s3_calculate_etag(object_data, file_size, res->etag);
+    buckets_s3_calculate_etag(object_data, object_size, res->etag);
     
     /* Set response */
     res->status_code = 200;
-    res->body = object_data;
-    res->body_len = file_size;
-    res->content_length = file_size;
+    res->body = object_data;  /* Caller owns this memory */
+    res->body_len = object_size;
+    res->content_length = object_size;
     
     /* Set content type (default to application/octet-stream) */
     if (req->content_type[0] != '\0') {
@@ -313,8 +252,8 @@ int buckets_s3_get_object(buckets_s3_request_t *req, buckets_s3_response_t *res)
     /* Format last modified time */
     buckets_s3_format_timestamp(time(NULL), res->last_modified);
     
-    buckets_debug("GET object: %s/%s (%zu bytes, ETag: %s)",
-                  req->bucket, req->key, res->body_len, res->etag);
+    buckets_info("GET object: %s/%s (%zu bytes, ETag: %s) - read from distributed storage",
+                 req->bucket, req->key, res->body_len, res->etag);
     
     return BUCKETS_OK;
 }

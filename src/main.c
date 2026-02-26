@@ -324,6 +324,26 @@ int main(int argc, char *argv[]) {
                         goto cleanup;
                     }
                     buckets_info("Location registry initialized");
+                    
+                    /* Initialize storage layer */
+                    buckets_info("Initializing storage layer...");
+                    buckets_storage_config_t storage_cfg = {
+                        .data_dir = config->node.data_dir,
+                        .inline_threshold = 128 * 1024,  /* 128 KB */
+                        .default_ec_k = config->erasure.data_shards,
+                        .default_ec_m = config->erasure.parity_shards,
+                        .verify_checksums = true
+                    };
+                    if (buckets_storage_init(&storage_cfg) != 0) {
+                        buckets_error("Failed to initialize storage layer");
+                        buckets_registry_cleanup();
+                        buckets_topology_manager_cleanup();
+                        buckets_multidisk_cleanup();
+                        buckets_config_free(config);
+                        ret = 1;
+                        goto cleanup;
+                    }
+                    buckets_info("Storage layer initialized");
                 }
             }
         }
@@ -355,6 +375,7 @@ int main(int argc, char *argv[]) {
         if (!server) {
             buckets_error("Failed to create HTTP server");
             if (config) {
+                buckets_storage_cleanup();
                 buckets_registry_cleanup();
                 buckets_topology_manager_cleanup();
                 buckets_multidisk_cleanup();
@@ -369,6 +390,7 @@ int main(int argc, char *argv[]) {
             buckets_error("Failed to set S3 handler");
             buckets_http_server_free(server);
             if (config) {
+                buckets_storage_cleanup();
                 buckets_registry_cleanup();
                 buckets_topology_manager_cleanup();
                 buckets_multidisk_cleanup();
@@ -383,6 +405,7 @@ int main(int argc, char *argv[]) {
             buckets_error("Failed to start HTTP server");
             buckets_http_server_free(server);
             if (config) {
+                buckets_storage_cleanup();
                 buckets_registry_cleanup();
                 buckets_topology_manager_cleanup();
                 buckets_multidisk_cleanup();
@@ -423,6 +446,8 @@ int main(int argc, char *argv[]) {
         buckets_http_server_stop(server);
         buckets_http_server_free(server);
         if (config) {
+            buckets_info("Cleaning up storage layer...");
+            buckets_storage_cleanup();
             buckets_info("Cleaning up registry...");
             buckets_registry_cleanup();
             buckets_info("Cleaning up topology manager...");
