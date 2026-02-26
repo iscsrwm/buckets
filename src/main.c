@@ -15,6 +15,7 @@
 #include "buckets_config.h"
 #include "buckets_storage.h"
 #include "buckets_cluster.h"
+#include "buckets_registry.h"
 
 static void print_banner(void) {
     printf("\n");
@@ -283,6 +284,46 @@ int main(int argc, char *argv[]) {
                     buckets_warn("To format disks, run: buckets format --config <config_file>");
                 } else {
                     buckets_info("Multi-disk storage initialized successfully");
+                    
+                    /* Initialize topology manager */
+                    buckets_info("Initializing topology manager...");
+                    if (buckets_topology_manager_init(config->storage.disks, config->storage.disk_count) != BUCKETS_OK) {
+                        buckets_error("Failed to initialize topology manager");
+                        buckets_multidisk_cleanup();
+                        buckets_config_free(config);
+                        ret = 1;
+                        goto cleanup;
+                    }
+                    
+                    /* Load topology from disks */
+                    if (buckets_topology_manager_load() != BUCKETS_OK) {
+                        buckets_error("Failed to load topology from disks");
+                        buckets_topology_manager_cleanup();
+                        buckets_multidisk_cleanup();
+                        buckets_config_free(config);
+                        ret = 1;
+                        goto cleanup;
+                    }
+                    
+                    /* Get topology to log information */
+                    buckets_cluster_topology_t *topology = buckets_topology_manager_get();
+                    if (topology) {
+                        buckets_info("Topology loaded: generation=%ld, pools=%d", 
+                                    topology->generation, topology->pool_count);
+                        buckets_info("Deployment ID: %s", topology->deployment_id);
+                    }
+                    
+                    /* Initialize location registry */
+                    buckets_info("Initializing location registry...");
+                    if (buckets_registry_init(NULL) != BUCKETS_OK) {
+                        buckets_error("Failed to initialize location registry");
+                        buckets_topology_manager_cleanup();
+                        buckets_multidisk_cleanup();
+                        buckets_config_free(config);
+                        ret = 1;
+                        goto cleanup;
+                    }
+                    buckets_info("Location registry initialized");
                 }
             }
         }
@@ -314,6 +355,8 @@ int main(int argc, char *argv[]) {
         if (!server) {
             buckets_error("Failed to create HTTP server");
             if (config) {
+                buckets_registry_cleanup();
+                buckets_topology_manager_cleanup();
                 buckets_multidisk_cleanup();
                 buckets_config_free(config);
             }
@@ -326,6 +369,8 @@ int main(int argc, char *argv[]) {
             buckets_error("Failed to set S3 handler");
             buckets_http_server_free(server);
             if (config) {
+                buckets_registry_cleanup();
+                buckets_topology_manager_cleanup();
                 buckets_multidisk_cleanup();
                 buckets_config_free(config);
             }
@@ -338,6 +383,8 @@ int main(int argc, char *argv[]) {
             buckets_error("Failed to start HTTP server");
             buckets_http_server_free(server);
             if (config) {
+                buckets_registry_cleanup();
+                buckets_topology_manager_cleanup();
                 buckets_multidisk_cleanup();
                 buckets_config_free(config);
             }
@@ -376,6 +423,11 @@ int main(int argc, char *argv[]) {
         buckets_http_server_stop(server);
         buckets_http_server_free(server);
         if (config) {
+            buckets_info("Cleaning up registry...");
+            buckets_registry_cleanup();
+            buckets_info("Cleaning up topology manager...");
+            buckets_topology_manager_cleanup();
+            buckets_info("Cleaning up multi-disk storage...");
             buckets_multidisk_cleanup();
             buckets_config_free(config);
         }
