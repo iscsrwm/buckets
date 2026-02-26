@@ -20,15 +20,15 @@
 
 static void setup_test_env(void)
 {
-    /* Create test bucket */
-    int ret = system("mkdir -p /tmp/buckets-data/test-bucket");
+    /* Clean up any previous test data and create fresh test bucket */
+    int ret = system("rm -rf /tmp/buckets-data && mkdir -p /tmp/buckets-data/test-bucket");
     (void)ret;  /* Ignore return value - best effort */
 }
 
 static void teardown_test_env(void)
 {
-    /* Clean up test data */
-    int ret = system("rm -rf /tmp/buckets-data/test-bucket");
+    /* Clean up all test data (bucket and hash-based storage directories) */
+    int ret = system("rm -rf /tmp/buckets-data");
     (void)ret;  /* Ignore return value - best effort */
 }
 
