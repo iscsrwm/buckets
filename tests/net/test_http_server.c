@@ -336,3 +336,68 @@ Test(http_server, double_start_fails)
     
     buckets_http_server_stop(server);
 }
+
+Test(http_server, enable_tls)
+{
+    server = buckets_http_server_create("127.0.0.1", 19009);
+    cr_assert_not_null(server);
+    
+    /* Configure TLS */
+    buckets_tls_config_t tls_config = {
+        .cert_file = "tests/net/certs/cert.pem",
+        .key_file = "tests/net/certs/key.pem",
+        .ca_file = NULL
+    };
+    
+    int ret = buckets_http_server_enable_tls(server, &tls_config);
+    cr_assert_eq(ret, BUCKETS_OK, "Should enable TLS");
+    
+    /* Verify URL changed to https */
+    char addr[256];
+    buckets_http_server_get_address(server, addr, sizeof(addr));
+    cr_assert(strstr(addr, "https://") != NULL, "URL should use https scheme");
+}
+
+Test(http_server, tls_invalid_args)
+{
+    server = buckets_http_server_create("127.0.0.1", 19010);
+    cr_assert_not_null(server);
+    
+    /* NULL config */
+    int ret = buckets_http_server_enable_tls(server, NULL);
+    cr_assert_neq(ret, BUCKETS_OK, "Should fail with NULL config");
+    
+    /* Missing cert file */
+    buckets_tls_config_t bad_config = {
+        .cert_file = NULL,
+        .key_file = "tests/net/certs/key.pem",
+        .ca_file = NULL
+    };
+    
+    ret = buckets_http_server_enable_tls(server, &bad_config);
+    cr_assert_neq(ret, BUCKETS_OK, "Should fail without cert file");
+}
+
+Test(http_server, tls_after_start_fails)
+{
+    server = buckets_http_server_create("127.0.0.1", 19011);
+    cr_assert_not_null(server);
+    
+    /* Start server first */
+    int ret = buckets_http_server_start(server);
+    cr_assert_eq(ret, BUCKETS_OK);
+    
+    sleep_ms(50);
+    
+    /* Try to enable TLS after start */
+    buckets_tls_config_t tls_config = {
+        .cert_file = "tests/net/certs/cert.pem",
+        .key_file = "tests/net/certs/key.pem",
+        .ca_file = NULL
+    };
+    
+    ret = buckets_http_server_enable_tls(server, &tls_config);
+    cr_assert_neq(ret, BUCKETS_OK, "Should not allow TLS after start");
+    
+    buckets_http_server_stop(server);
+}

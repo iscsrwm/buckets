@@ -28,6 +28,12 @@ struct buckets_http_server {
     void *default_handler_data;              /* User data for default handler */
     buckets_router_t *router;                /* Router for path matching */
     
+    /* TLS configuration */
+    bool tls_enabled;               /* TLS enabled flag */
+    char cert_file[512];            /* Certificate file path */
+    char key_file[512];             /* Private key file path */
+    char ca_file[512];              /* CA bundle file path */
+    
     pthread_t thread;               /* Server thread */
     bool running;                   /* Server running flag */
     pthread_mutex_t lock;           /* Thread safety */
@@ -189,6 +195,49 @@ int buckets_http_server_get_address(buckets_http_server_t *server,
     return BUCKETS_OK;
 }
 
+int buckets_http_server_enable_tls(buckets_http_server_t *server,
+                                     buckets_tls_config_t *config)
+{
+    if (!server || !config) {
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    if (!config->cert_file || !config->key_file) {
+        buckets_error("TLS certificate and key files required");
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    pthread_mutex_lock(&server->lock);
+    
+    /* Can only enable TLS before server starts */
+    if (server->running) {
+        pthread_mutex_unlock(&server->lock);
+        buckets_error("Cannot enable TLS on running server");
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    /* Store TLS configuration */
+    server->tls_enabled = true;
+    strncpy(server->cert_file, config->cert_file, sizeof(server->cert_file) - 1);
+    strncpy(server->key_file, config->key_file, sizeof(server->key_file) - 1);
+    
+    if (config->ca_file) {
+        strncpy(server->ca_file, config->ca_file, sizeof(server->ca_file) - 1);
+    } else {
+        server->ca_file[0] = '\0';
+    }
+    
+    /* Update URL scheme to https */
+    snprintf(server->url, sizeof(server->url), "https://%s:%d", 
+             server->address, server->port);
+    
+    pthread_mutex_unlock(&server->lock);
+    
+    buckets_info("TLS enabled on server: %s", server->url);
+    
+    return BUCKETS_OK;
+}
+
 /* ===================================================================
  * Internal Implementation
  * ===================================================================*/
@@ -214,11 +263,69 @@ static void* server_thread_main(void *arg)
 }
 
 /**
+ * Load file contents into mg_str
+ */
+static struct mg_str load_file(const char *path)
+{
+    struct mg_str result = {NULL, 0};
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        buckets_error("Failed to open file: %s", path);
+        return result;
+    }
+    
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    
+    char *data = buckets_malloc(size);
+    if (!data) {
+        fclose(f);
+        return result;
+    }
+    
+    if (fread(data, 1, size, f) != (size_t)size) {
+        buckets_error("Failed to read file: %s", path);
+        buckets_free(data);
+        fclose(f);
+        return result;
+    }
+    
+    fclose(f);
+    result.buf = data;
+    result.len = size;
+    return result;
+}
+
+/**
  * Mongoose event handler
  */
 static void mg_event_handler(struct mg_connection *c, int ev, void *ev_data)
 {
-    if (ev == MG_EV_HTTP_MSG) {
+    buckets_http_server_t *server = (buckets_http_server_t*)c->fn_data;
+    
+    if (ev == MG_EV_ACCEPT && server && server->tls_enabled) {
+        /* Initialize TLS for accepted connection */
+        struct mg_tls_opts opts = {0};
+        
+        /* Load certificate and key */
+        opts.cert = load_file(server->cert_file);
+        opts.key = load_file(server->key_file);
+        
+        if (server->ca_file[0] != '\0') {
+            opts.ca = load_file(server->ca_file);
+        }
+        
+        if (opts.cert.buf && opts.key.buf) {
+            mg_tls_init(c, &opts);
+            buckets_debug("TLS initialized for connection");
+        } else {
+            buckets_error("Failed to load TLS certificates");
+        }
+        
+        /* Note: We don't free the loaded files here because mongoose needs them */
+    }
+    else if (ev == MG_EV_HTTP_MSG) {
         buckets_http_server_t *server = (buckets_http_server_t*)c->fn_data;
         struct mg_http_message *hm = (struct mg_http_message*)ev_data;
         

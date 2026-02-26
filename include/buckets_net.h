@@ -234,6 +234,130 @@ void buckets_http_response_error(buckets_http_response_t *res,
                                    int status_code,
                                    const char *message);
 
+/* ===================================================================
+ * TLS Support (Week 32)
+ * ===================================================================*/
+
+/**
+ * TLS configuration
+ */
+typedef struct {
+    const char *cert_file;     /* Server certificate file */
+    const char *key_file;      /* Private key file */
+    const char *ca_file;       /* CA bundle file (optional) */
+} buckets_tls_config_t;
+
+/**
+ * Enable TLS/HTTPS on server
+ * 
+ * @param server Server handle
+ * @param config TLS configuration
+ * @return BUCKETS_OK on success
+ */
+int buckets_http_server_enable_tls(buckets_http_server_t *server,
+                                     buckets_tls_config_t *config);
+
+/* ===================================================================
+ * Connection Pool (Week 32)
+ * ===================================================================*/
+
+/**
+ * Connection handle (opaque)
+ */
+typedef struct buckets_connection buckets_connection_t;
+
+/**
+ * Connection pool (opaque)
+ */
+typedef struct buckets_conn_pool buckets_conn_pool_t;
+
+/**
+ * Create connection pool
+ * 
+ * @param max_conns Maximum number of connections (0 = unlimited)
+ * @return Connection pool handle or NULL on error
+ */
+buckets_conn_pool_t* buckets_conn_pool_create(int max_conns);
+
+/**
+ * Get connection from pool
+ * 
+ * Creates new connection if none available, or reuses existing.
+ * 
+ * @param pool Connection pool
+ * @param host Target host
+ * @param port Target port
+ * @param conn Output: connection handle
+ * @return BUCKETS_OK on success
+ */
+int buckets_conn_pool_get(buckets_conn_pool_t *pool,
+                           const char *host,
+                           int port,
+                           buckets_connection_t **conn);
+
+/**
+ * Release connection back to pool
+ * 
+ * @param pool Connection pool
+ * @param conn Connection to release
+ * @return BUCKETS_OK on success
+ */
+int buckets_conn_pool_release(buckets_conn_pool_t *pool,
+                               buckets_connection_t *conn);
+
+/**
+ * Close and remove connection from pool
+ * 
+ * @param pool Connection pool
+ * @param conn Connection to close
+ * @return BUCKETS_OK on success
+ */
+int buckets_conn_pool_close(buckets_conn_pool_t *pool,
+                             buckets_connection_t *conn);
+
+/**
+ * Get pool statistics
+ * 
+ * @param pool Connection pool
+ * @param total Output: total connections
+ * @param active Output: active connections
+ * @param idle Output: idle connections
+ * @return BUCKETS_OK on success
+ */
+int buckets_conn_pool_stats(buckets_conn_pool_t *pool,
+                             int *total,
+                             int *active,
+                             int *idle);
+
+/**
+ * Free connection pool
+ * 
+ * Closes all connections and frees memory.
+ * 
+ * @param pool Connection pool
+ */
+void buckets_conn_pool_free(buckets_conn_pool_t *pool);
+
+/**
+ * Send HTTP request over connection
+ * 
+ * @param conn Connection handle
+ * @param method HTTP method (GET, POST, etc.)
+ * @param path Request path
+ * @param body Request body (optional)
+ * @param body_len Body length
+ * @param response Output: response string (caller must free)
+ * @param status_code Output: HTTP status code
+ * @return BUCKETS_OK on success
+ */
+int buckets_conn_send_request(buckets_connection_t *conn,
+                               const char *method,
+                               const char *path,
+                               const char *body,
+                               size_t body_len,
+                               char **response,
+                               int *status_code);
+
 #ifdef __cplusplus
 }
 #endif

@@ -137,10 +137,10 @@ $(OBJ_DIR)/cJSON.o: third_party/cJSON/cJSON.c
 	@echo "CC $<"
 	@$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
-# Compile mongoose (relaxed warnings for third-party code)
+# Compile mongoose (relaxed warnings for third-party code, with OpenSSL TLS)
 $(OBJ_DIR)/mongoose.o: third_party/mongoose/mongoose.c
 	@echo "CC $<"
-	@$(CC) -std=gnu11 -D_GNU_SOURCE -O2 -fPIC -Wno-unused-variable -Wno-implicit-function-declaration -Wno-int-to-pointer-cast -Ithird_party/mongoose -c $< -o $@
+	@$(CC) -std=gnu11 -D_GNU_SOURCE -DMG_TLS=2 -DMG_ENABLE_OPENSSL=1 -O2 -fPIC -Wno-unused-variable -Wno-implicit-function-declaration -Wno-int-to-pointer-cast -Ithird_party/mongoose -c $< -o $@
 
 # Component-specific builds
 .PHONY: core cluster hash crypto erasure storage registry topology migration net s3 admin
@@ -159,7 +159,7 @@ s3: $(S3_OBJ)
 admin: $(ADMIN_OBJ)
 
 # Tests
-test: test-format test-topology test-endpoint test-erasure test-scanner test-worker test-orchestrator test-throttle test-checkpoint test-http-server test-router
+test: test-format test-topology test-endpoint test-erasure test-scanner test-worker test-orchestrator test-throttle test-checkpoint test-http-server test-router test-conn-pool
 
 test-format: $(TEST_BIN_DIR)/cluster/test_format
 	@echo "Running format tests..."
@@ -242,6 +242,10 @@ test-http-server: $(TEST_BIN_DIR)/net/test_http_server
 
 test-router: $(TEST_BIN_DIR)/net/test_router
 	@echo "Running router tests..."
+	@$<
+
+test-conn-pool: $(TEST_BIN_DIR)/net/test_conn_pool
+	@echo "Running connection pool tests..."
 	@$<
 
 # Test binaries (Criterion-based tests)
@@ -346,6 +350,11 @@ $(TEST_BIN_DIR)/net/test_http_server: $(TEST_DIR)/net/test_http_server.c $(BUILD
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
 
 $(TEST_BIN_DIR)/net/test_router: $(TEST_DIR)/net/test_router.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/net/test_conn_pool: $(TEST_DIR)/net/test_conn_pool.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
 	@echo "CC TEST $<"
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
