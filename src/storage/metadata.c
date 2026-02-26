@@ -75,19 +75,51 @@ char* buckets_xl_meta_to_json(const buckets_xl_meta_t *meta)
 
     /* Meta */
     cJSON *user_meta = cJSON_CreateObject();
+    
+    /* Standard S3 metadata */
     if (meta->meta.content_type) {
         cJSON_AddStringToObject(user_meta, "content-type", meta->meta.content_type);
     }
     if (meta->meta.etag) {
         cJSON_AddStringToObject(user_meta, "etag", meta->meta.etag);
     }
+    if (meta->meta.cache_control) {
+        cJSON_AddStringToObject(user_meta, "cache-control", meta->meta.cache_control);
+    }
+    if (meta->meta.content_disposition) {
+        cJSON_AddStringToObject(user_meta, "content-disposition", meta->meta.content_disposition);
+    }
+    if (meta->meta.content_encoding) {
+        cJSON_AddStringToObject(user_meta, "content-encoding", meta->meta.content_encoding);
+    }
+    if (meta->meta.content_language) {
+        cJSON_AddStringToObject(user_meta, "content-language", meta->meta.content_language);
+    }
+    if (meta->meta.expires) {
+        cJSON_AddStringToObject(user_meta, "expires", meta->meta.expires);
+    }
     
-    /* User metadata */
+    /* User metadata (x-amz-meta-*) */
     for (u32 i = 0; i < meta->meta.user_count; i++) {
-        cJSON_AddStringToObject(user_meta, meta->meta.user_keys[i], 
-                               meta->meta.user_values[i]);
+        char key_with_prefix[256];
+        snprintf(key_with_prefix, sizeof(key_with_prefix), "x-amz-meta-%s", 
+                meta->meta.user_keys[i]);
+        cJSON_AddStringToObject(user_meta, key_with_prefix, meta->meta.user_values[i]);
     }
     cJSON_AddItemToObject(root, "meta", user_meta);
+    
+    /* Versioning (optional) */
+    if (meta->versioning.versionId) {
+        cJSON *versioning = cJSON_CreateObject();
+        cJSON_AddStringToObject(versioning, "versionId", meta->versioning.versionId);
+        cJSON_AddBoolToObject(versioning, "isLatest", meta->versioning.isLatest);
+        cJSON_AddBoolToObject(versioning, "isDeleteMarker", meta->versioning.isDeleteMarker);
+        if (meta->versioning.deleteMarkerVersionId) {
+            cJSON_AddStringToObject(versioning, "deleteMarkerVersionId", 
+                                   meta->versioning.deleteMarkerVersionId);
+        }
+        cJSON_AddItemToObject(root, "versioning", versioning);
+    }
 
     /* Inline data (optional) */
     if (meta->inline_data) {
@@ -221,6 +253,7 @@ int buckets_xl_meta_from_json(const char *json, buckets_xl_meta_t *meta)
     /* Meta */
     cJSON *user_meta = cJSON_GetObjectItem(root, "meta");
     if (user_meta) {
+        /* Standard S3 metadata */
         cJSON *content_type = cJSON_GetObjectItem(user_meta, "content-type");
         if (content_type && cJSON_IsString(content_type)) {
             meta->meta.content_type = buckets_strdup(content_type->valuestring);
@@ -231,12 +264,36 @@ int buckets_xl_meta_from_json(const char *json, buckets_xl_meta_t *meta)
             meta->meta.etag = buckets_strdup(etag->valuestring);
         }
 
-        /* Count user metadata items */
+        cJSON *cache_control = cJSON_GetObjectItem(user_meta, "cache-control");
+        if (cache_control && cJSON_IsString(cache_control)) {
+            meta->meta.cache_control = buckets_strdup(cache_control->valuestring);
+        }
+
+        cJSON *content_disposition = cJSON_GetObjectItem(user_meta, "content-disposition");
+        if (content_disposition && cJSON_IsString(content_disposition)) {
+            meta->meta.content_disposition = buckets_strdup(content_disposition->valuestring);
+        }
+
+        cJSON *content_encoding = cJSON_GetObjectItem(user_meta, "content-encoding");
+        if (content_encoding && cJSON_IsString(content_encoding)) {
+            meta->meta.content_encoding = buckets_strdup(content_encoding->valuestring);
+        }
+
+        cJSON *content_language = cJSON_GetObjectItem(user_meta, "content-language");
+        if (content_language && cJSON_IsString(content_language)) {
+            meta->meta.content_language = buckets_strdup(content_language->valuestring);
+        }
+
+        cJSON *expires = cJSON_GetObjectItem(user_meta, "expires");
+        if (expires && cJSON_IsString(expires)) {
+            meta->meta.expires = buckets_strdup(expires->valuestring);
+        }
+
+        /* Count user metadata items (x-amz-meta-*) */
         meta->meta.user_count = 0;
         cJSON *item = NULL;
         cJSON_ArrayForEach(item, user_meta) {
-            if (strcmp(item->string, "content-type") != 0 && 
-                strcmp(item->string, "etag") != 0) {
+            if (strncmp(item->string, "x-amz-meta-", 11) == 0) {
                 meta->meta.user_count++;
             }
         }
@@ -248,14 +305,37 @@ int buckets_xl_meta_from_json(const char *json, buckets_xl_meta_t *meta)
             
             u32 idx = 0;
             cJSON_ArrayForEach(item, user_meta) {
-                if (strcmp(item->string, "content-type") != 0 && 
-                    strcmp(item->string, "etag") != 0 && 
-                    cJSON_IsString(item)) {
-                    meta->meta.user_keys[idx] = buckets_strdup(item->string);
+                if (strncmp(item->string, "x-amz-meta-", 11) == 0 && cJSON_IsString(item)) {
+                    /* Strip x-amz-meta- prefix */
+                    meta->meta.user_keys[idx] = buckets_strdup(item->string + 11);
                     meta->meta.user_values[idx] = buckets_strdup(item->valuestring);
                     idx++;
                 }
             }
+        }
+    }
+    
+    /* Versioning (optional) */
+    cJSON *versioning = cJSON_GetObjectItem(root, "versioning");
+    if (versioning) {
+        cJSON *versionId = cJSON_GetObjectItem(versioning, "versionId");
+        if (versionId && cJSON_IsString(versionId)) {
+            meta->versioning.versionId = buckets_strdup(versionId->valuestring);
+        }
+
+        cJSON *isLatest = cJSON_GetObjectItem(versioning, "isLatest");
+        if (isLatest && cJSON_IsBool(isLatest)) {
+            meta->versioning.isLatest = cJSON_IsTrue(isLatest);
+        }
+
+        cJSON *isDeleteMarker = cJSON_GetObjectItem(versioning, "isDeleteMarker");
+        if (isDeleteMarker && cJSON_IsBool(isDeleteMarker)) {
+            meta->versioning.isDeleteMarker = cJSON_IsTrue(isDeleteMarker);
+        }
+
+        cJSON *deleteMarkerVersionId = cJSON_GetObjectItem(versioning, "deleteMarkerVersionId");
+        if (deleteMarkerVersionId && cJSON_IsString(deleteMarkerVersionId)) {
+            meta->versioning.deleteMarkerVersionId = buckets_strdup(deleteMarkerVersionId->valuestring);
         }
     }
 
@@ -298,6 +378,31 @@ void buckets_xl_meta_free(buckets_xl_meta_t *meta)
         meta->meta.etag = NULL;
     }
 
+    if (meta->meta.cache_control) {
+        buckets_free(meta->meta.cache_control);
+        meta->meta.cache_control = NULL;
+    }
+
+    if (meta->meta.content_disposition) {
+        buckets_free(meta->meta.content_disposition);
+        meta->meta.content_disposition = NULL;
+    }
+
+    if (meta->meta.content_encoding) {
+        buckets_free(meta->meta.content_encoding);
+        meta->meta.content_encoding = NULL;
+    }
+
+    if (meta->meta.content_language) {
+        buckets_free(meta->meta.content_language);
+        meta->meta.content_language = NULL;
+    }
+
+    if (meta->meta.expires) {
+        buckets_free(meta->meta.expires);
+        meta->meta.expires = NULL;
+    }
+
     /* Free user metadata */
     for (u32 i = 0; i < meta->meta.user_count; i++) {
         if (meta->meta.user_keys[i]) {
@@ -322,6 +427,17 @@ void buckets_xl_meta_free(buckets_xl_meta_t *meta)
     if (meta->inline_data) {
         buckets_free(meta->inline_data);
         meta->inline_data = NULL;
+    }
+
+    /* Free versioning data */
+    if (meta->versioning.versionId) {
+        buckets_free(meta->versioning.versionId);
+        meta->versioning.versionId = NULL;
+    }
+
+    if (meta->versioning.deleteMarkerVersionId) {
+        buckets_free(meta->versioning.deleteMarkerVersionId);
+        meta->versioning.deleteMarkerVersionId = NULL;
     }
 
     meta->meta.user_count = 0;

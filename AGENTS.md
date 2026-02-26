@@ -75,9 +75,12 @@ make test-topology  # Topology management (18 tests)
 make test-endpoint  # Endpoint parsing (22 tests)
 make test-hash      # Hashing algorithms (49 tests)
 make test-crypto    # Cryptography (28 tests)
+make test-erasure   # Erasure coding (20 tests)
+make test-storage   # Storage layer (18 tests - objects)
+# Note: No make target yet for metadata tests
 
 # Compile and run individual test suites
-mkdir -p build/test/{cluster,hash,crypto}
+mkdir -p build/test/{cluster,hash,crypto,erasure,storage}
 
 # Cluster tests
 gcc -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -pedantic \

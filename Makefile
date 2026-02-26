@@ -62,8 +62,13 @@ ALL_OBJ := $(CORE_OBJ) $(CLUSTER_OBJ) $(HASH_OBJ) $(CRYPTO_OBJ) $(ERASURE_OBJ) \
 TEST_SRC := $(wildcard $(TEST_DIR)/**/*.c)
 TEST_BIN := $(TEST_SRC:$(TEST_DIR)/%.c=$(TEST_BIN_DIR)/%)
 
+# Benchmark files
+BENCH_DIR := benchmarks
+BENCH_SRC := $(wildcard $(BENCH_DIR)/*.c)
+BENCH_BIN := $(BENCH_SRC:$(BENCH_DIR)/%.c=$(BIN_DIR)/%)
+
 # Targets
-.PHONY: all clean test install debug profile help
+.PHONY: all clean test install debug profile help benchmark
 
 all: directories libbuckets buckets
 
@@ -74,6 +79,7 @@ help:
 	@echo "  all          - Build everything (default)"
 	@echo "  libbuckets   - Build core library"
 	@echo "  buckets      - Build server binary"
+	@echo "  benchmark    - Build and run performance benchmarks"
 	@echo "  test         - Run all tests"
 	@echo "  test-core    - Test core components"
 	@echo "  test-hash    - Test hashing"
@@ -219,6 +225,16 @@ install: all
 	@install -m 644 $(BUILD_DIR)/libbuckets.a $(PREFIX)/lib/
 	@install -m 755 $(BUILD_DIR)/libbuckets.so $(PREFIX)/lib/
 	@cp -r $(INC_DIR)/* $(PREFIX)/include/buckets/
+
+# Benchmark target
+benchmark: $(BUILD_DIR)/libbuckets.a
+	@echo "Building Phase 4 benchmarks..."
+	@mkdir -p $(BIN_DIR)
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $(BIN_DIR)/bench_phase4 \
+		$(BENCH_DIR)/bench_phase4.c $(BUILD_DIR)/libbuckets.a $(LDFLAGS)
+	@echo ""
+	@echo "Running benchmarks..."
+	@$(BIN_DIR)/bench_phase4
 
 # Clean
 clean:

@@ -62,13 +62,28 @@ typedef struct {
     
     /* S3-compatible metadata */
     struct {
-        char *content_type;
-        char *etag;
-        /* User metadata stored as key-value pairs */
-        char **user_keys;
-        char **user_values;
-        u32 user_count;
+        /* Standard S3 metadata */
+        char *content_type;             /* Content-Type header */
+        char *etag;                     /* ETag (MD5 or BLAKE2b) */
+        char *cache_control;            /* Cache-Control header */
+        char *content_disposition;      /* Content-Disposition header */
+        char *content_encoding;         /* Content-Encoding header */
+        char *content_language;         /* Content-Language header */
+        char *expires;                  /* Expires header */
+        
+        /* User metadata (x-amz-meta-*) */
+        char **user_keys;               /* User-defined keys */
+        char **user_values;             /* User-defined values */
+        u32 user_count;                 /* Number of user metadata entries */
     } meta;
+    
+    /* Versioning information */
+    struct {
+        char *versionId;                /* Version ID (UUID) */
+        bool isLatest;                  /* Is this the latest version? */
+        bool isDeleteMarker;            /* Is this a delete marker? */
+        char *deleteMarkerVersionId;    /* Version ID of delete marker */
+    } versioning;
     
     /* Inline data for small objects */
     char *inline_data;                  /* Base64-encoded (optional) */
@@ -377,6 +392,344 @@ void buckets_select_erasure_config(u32 cluster_size, u32 *k, u32 *m);
  * @param buf Output buffer (must be >= 32 bytes)
  */
 void buckets_get_iso8601_time(char *buf);
+
+/* ===== Metadata Functions ===== */
+
+/**
+ * Compute ETag for object data
+ * 
+ * Uses BLAKE2b-256 and returns hex-encoded hash
+ * (S3-compatible format)
+ * 
+ * @param data Object data
+ * @param size Object size
+ * @param etag Output buffer for ETag (must be >= 65 bytes for hex + quotes)
+ * @return 0 on success, -1 on error
+ */
+int buckets_compute_etag(const void *data, size_t size, char *etag);
+
+/**
+ * Add user metadata (x-amz-meta-* header)
+ * 
+ * @param meta xl.meta structure
+ * @param key Metadata key (without x-amz-meta- prefix)
+ * @param value Metadata value
+ * @return 0 on success, -1 on error
+ */
+int buckets_add_user_metadata(buckets_xl_meta_t *meta, const char *key, const char *value);
+
+/**
+ * Get user metadata value
+ * 
+ * @param meta xl.meta structure
+ * @param key Metadata key (without x-amz-meta- prefix)
+ * @return Metadata value, or NULL if not found
+ */
+const char* buckets_get_user_metadata(const buckets_xl_meta_t *meta, const char *key);
+
+/**
+ * Generate version ID (UUID-based)
+ * 
+ * @param versionId Output buffer (must be >= 37 bytes for UUID string)
+ * @return 0 on success, -1 on error
+ */
+int buckets_generate_version_id(char *versionId);
+
+/**
+ * Put object with metadata and versioning
+ * 
+ * Extended version of buckets_put_object with full metadata support
+ * 
+ * @param bucket Bucket name
+ * @param object Object key
+ * @param data Object data
+ * @param size Object size
+ * @param meta Object metadata (content-type, user metadata, etc.)
+ * @param enable_versioning Enable versioning for this object
+ * @param versionId Output version ID (optional, can be NULL)
+ * @return 0 on success, -1 on error
+ */
+int buckets_put_object_with_metadata(const char *bucket, const char *object,
+                                     const void *data, size_t size,
+                                     buckets_xl_meta_t *meta,
+                                     bool enable_versioning,
+                                     char *versionId);
+
+/**
+ * Get object by version ID
+ * 
+ * @param bucket Bucket name
+ * @param object Object key
+ * @param versionId Version ID (NULL for latest version)
+ * @param data Output data pointer
+ * @param size Output size
+ * @return 0 on success, -1 on error
+ */
+int buckets_get_object_version(const char *bucket, const char *object,
+                                const char *versionId,
+                                void **data, size_t *size);
+
+/**
+ * List object versions
+ * 
+ * @param bucket Bucket name
+ * @param object Object key
+ * @param versions Output array of version IDs (caller must free)
+ * @param count Output number of versions
+ * @return 0 on success, -1 on error
+ */
+int buckets_list_object_versions(const char *bucket, const char *object,
+                                  char ***versions, u32 *count);
+
+/* ===== Versioning Operations (Week 13) ===== */
+
+/**
+ * Put object with versioning enabled
+ * 
+ * Creates a new version of the object. Each version is stored in a separate
+ * directory under versions/<versionId>/.
+ * 
+ * @param bucket Bucket name
+ * @param object Object key
+ * @param data Object data
+ * @param size Object size
+ * @param meta Object metadata (optional, can be NULL)
+ * @param versionId Output version ID (must be >= 37 bytes)
+ * @return 0 on success, -1 on error
+ */
+int buckets_put_object_versioned(const char *bucket, const char *object,
+                                  const void *data, size_t size,
+                                  buckets_xl_meta_t *meta,
+                                  char *versionId);
+
+/**
+ * Delete object with versioning (create delete marker)
+ * 
+ * S3-compatible soft delete: creates a delete marker version rather than
+ * actually deleting the object. The object becomes invisible until the
+ * delete marker is removed.
+ * 
+ * @param bucket Bucket name
+ * @param object Object key
+ * @param versionId Output version ID of delete marker (must be >= 37 bytes)
+ * @return 0 on success, -1 on error
+ */
+int buckets_delete_object_versioned(const char *bucket, const char *object,
+                                     char *versionId);
+
+/**
+ * Get object by specific version ID
+ * 
+ * @param bucket Bucket name
+ * @param object Object key
+ * @param versionId Version ID (NULL for latest non-deleted version)
+ * @param data Output data pointer (allocated by function, caller must free)
+ * @param size Output size
+ * @return 0 on success, -1 on error, -2 if version is delete marker
+ */
+int buckets_get_object_by_version(const char *bucket, const char *object,
+                                   const char *versionId,
+                                   void **data, size_t *size);
+
+/**
+ * List all versions of an object
+ * 
+ * @param bucket Bucket name
+ * @param object Object key
+ * @param versions Output array of version IDs (caller must free each string and array)
+ * @param is_delete_markers Output array of delete marker flags (caller must free)
+ * @param count Output number of versions
+ * @return 0 on success, -1 on error
+ */
+int buckets_list_versions(const char *bucket, const char *object,
+                          char ***versions, bool **is_delete_markers, u32 *count);
+
+/**
+ * Delete specific version (hard delete)
+ * 
+ * Permanently deletes a specific version including delete markers.
+ * This is different from creating a delete marker.
+ * 
+ * @param bucket Bucket name
+ * @param object Object key
+ * @param versionId Version ID to delete
+ * @return 0 on success, -1 on error
+ */
+int buckets_delete_version(const char *bucket, const char *object,
+                           const char *versionId);
+
+/* ===== Metadata Caching (Week 13) ===== */
+
+/**
+ * Initialize metadata cache
+ * 
+ * @param max_size Maximum number of cached entries (0 for default: 10000)
+ * @param ttl_seconds Time-to-live for entries (0 for default: 300 = 5 minutes)
+ * @return 0 on success, -1 on error
+ */
+int buckets_metadata_cache_init(u32 max_size, u32 ttl_seconds);
+
+/**
+ * Cleanup metadata cache
+ */
+void buckets_metadata_cache_cleanup(void);
+
+/**
+ * Get metadata from cache
+ * 
+ * @param bucket Bucket name
+ * @param object Object key
+ * @param versionId Version ID (NULL for latest)
+ * @param meta Output metadata (filled if cache hit)
+ * @return 0 on cache hit, -1 on cache miss
+ */
+int buckets_metadata_cache_get(const char *bucket, const char *object,
+                                const char *versionId,
+                                buckets_xl_meta_t *meta);
+
+/**
+ * Put metadata into cache
+ * 
+ * @param bucket Bucket name
+ * @param object Object key
+ * @param versionId Version ID (NULL for latest)
+ * @param meta Metadata to cache (will be cloned)
+ * @return 0 on success, -1 on error
+ */
+int buckets_metadata_cache_put(const char *bucket, const char *object,
+                                const char *versionId,
+                                const buckets_xl_meta_t *meta);
+
+/**
+ * Invalidate cache entry
+ * 
+ * @param bucket Bucket name
+ * @param object Object key
+ * @param versionId Version ID (NULL for latest)
+ * @return 0 on success, -1 if not found
+ */
+int buckets_metadata_cache_invalidate(const char *bucket, const char *object,
+                                       const char *versionId);
+
+/**
+ * Get cache statistics
+ * 
+ * @param hits Output hit count
+ * @param misses Output miss count
+ * @param evictions Output eviction count
+ * @param count Output current entry count
+ */
+void buckets_metadata_cache_stats(u64 *hits, u64 *misses, u64 *evictions, u32 *count);
+
+/* ===== Multi-Disk Management (Week 14-16) ===== */
+
+/**
+ * Initialize multi-disk context from disk paths
+ * 
+ * Enumerates all disks, loads format.json, and organizes disks into erasure sets.
+ * 
+ * @param disk_paths Array of disk mount paths
+ * @param disk_count Number of disks
+ * @return 0 on success, -1 on error
+ */
+int buckets_multidisk_init(const char **disk_paths, int disk_count);
+
+/**
+ * Cleanup multi-disk context
+ */
+void buckets_multidisk_cleanup(void);
+
+/**
+ * Get disk paths for a specific erasure set
+ * 
+ * @param set_index Set index
+ * @param disk_paths Output array of disk paths (caller must allocate)
+ * @param max_disks Maximum number of disks
+ * @return Number of disks returned
+ */
+int buckets_multidisk_get_set_disks(int set_index, char **disk_paths, int max_disks);
+
+/**
+ * Read xl.meta with quorum from multiple disks
+ * 
+ * Reads from all available disks in set and succeeds if quorum (majority) agree.
+ * 
+ * @param set_index Set index
+ * @param object_path Object path (relative to disk root)
+ * @param meta Output metadata
+ * @return 0 on success, -1 on error
+ */
+int buckets_multidisk_read_xl_meta(int set_index, const char *object_path,
+                                    buckets_xl_meta_t *meta);
+
+/**
+ * Write xl.meta with quorum to multiple disks
+ * 
+ * Writes to all available disks in set and succeeds if quorum (majority) succeed.
+ * 
+ * @param set_index Set index
+ * @param object_path Object path (relative to disk root)
+ * @param meta Metadata to write
+ * @return 0 on success, -1 on error
+ */
+int buckets_multidisk_write_xl_meta(int set_index, const char *object_path,
+                                     const buckets_xl_meta_t *meta);
+
+/**
+ * Get online disk count for an erasure set
+ * 
+ * @param set_index Set index
+ * @return Number of online disks, -1 on error
+ */
+int buckets_multidisk_get_online_count(int set_index);
+
+/**
+ * Mark disk as offline (failure detection)
+ * 
+ * @param set_index Set index
+ * @param disk_index Disk index within set
+ * @return 0 on success, -1 on error
+ */
+int buckets_multidisk_mark_offline(int set_index, int disk_index);
+
+/**
+ * Get cluster statistics
+ * 
+ * @param total_sets Output total sets
+ * @param total_disks Output total disks
+ * @param online_disks Output online disks
+ */
+void buckets_multidisk_stats(int *total_sets, int *total_disks, int *online_disks);
+
+/**
+ * Validate xl.meta consistency across disks
+ * 
+ * @param set_index Set index
+ * @param object_path Object path
+ * @param inconsistent_disks Output array of inconsistent disk indices
+ * @param max_inconsistent Maximum inconsistent disks to return
+ * @return Number of inconsistent disks found, -1 on error
+ */
+int buckets_multidisk_validate_xl_meta(int set_index, const char *object_path,
+                                        int *inconsistent_disks, int max_inconsistent);
+
+/**
+ * Heal inconsistent xl.meta by copying from healthy disks
+ * 
+ * @param set_index Set index
+ * @param object_path Object path
+ * @return Number of disks healed, -1 on error
+ */
+int buckets_multidisk_heal_xl_meta(int set_index, const char *object_path);
+
+/**
+ * Scrub all objects in a set (background verification)
+ * 
+ * @param set_index Set index
+ * @param auto_heal Automatically heal inconsistencies if true
+ * @return Number of inconsistencies found, -1 on error
+ */
+int buckets_multidisk_scrub_set(int set_index, bool auto_heal);
 
 #ifdef __cplusplus
 }
