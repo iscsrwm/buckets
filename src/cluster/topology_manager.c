@@ -169,18 +169,16 @@ int buckets_topology_manager_load(void)
  * Topology Changes (Coordinated)
  * =================================================================== */
 
-static int persist_and_notify(buckets_cluster_topology_t *topology)
+/**
+ * Clone a topology (deep copy)
+ * Caller must free the clone with buckets_topology_free()
+ */
+static buckets_cluster_topology_t* clone_topology(buckets_cluster_topology_t *topology)
 {
-    /* Save with quorum */
-    int ret = buckets_topology_save_quorum(g_topology_manager.disk_paths,
-                                            g_topology_manager.disk_count,
-                                            topology);
-    if (ret != BUCKETS_OK) {
-        buckets_error("Failed to persist topology with quorum");
-        return ret;
+    if (!topology) {
+        return NULL;
     }
     
-    /* Update cache with cloned copy (cache takes ownership) */
     buckets_cluster_topology_t *clone = buckets_calloc(1, sizeof(buckets_cluster_topology_t));
     memcpy(clone, topology, sizeof(buckets_cluster_topology_t));
     
@@ -214,6 +212,26 @@ static int persist_and_notify(buckets_cluster_topology_t *topology)
         }
     }
     
+    return clone;
+}
+
+static int persist_and_notify(buckets_cluster_topology_t *topology)
+{
+    /* Save with quorum */
+    int ret = buckets_topology_save_quorum(g_topology_manager.disk_paths,
+                                            g_topology_manager.disk_count,
+                                            topology);
+    if (ret != BUCKETS_OK) {
+        buckets_error("Failed to persist topology with quorum");
+        return ret;
+    }
+    
+    /* Update cache with cloned copy (cache takes ownership) */
+    buckets_cluster_topology_t *clone = clone_topology(topology);
+    if (!clone) {
+        return BUCKETS_ERR_NOMEM;
+    }
+    
     ret = buckets_topology_cache_set(clone);
     if (ret != BUCKETS_OK) {
         buckets_topology_free(clone);
@@ -240,23 +258,33 @@ int buckets_topology_manager_add_pool(void)
     
     pthread_mutex_lock(&g_topology_manager.lock);
     
-    /* Get current topology */
-    buckets_cluster_topology_t *topology = buckets_topology_cache_get();
-    if (!topology) {
+    /* Get current topology and clone it */
+    buckets_cluster_topology_t *cached = buckets_topology_cache_get();
+    if (!cached) {
         pthread_mutex_unlock(&g_topology_manager.lock);
         buckets_error("No topology available to modify");
         return BUCKETS_ERR_INVALID_ARG;
     }
     
-    /* Add pool (modifies in place) */
+    buckets_cluster_topology_t *topology = clone_topology(cached);
+    if (!topology) {
+        pthread_mutex_unlock(&g_topology_manager.lock);
+        return BUCKETS_ERR_NOMEM;
+    }
+    
+    /* Add pool (modifies clone) */
     int ret = buckets_topology_add_pool(topology);
     if (ret != BUCKETS_OK) {
+        buckets_topology_free(topology);
         pthread_mutex_unlock(&g_topology_manager.lock);
         return ret;
     }
     
     /* Persist and notify */
     ret = persist_and_notify(topology);
+    
+    /* Free the working copy */
+    buckets_topology_free(topology);
     
     pthread_mutex_unlock(&g_topology_manager.lock);
     
@@ -276,23 +304,33 @@ int buckets_topology_manager_add_set(int pool_idx, buckets_disk_info_t *disks, i
     
     pthread_mutex_lock(&g_topology_manager.lock);
     
-    /* Get current topology */
-    buckets_cluster_topology_t *topology = buckets_topology_cache_get();
-    if (!topology) {
+    /* Get current topology and clone it */
+    buckets_cluster_topology_t *cached = buckets_topology_cache_get();
+    if (!cached) {
         pthread_mutex_unlock(&g_topology_manager.lock);
         buckets_error("No topology available to modify");
         return BUCKETS_ERR_INVALID_ARG;
     }
     
-    /* Add set (modifies in place) */
+    buckets_cluster_topology_t *topology = clone_topology(cached);
+    if (!topology) {
+        pthread_mutex_unlock(&g_topology_manager.lock);
+        return BUCKETS_ERR_NOMEM;
+    }
+    
+    /* Add set (modifies clone) */
     int ret = buckets_topology_add_set(topology, pool_idx, disks, disk_count);
     if (ret != BUCKETS_OK) {
+        buckets_topology_free(topology);
         pthread_mutex_unlock(&g_topology_manager.lock);
         return ret;
     }
     
     /* Persist and notify */
     ret = persist_and_notify(topology);
+    
+    /* Free the working copy */
+    buckets_topology_free(topology);
     
     pthread_mutex_unlock(&g_topology_manager.lock);
     
@@ -308,23 +346,33 @@ int buckets_topology_manager_mark_set_draining(int pool_idx, int set_idx)
     
     pthread_mutex_lock(&g_topology_manager.lock);
     
-    /* Get current topology */
-    buckets_cluster_topology_t *topology = buckets_topology_cache_get();
-    if (!topology) {
+    /* Get current topology and clone it */
+    buckets_cluster_topology_t *cached = buckets_topology_cache_get();
+    if (!cached) {
         pthread_mutex_unlock(&g_topology_manager.lock);
         buckets_error("No topology available to modify");
         return BUCKETS_ERR_INVALID_ARG;
     }
     
-    /* Mark set draining (modifies in place) */
+    buckets_cluster_topology_t *topology = clone_topology(cached);
+    if (!topology) {
+        pthread_mutex_unlock(&g_topology_manager.lock);
+        return BUCKETS_ERR_NOMEM;
+    }
+    
+    /* Mark set draining (modifies clone) */
     int ret = buckets_topology_mark_set_draining(topology, pool_idx, set_idx);
     if (ret != BUCKETS_OK) {
+        buckets_topology_free(topology);
         pthread_mutex_unlock(&g_topology_manager.lock);
         return ret;
     }
     
     /* Persist and notify */
     ret = persist_and_notify(topology);
+    
+    /* Free the working copy */
+    buckets_topology_free(topology);
     
     pthread_mutex_unlock(&g_topology_manager.lock);
     
@@ -340,23 +388,33 @@ int buckets_topology_manager_mark_set_removed(int pool_idx, int set_idx)
     
     pthread_mutex_lock(&g_topology_manager.lock);
     
-    /* Get current topology */
-    buckets_cluster_topology_t *topology = buckets_topology_cache_get();
-    if (!topology) {
+    /* Get current topology and clone it */
+    buckets_cluster_topology_t *cached = buckets_topology_cache_get();
+    if (!cached) {
         pthread_mutex_unlock(&g_topology_manager.lock);
         buckets_error("No topology available to modify");
         return BUCKETS_ERR_INVALID_ARG;
     }
     
-    /* Mark set removed (modifies in place) */
+    buckets_cluster_topology_t *topology = clone_topology(cached);
+    if (!topology) {
+        pthread_mutex_unlock(&g_topology_manager.lock);
+        return BUCKETS_ERR_NOMEM;
+    }
+    
+    /* Mark set removed (modifies clone) */
     int ret = buckets_topology_mark_set_removed(topology, pool_idx, set_idx);
     if (ret != BUCKETS_OK) {
+        buckets_topology_free(topology);
         pthread_mutex_unlock(&g_topology_manager.lock);
         return ret;
     }
     
     /* Persist and notify */
     ret = persist_and_notify(topology);
+    
+    /* Free the working copy */
+    buckets_topology_free(topology);
     
     pthread_mutex_unlock(&g_topology_manager.lock);
     

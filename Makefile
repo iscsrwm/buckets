@@ -168,6 +168,10 @@ test-topology-manager: $(TEST_BIN_DIR)/cluster/test_topology_manager
 	@echo "Running topology manager tests..."
 	@$<
 
+test-topology-integration: $(TEST_BIN_DIR)/cluster/test_topology_integration
+	@echo "Running topology integration tests..."
+	@$<
+
 test-endpoint: $(TEST_BIN_DIR)/cluster/test_endpoint
 	@echo "Running endpoint tests..."
 	@$<
@@ -210,6 +214,11 @@ $(TEST_BIN_DIR)/cluster/test_topology_quorum: $(TEST_DIR)/cluster/test_topology_
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
 
 $(TEST_BIN_DIR)/cluster/test_topology_manager: $(TEST_DIR)/cluster/test_topology_manager.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/cluster/test_topology_integration: $(TEST_DIR)/cluster/test_topology_integration.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
 	@echo "CC TEST $<"
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
