@@ -110,6 +110,21 @@ int buckets_topology_save_quorum(char **disk_paths, int disk_count,
                                   buckets_cluster_topology_t *topology);
 buckets_cluster_topology_t* buckets_topology_load_quorum(char **disk_paths, int disk_count);
 
+/* Topology manager (high-level coordination) */
+typedef void (*buckets_topology_change_callback_t)(buckets_cluster_topology_t *topology,
+                                                    void *user_data);
+
+int buckets_topology_manager_init(char **disk_paths, int disk_count);
+void buckets_topology_manager_cleanup(void);
+buckets_cluster_topology_t* buckets_topology_manager_get(void);
+int buckets_topology_manager_load(void);
+int buckets_topology_manager_add_pool(void);
+int buckets_topology_manager_add_set(int pool_idx, buckets_disk_info_t *disks, int disk_count);
+int buckets_topology_manager_mark_set_draining(int pool_idx, int set_idx);
+int buckets_topology_manager_mark_set_removed(int pool_idx, int set_idx);
+int buckets_topology_manager_set_callback(buckets_topology_change_callback_t callback,
+                                          void *user_data);
+
 /* ===== Endpoints ===== */
 
 typedef struct {
