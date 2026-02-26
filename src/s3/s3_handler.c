@@ -194,44 +194,49 @@ void buckets_s3_handler(buckets_http_request_t *req,
     const char *method = req->method;
     
     if (strcmp(method, "PUT") == 0) {
-        /* PUT object */
         if (s3_req->bucket[0] != '\0' && s3_req->key[0] != '\0') {
+            /* PUT object */
             ret = buckets_s3_put_object(s3_req, s3_res);
+        } else if (s3_req->bucket[0] != '\0') {
+            /* PUT bucket (create bucket) */
+            ret = buckets_s3_put_bucket(s3_req, s3_res);
         } else {
-            /* PUT bucket - not implemented yet */
-            buckets_s3_xml_error(s3_res, "NotImplemented",
-                                "PUT bucket not implemented yet", s3_req->bucket);
+            buckets_s3_xml_error(s3_res, "InvalidRequest",
+                                "Invalid PUT request", "/");
         }
     } else if (strcmp(method, "GET") == 0) {
-        /* GET object */
         if (s3_req->bucket[0] != '\0' && s3_req->key[0] != '\0') {
+            /* GET object */
             ret = buckets_s3_get_object(s3_req, s3_res);
         } else if (s3_req->bucket[0] != '\0') {
-            /* LIST objects - not implemented yet */
+            /* LIST objects - not implemented yet (Week 38) */
             buckets_s3_xml_error(s3_res, "NotImplemented",
                                 "LIST objects not implemented yet", s3_req->bucket);
         } else {
-            /* LIST buckets - not implemented yet */
-            buckets_s3_xml_error(s3_res, "NotImplemented",
-                                "LIST buckets not implemented yet", "/");
+            /* LIST buckets */
+            ret = buckets_s3_list_buckets(s3_req, s3_res);
         }
     } else if (strcmp(method, "DELETE") == 0) {
-        /* DELETE object */
         if (s3_req->bucket[0] != '\0' && s3_req->key[0] != '\0') {
+            /* DELETE object */
             ret = buckets_s3_delete_object(s3_req, s3_res);
+        } else if (s3_req->bucket[0] != '\0') {
+            /* DELETE bucket */
+            ret = buckets_s3_delete_bucket(s3_req, s3_res);
         } else {
-            /* DELETE bucket - not implemented yet */
-            buckets_s3_xml_error(s3_res, "NotImplemented",
-                                "DELETE bucket not implemented yet", s3_req->bucket);
+            buckets_s3_xml_error(s3_res, "InvalidRequest",
+                                "Invalid DELETE request", "/");
         }
     } else if (strcmp(method, "HEAD") == 0) {
-        /* HEAD object */
         if (s3_req->bucket[0] != '\0' && s3_req->key[0] != '\0') {
+            /* HEAD object */
             ret = buckets_s3_head_object(s3_req, s3_res);
+        } else if (s3_req->bucket[0] != '\0') {
+            /* HEAD bucket */
+            ret = buckets_s3_head_bucket(s3_req, s3_res);
         } else {
-            /* HEAD bucket - not implemented yet */
-            buckets_s3_xml_error(s3_res, "NotImplemented",
-                                "HEAD bucket not implemented yet", s3_req->bucket);
+            buckets_s3_xml_error(s3_res, "InvalidRequest",
+                                "Invalid HEAD request", "/");
         }
     } else {
         buckets_s3_xml_error(s3_res, "MethodNotAllowed",

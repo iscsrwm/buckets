@@ -161,7 +161,7 @@ s3: $(S3_OBJ)
 admin: $(ADMIN_OBJ)
 
 # Tests
-test: test-format test-topology test-endpoint test-erasure test-scanner test-worker test-orchestrator test-throttle test-checkpoint test-http-server test-router test-conn-pool test-peer-grid test-rpc test-broadcast test-s3-xml test-s3-ops
+test: test-format test-topology test-endpoint test-erasure test-scanner test-worker test-orchestrator test-throttle test-checkpoint test-http-server test-router test-conn-pool test-peer-grid test-rpc test-broadcast test-s3-xml test-s3-ops test-s3-buckets
 
 test-format: $(TEST_BIN_DIR)/cluster/test_format
 	@echo "Running format tests..."
@@ -268,6 +268,10 @@ test-s3-xml: $(TEST_BIN_DIR)/s3/test_s3_xml
 
 test-s3-ops: $(TEST_BIN_DIR)/s3/test_s3_ops
 	@echo "Running S3 operations tests..."
+	@$<
+
+test-s3-buckets: $(TEST_BIN_DIR)/s3/test_s3_buckets
+	@echo "Running S3 bucket operations tests..."
 	@$<
 
 # Test binaries (Criterion-based tests)
@@ -402,6 +406,11 @@ $(TEST_BIN_DIR)/s3/test_s3_xml: $(TEST_DIR)/s3/test_s3_xml.c $(BUILD_DIR)/libbuc
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
 
 $(TEST_BIN_DIR)/s3/test_s3_ops: $(TEST_DIR)/s3/test_s3_ops.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/s3/test_s3_buckets: $(TEST_DIR)/s3/test_s3_buckets.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
 	@echo "CC TEST $<"
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion

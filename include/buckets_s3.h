@@ -228,6 +228,60 @@ int buckets_s3_head_object(buckets_s3_request_t *req,
                            buckets_s3_response_t *res);
 
 /* ===================================================================
+ * Bucket Operations
+ * ===================================================================*/
+
+/**
+ * PUT Bucket operation (CreateBucket)
+ * 
+ * Creates a new bucket.
+ * 
+ * @param req S3 request (bucket name in req->bucket)
+ * @param res Output: S3 response
+ * @return BUCKETS_OK on success
+ */
+int buckets_s3_put_bucket(buckets_s3_request_t *req,
+                          buckets_s3_response_t *res);
+
+/**
+ * DELETE Bucket operation
+ * 
+ * Deletes an empty bucket. Returns 409 Conflict if bucket is not empty.
+ * 
+ * @param req S3 request (bucket name in req->bucket)
+ * @param res Output: S3 response
+ * @return BUCKETS_OK on success
+ */
+int buckets_s3_delete_bucket(buckets_s3_request_t *req,
+                             buckets_s3_response_t *res);
+
+/**
+ * HEAD Bucket operation
+ * 
+ * Checks if a bucket exists and is accessible.
+ * Returns 200 if exists, 404 if not found.
+ * 
+ * @param req S3 request (bucket name in req->bucket)
+ * @param res Output: S3 response (no body)
+ * @return BUCKETS_OK on success
+ */
+int buckets_s3_head_bucket(buckets_s3_request_t *req,
+                           buckets_s3_response_t *res);
+
+/**
+ * LIST Buckets operation
+ * 
+ * Lists all buckets owned by the authenticated user.
+ * Returns XML with bucket names and creation dates.
+ * 
+ * @param req S3 request (no bucket/key needed)
+ * @param res Output: S3 response with XML body
+ * @return BUCKETS_OK on success
+ */
+int buckets_s3_list_buckets(buckets_s3_request_t *req,
+                            buckets_s3_response_t *res);
+
+/* ===================================================================
  * XML Response Generation
  * ===================================================================*/
 

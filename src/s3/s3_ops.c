@@ -9,6 +9,10 @@
 #include <string.h>
 #include <time.h>
 #include <ctype.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <dirent.h>
 #include <openssl/evp.h>
 
 #include "buckets.h"
@@ -373,6 +377,260 @@ int buckets_s3_head_object(buckets_s3_request_t *req, buckets_s3_response_t *res
         buckets_debug("HEAD object: %s/%s (ETag: %s)",
                       req->bucket, req->key, res->etag);
     }
+    
+    return BUCKETS_OK;
+}
+
+/* ===================================================================
+ * Bucket Operations
+ * ===================================================================*/
+
+int buckets_s3_put_bucket(buckets_s3_request_t *req, buckets_s3_response_t *res)
+{
+    if (!req || !res) {
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    if (req->bucket[0] == '\0') {
+        return buckets_s3_xml_error(res, "InvalidBucketName",
+                                     "Bucket name is required",
+                                     "/");
+    }
+    
+    /* Validate bucket name */
+    if (!buckets_s3_validate_bucket_name(req->bucket)) {
+        return buckets_s3_xml_error(res, "InvalidBucketName",
+                                     "The specified bucket is not valid",
+                                     req->bucket);
+    }
+    
+    /* Create bucket directory */
+    char bucket_path[2048];
+    snprintf(bucket_path, sizeof(bucket_path), "/tmp/buckets-data/%s", req->bucket);
+    
+    /* Check if bucket already exists */
+    struct stat st;
+    if (stat(bucket_path, &st) == 0) {
+        /* Bucket exists */
+        if (S_ISDIR(st.st_mode)) {
+            /* Bucket already exists - return 409 Conflict (BucketAlreadyOwnedByYou) */
+            return buckets_s3_xml_error(res, "BucketAlreadyOwnedByYou",
+                                         "Your previous request to create the named bucket succeeded and you already own it",
+                                         req->bucket);
+        }
+    }
+    
+    /* Create bucket directory */
+    if (mkdir(bucket_path, 0755) != 0) {
+        buckets_error("Failed to create bucket directory: %s", bucket_path);
+        return buckets_s3_xml_error(res, "InternalError",
+                                     "Failed to create bucket",
+                                     req->bucket);
+    }
+    
+    buckets_info("Created bucket: %s", req->bucket);
+    
+    /* Return 200 OK with empty body */
+    res->status_code = 200;
+    res->body = NULL;
+    res->body_len = 0;
+    
+    return BUCKETS_OK;
+}
+
+int buckets_s3_delete_bucket(buckets_s3_request_t *req, buckets_s3_response_t *res)
+{
+    if (!req || !res) {
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    if (req->bucket[0] == '\0') {
+        return buckets_s3_xml_error(res, "InvalidBucketName",
+                                     "Bucket name is required",
+                                     "/");
+    }
+    
+    /* Check if bucket exists */
+    char bucket_path[2048];
+    snprintf(bucket_path, sizeof(bucket_path), "/tmp/buckets-data/%s", req->bucket);
+    
+    struct stat st;
+    if (stat(bucket_path, &st) != 0) {
+        /* Bucket doesn't exist - return 404 */
+        return buckets_s3_xml_error(res, "NoSuchBucket",
+                                     "The specified bucket does not exist",
+                                     req->bucket);
+    }
+    
+    /* Check if bucket is empty by trying to read directory */
+    DIR *dir = opendir(bucket_path);
+    if (!dir) {
+        return buckets_s3_xml_error(res, "InternalError",
+                                     "Failed to access bucket",
+                                     req->bucket);
+    }
+    
+    struct dirent *entry;
+    bool is_empty = true;
+    while ((entry = readdir(dir)) != NULL) {
+        /* Skip . and .. */
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        is_empty = false;
+        break;
+    }
+    closedir(dir);
+    
+    if (!is_empty) {
+        /* Bucket not empty - return 409 Conflict */
+        return buckets_s3_xml_error(res, "BucketNotEmpty",
+                                     "The bucket you tried to delete is not empty",
+                                     req->bucket);
+    }
+    
+    /* Delete bucket directory */
+    if (rmdir(bucket_path) != 0) {
+        buckets_error("Failed to delete bucket: %s", bucket_path);
+        return buckets_s3_xml_error(res, "InternalError",
+                                     "Failed to delete bucket",
+                                     req->bucket);
+    }
+    
+    buckets_info("Deleted bucket: %s", req->bucket);
+    
+    /* Return 204 No Content */
+    res->status_code = 204;
+    res->body = NULL;
+    res->body_len = 0;
+    
+    return BUCKETS_OK;
+}
+
+int buckets_s3_head_bucket(buckets_s3_request_t *req, buckets_s3_response_t *res)
+{
+    if (!req || !res) {
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    if (req->bucket[0] == '\0') {
+        return buckets_s3_xml_error(res, "InvalidBucketName",
+                                     "Bucket name is required",
+                                     "/");
+    }
+    
+    /* Check if bucket exists */
+    char bucket_path[2048];
+    snprintf(bucket_path, sizeof(bucket_path), "/tmp/buckets-data/%s", req->bucket);
+    
+    struct stat st;
+    if (stat(bucket_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        /* Bucket doesn't exist - return 404 */
+        return buckets_s3_xml_error(res, "NoSuchBucket",
+                                     "The specified bucket does not exist",
+                                     req->bucket);
+    }
+    
+    buckets_debug("HEAD bucket: %s (exists)", req->bucket);
+    
+    /* Return 200 OK with no body */
+    res->status_code = 200;
+    res->body = NULL;
+    res->body_len = 0;
+    
+    return BUCKETS_OK;
+}
+
+int buckets_s3_list_buckets(buckets_s3_request_t *req, buckets_s3_response_t *res)
+{
+    if (!req || !res) {
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    /* Open buckets data directory */
+    DIR *dir = opendir("/tmp/buckets-data");
+    if (!dir) {
+        /* No buckets exist yet - return empty list */
+        buckets_debug("LIST buckets: directory doesn't exist, returning empty list");
+        
+        /* Build empty ListAllMyBucketsResult XML */
+        char xml_body[4096];
+        snprintf(xml_body, sizeof(xml_body),
+                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                 "<ListAllMyBucketsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n"
+                 "  <Owner>\n"
+                 "    <ID>buckets-admin</ID>\n"
+                 "    <DisplayName>buckets-admin</DisplayName>\n"
+                 "  </Owner>\n"
+                 "  <Buckets>\n"
+                 "  </Buckets>\n"
+                 "</ListAllMyBucketsResult>\n");
+        
+        res->status_code = 200;
+        res->body = buckets_strdup(xml_body);
+        res->body_len = strlen(xml_body);
+        
+        return BUCKETS_OK;
+    }
+    
+    /* Build XML response with bucket list */
+    char xml_body[16384];
+    int offset = snprintf(xml_body, sizeof(xml_body),
+                          "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                          "<ListAllMyBucketsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n"
+                          "  <Owner>\n"
+                          "    <ID>buckets-admin</ID>\n"
+                          "    <DisplayName>buckets-admin</DisplayName>\n"
+                          "  </Owner>\n"
+                          "  <Buckets>\n");
+    
+    /* Iterate through buckets */
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        /* Skip . and .. */
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        
+        /* Check if it's a directory */
+        char bucket_path[2048];
+        snprintf(bucket_path, sizeof(bucket_path), "/tmp/buckets-data/%s", entry->d_name);
+        
+        struct stat st;
+        if (stat(bucket_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            continue;
+        }
+        
+        /* Get bucket creation time */
+        char timestamp[64];
+        struct tm *tm_info = gmtime(&st.st_ctime);
+        strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000Z", tm_info);
+        
+        /* Add bucket to XML */
+        offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
+                           "    <Bucket>\n"
+                           "      <Name>%s</Name>\n"
+                           "      <CreationDate>%s</CreationDate>\n"
+                           "    </Bucket>\n",
+                           entry->d_name, timestamp);
+        
+        if (offset >= (int)sizeof(xml_body) - 200) {
+            buckets_warn("LIST buckets: XML buffer nearly full");
+            break;
+        }
+    }
+    closedir(dir);
+    
+    /* Close XML */
+    offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
+                       "  </Buckets>\n"
+                       "</ListAllMyBucketsResult>\n");
+    
+    buckets_debug("LIST buckets: returning %d bytes of XML", offset);
+    
+    res->status_code = 200;
+    res->body = buckets_strdup(xml_body);
+    res->body_len = strlen(xml_body);
     
     return BUCKETS_OK;
 }

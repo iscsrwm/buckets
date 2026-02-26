@@ -160,7 +160,9 @@ int buckets_s3_xml_error(buckets_s3_response_t *res,
     } else if (strcmp(error_code, "AccessDenied") == 0 ||
                strcmp(error_code, "SignatureDoesNotMatch") == 0) {
         res->status_code = 403;
-    } else if (strcmp(error_code, "BucketAlreadyExists") == 0) {
+    } else if (strcmp(error_code, "BucketAlreadyExists") == 0 ||
+               strcmp(error_code, "BucketAlreadyOwnedByYou") == 0 ||
+               strcmp(error_code, "BucketNotEmpty") == 0) {
         res->status_code = 409;
     } else if (strcmp(error_code, "InvalidBucketName") == 0 ||
                strcmp(error_code, "InvalidRequest") == 0) {
