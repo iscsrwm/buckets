@@ -185,17 +185,24 @@ test-core: $(TEST_BIN_DIR)/core/test_runner
 	@echo "Running core tests..."
 	@$<
 
-test-hash: $(TEST_BIN_DIR)/hash/test_runner
+test-hash: $(TEST_BIN_DIR)/hash/test_siphash $(TEST_BIN_DIR)/hash/test_xxhash $(TEST_BIN_DIR)/hash/test_ring
 	@echo "Running hash tests..."
-	@$<
+	@$(TEST_BIN_DIR)/hash/test_siphash
+	@$(TEST_BIN_DIR)/hash/test_xxhash
+	@$(TEST_BIN_DIR)/hash/test_ring
 
-test-crypto: $(TEST_BIN_DIR)/crypto/test_runner
+test-crypto: $(TEST_BIN_DIR)/crypto/test_blake2b $(TEST_BIN_DIR)/crypto/test_sha256
 	@echo "Running crypto tests..."
-	@$<
+	@$(TEST_BIN_DIR)/crypto/test_blake2b
+	@$(TEST_BIN_DIR)/crypto/test_sha256
 
 test-erasure: $(TEST_BIN_DIR)/erasure/test_erasure
 	@echo "Running erasure coding tests..."
 	@$<
+
+test-storage: $(TEST_BIN_DIR)/storage/test_object
+	@echo "Running storage tests..."
+	@$(TEST_BIN_DIR)/storage/test_object
 
 test-scanner: $(TEST_BIN_DIR)/migration/test_scanner
 	@echo "Running migration scanner tests..."
@@ -253,6 +260,36 @@ $(TEST_BIN_DIR)/cluster/test_topology_integration: $(TEST_DIR)/cluster/test_topo
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
 
 $(TEST_BIN_DIR)/erasure/test_erasure: $(TEST_DIR)/erasure/test_erasure.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lisal -lcriterion
+
+$(TEST_BIN_DIR)/hash/test_siphash: $(TEST_DIR)/hash/test_siphash.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/hash/test_xxhash: $(TEST_DIR)/hash/test_xxhash.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/hash/test_ring: $(TEST_DIR)/hash/test_ring.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/crypto/test_blake2b: $(TEST_DIR)/crypto/test_blake2b.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/crypto/test_sha256: $(TEST_DIR)/crypto/test_sha256.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/storage/test_object: $(TEST_DIR)/storage/test_object.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
 	@echo "CC TEST $<"
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lisal -lcriterion
