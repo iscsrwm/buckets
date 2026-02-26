@@ -628,8 +628,21 @@ int buckets_registry_record(const buckets_object_location_t *location)
         return -1;
     }
     
-    /* Write to storage (TODO: integrate with storage layer) */
-    /* For now, just update cache */
+    /* Write to storage (.buckets-registry bucket) */
+    /* Storage format: bucket/object/version-id.json */
+    char object_key[1024];
+    snprintf(object_key, sizeof(object_key), "%s/%s/%s.json",
+             location->bucket, location->object, location->version_id);
+    
+    int result = buckets_put_object(BUCKETS_REGISTRY_BUCKET, object_key,
+                                     json, strlen(json), "application/json");
+    
+    if (result != 0) {
+        buckets_error("Failed to write registry entry to storage");
+        buckets_free(key);
+        buckets_free(json);
+        return -1;
+    }
     
     /* Update cache */
     if (g_registry.cache) {
@@ -679,11 +692,38 @@ int buckets_registry_lookup(const char *bucket, const char *object,
         }
     }
     
-    /* TODO: Fetch from storage */
+    /* Cache miss - fetch from storage */
+    char object_key[1024];
+    snprintf(object_key, sizeof(object_key), "%s/%s/%s.json", bucket, object, vid);
+    
+    size_t json_size = 0;
+    void *json_data = NULL;
+    int result = buckets_get_object(BUCKETS_REGISTRY_BUCKET, object_key, &json_data, &json_size);
+    
+    if (result != 0 || !json_data) {
+        buckets_free(key);
+        buckets_debug("Cache miss and storage miss: %s/%s/%s", bucket, object, vid);
+        return -1;  /* Not found */
+    }
+    
+    /* Deserialize from JSON */
+    *location = buckets_registry_location_from_json((const char*)json_data);
+    buckets_free(json_data);
+    
+    if (!*location) {
+        buckets_free(key);
+        buckets_error("Failed to deserialize registry entry");
+        return -1;
+    }
+    
+    /* Update cache for future lookups */
+    if (g_registry.cache) {
+        cache_put(g_registry.cache, key, *location);
+    }
     
     buckets_free(key);
-    buckets_debug("Cache miss: %s/%s/%s", bucket, object, vid);
-    return -1;  /* Not found */
+    buckets_debug("Cache miss, loaded from storage: %s/%s/%s", bucket, object, vid);
+    return 0;
 }
 
 int buckets_registry_delete(const char *bucket, const char *object,
@@ -705,7 +745,14 @@ int buckets_registry_delete(const char *bucket, const char *object,
         return -1;
     }
     
-    /* TODO: Delete from storage */
+    /* Delete from storage */
+    char object_key[1024];
+    snprintf(object_key, sizeof(object_key), "%s/%s/%s.json", bucket, object, vid);
+    
+    int result = buckets_delete_object(BUCKETS_REGISTRY_BUCKET, object_key);
+    if (result != 0) {
+        buckets_warn("Failed to delete registry entry from storage (may not exist)");
+    }
     
     /* Invalidate cache */
     if (g_registry.cache) {
