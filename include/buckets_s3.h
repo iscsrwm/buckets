@@ -412,6 +412,111 @@ bool buckets_s3_validate_bucket_name(const char *bucket);
  */
 bool buckets_s3_validate_object_key(const char *key);
 
+/* ===================================================================
+ * Multipart Upload Operations (Weeks 39-40)
+ * ===================================================================*/
+
+/**
+ * Multipart upload part information
+ */
+typedef struct {
+    int part_number;           /* Part number (1-10000) */
+    char etag[64];             /* MD5 hash of part */
+    size_t size;               /* Part size in bytes */
+    time_t uploaded;           /* Upload timestamp */
+} buckets_s3_part_t;
+
+/**
+ * Multipart upload session
+ */
+typedef struct {
+    char upload_id[64];        /* Upload ID (UUID) */
+    char bucket[256];          /* Bucket name */
+    char key[1024];            /* Object key */
+    time_t initiated;          /* Initiation timestamp */
+    int part_count;            /* Number of parts uploaded */
+    buckets_s3_part_t *parts;  /* Array of parts */
+} buckets_s3_upload_t;
+
+/**
+ * Initiate multipart upload
+ * 
+ * POST /{bucket}/{key}?uploads
+ * 
+ * Starts a new multipart upload session and returns an upload ID.
+ * Client must use this upload ID for all subsequent part uploads
+ * and the final complete/abort operations.
+ * 
+ * @param req S3 request (bucket and key required)
+ * @param res Output: S3 response with XML body (InitiateMultipartUploadResult)
+ * @return BUCKETS_OK on success
+ */
+int buckets_s3_initiate_multipart_upload(buckets_s3_request_t *req,
+                                         buckets_s3_response_t *res);
+
+/**
+ * Upload part
+ * 
+ * PUT /{bucket}/{key}?uploadId={id}&partNumber={n}
+ * 
+ * Uploads a single part of a multipart upload. Parts can be uploaded
+ * in any order and in parallel. Each part must be at least 5MB except
+ * the last part. Part numbers must be between 1-10000.
+ * 
+ * @param req S3 request (bucket, key, uploadId, partNumber required)
+ * @param res Output: S3 response with ETag header
+ * @return BUCKETS_OK on success
+ */
+int buckets_s3_upload_part(buckets_s3_request_t *req,
+                            buckets_s3_response_t *res);
+
+/**
+ * Complete multipart upload
+ * 
+ * POST /{bucket}/{key}?uploadId={id}
+ * 
+ * Completes a multipart upload by assembling the previously uploaded
+ * parts. The request body contains an XML list of part numbers and ETags.
+ * Parts are concatenated in ascending part number order to create the
+ * final object.
+ * 
+ * @param req S3 request (bucket, key, uploadId required, body contains XML)
+ * @param res Output: S3 response with XML body (CompleteMultipartUploadResult)
+ * @return BUCKETS_OK on success
+ */
+int buckets_s3_complete_multipart_upload(buckets_s3_request_t *req,
+                                         buckets_s3_response_t *res);
+
+/**
+ * Abort multipart upload
+ * 
+ * DELETE /{bucket}/{key}?uploadId={id}
+ * 
+ * Aborts a multipart upload and deletes all uploaded parts.
+ * After aborting, the upload ID is invalid and cannot be reused.
+ * 
+ * @param req S3 request (bucket, key, uploadId required)
+ * @param res Output: S3 response (204 No Content)
+ * @return BUCKETS_OK on success
+ */
+int buckets_s3_abort_multipart_upload(buckets_s3_request_t *req,
+                                      buckets_s3_response_t *res);
+
+/**
+ * List parts
+ * 
+ * GET /{bucket}/{key}?uploadId={id}
+ * 
+ * Lists the parts that have been uploaded for a specific multipart upload.
+ * Supports pagination with max-parts and part-number-marker parameters.
+ * 
+ * @param req S3 request (bucket, key, uploadId required)
+ * @param res Output: S3 response with XML body (ListPartsResult)
+ * @return BUCKETS_OK on success
+ */
+int buckets_s3_list_parts(buckets_s3_request_t *req,
+                          buckets_s3_response_t *res);
+
 #ifdef __cplusplus
 }
 #endif

@@ -167,19 +167,24 @@ int buckets_s3_parse_request(buckets_http_request_t *http_req,
             
             while (pair && req->query_count < count) {
                 char *equals = strchr(pair, '=');
+                char decoded_key[256];
+                char decoded_value[1024];
+                
                 if (equals) {
+                    /* Key=Value format */
                     *equals = '\0';
-                    
-                    /* URL decode both key and value */
-                    char decoded_key[256];
-                    char decoded_value[1024];
                     url_decode(decoded_key, pair);
                     url_decode(decoded_value, equals + 1);
-                    
-                    req->query_params_keys[req->query_count] = buckets_strdup(decoded_key);
-                    req->query_params_values[req->query_count] = buckets_strdup(decoded_value);
-                    req->query_count++;
+                } else {
+                    /* Key only (no value), e.g., ?uploads */
+                    url_decode(decoded_key, pair);
+                    decoded_value[0] = '\0';  /* Empty value */
                 }
+                
+                req->query_params_keys[req->query_count] = buckets_strdup(decoded_key);
+                req->query_params_values[req->query_count] = buckets_strdup(decoded_value);
+                req->query_count++;
+                
                 pair = strtok_r(NULL, "&", &saveptr);
             }
             
@@ -240,6 +245,19 @@ void buckets_s3_response_free(buckets_s3_response_t *res)
  * S3 Handler
  * ===================================================================*/
 
+/**
+ * Check if query parameter exists
+ */
+static bool has_query_param(buckets_s3_request_t *req, const char *key)
+{
+    for (int i = 0; i < req->query_count; i++) {
+        if (req->query_params_keys[i] && strcmp(req->query_params_keys[i], key) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void buckets_s3_handler(buckets_http_request_t *req,
                         buckets_http_response_t *res,
                         void *user_data)
@@ -267,8 +285,14 @@ void buckets_s3_handler(buckets_http_request_t *req,
     
     if (strcmp(method, "PUT") == 0) {
         if (s3_req->bucket[0] != '\0' && s3_req->key[0] != '\0') {
-            /* PUT object */
-            ret = buckets_s3_put_object(s3_req, s3_res);
+            /* Check for multipart upload part */
+            if (has_query_param(s3_req, "uploadId") && has_query_param(s3_req, "partNumber")) {
+                /* PUT /{bucket}/{key}?uploadId={id}&partNumber={n} - Upload part */
+                ret = buckets_s3_upload_part(s3_req, s3_res);
+            } else {
+                /* PUT object */
+                ret = buckets_s3_put_object(s3_req, s3_res);
+            }
         } else if (s3_req->bucket[0] != '\0') {
             /* PUT bucket (create bucket) */
             ret = buckets_s3_put_bucket(s3_req, s3_res);
@@ -278,8 +302,14 @@ void buckets_s3_handler(buckets_http_request_t *req,
         }
     } else if (strcmp(method, "GET") == 0) {
         if (s3_req->bucket[0] != '\0' && s3_req->key[0] != '\0') {
-            /* GET object */
-            ret = buckets_s3_get_object(s3_req, s3_res);
+            /* Check for multipart list parts */
+            if (has_query_param(s3_req, "uploadId")) {
+                /* GET /{bucket}/{key}?uploadId={id} - List parts */
+                ret = buckets_s3_list_parts(s3_req, s3_res);
+            } else {
+                /* GET object */
+                ret = buckets_s3_get_object(s3_req, s3_res);
+            }
         } else if (s3_req->bucket[0] != '\0') {
             /* LIST objects - check for list-type query parameter */
             /* If list-type=2, use v2 API, otherwise use v1 */
@@ -303,8 +333,14 @@ void buckets_s3_handler(buckets_http_request_t *req,
         }
     } else if (strcmp(method, "DELETE") == 0) {
         if (s3_req->bucket[0] != '\0' && s3_req->key[0] != '\0') {
-            /* DELETE object */
-            ret = buckets_s3_delete_object(s3_req, s3_res);
+            /* Check for multipart abort */
+            if (has_query_param(s3_req, "uploadId")) {
+                /* DELETE /{bucket}/{key}?uploadId={id} - Abort multipart upload */
+                ret = buckets_s3_abort_multipart_upload(s3_req, s3_res);
+            } else {
+                /* DELETE object */
+                ret = buckets_s3_delete_object(s3_req, s3_res);
+            }
         } else if (s3_req->bucket[0] != '\0') {
             /* DELETE bucket */
             ret = buckets_s3_delete_bucket(s3_req, s3_res);
@@ -322,6 +358,23 @@ void buckets_s3_handler(buckets_http_request_t *req,
         } else {
             buckets_s3_xml_error(s3_res, "InvalidRequest",
                                 "Invalid HEAD request", "/");
+        }
+    } else if (strcmp(method, "POST") == 0) {
+        if (s3_req->bucket[0] != '\0' && s3_req->key[0] != '\0') {
+            /* Multipart upload operations */
+            if (has_query_param(s3_req, "uploads")) {
+                /* POST /{bucket}/{key}?uploads - Initiate multipart upload */
+                ret = buckets_s3_initiate_multipart_upload(s3_req, s3_res);
+            } else if (has_query_param(s3_req, "uploadId")) {
+                /* POST /{bucket}/{key}?uploadId={id} - Complete multipart upload */
+                ret = buckets_s3_complete_multipart_upload(s3_req, s3_res);
+            } else {
+                buckets_s3_xml_error(s3_res, "InvalidRequest",
+                                    "Invalid POST request", req->uri);
+            }
+        } else {
+            buckets_s3_xml_error(s3_res, "InvalidRequest",
+                                "Invalid POST request", "/");
         }
     } else {
         buckets_s3_xml_error(s3_res, "MethodNotAllowed",
