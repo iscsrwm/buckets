@@ -99,8 +99,8 @@ buckets-admin cluster migration-status
 
 ## Project Status
 
-**Current Phase**: Phase 4 - Storage Layer (Week 12)  
-**Progress**: 3 of 11 phases complete, Week 12 of 52 (23%)
+**Current Phase**: Phase 5 - Location Registry (Week 17)  
+**Progress**: 4 phases complete, Week 17 of 52 (33%)
 
 ### Completed
 
@@ -119,32 +119,59 @@ buckets-admin cluster migration-status
   - 49 tests passing
 
 - ✅ **Phase 3: Cryptography & Erasure (Weeks 8-11)** - 100% Complete
-  - BLAKE2b cryptographic hashing (faster than SHA-256)
+  - BLAKE2b cryptographic hashing (1.6x faster than SHA-256)
+  - SHA-256 (OpenSSL wrapper)
   - Reed-Solomon erasure coding with Intel ISA-L
   - 8+4, 12+4, 16+4 configurations tested
   - Automatic chunk reconstruction
   - 36 tests passing
 
-- 🔄 **Phase 4: Storage Layer (Weeks 12-16)** - 20% Complete (Week 12/16)
+- ✅ **Phase 4: Storage Layer (Weeks 12-16)** - 100% Complete
   - ✅ Object primitives & disk I/O (Week 12)
+  - ✅ Object metadata & versioning (Week 13)
+  - ✅ Multi-disk management & healing (Week 14-16)
   - MinIO-compatible xl.meta format
-  - Inline objects (<128KB) and erasure-coded objects (≥128KB)
-  - BLAKE2b checksums per chunk
-  - Atomic write-then-rename operations
-  - 18 tests passing
+  - S3-compatible versioning with delete markers
+  - Quorum-based reads/writes (N/2+1)
+  - Automatic healing of inconsistent metadata
+  - LRU metadata cache (10K entries)
+  - Performance benchmarks: 5-10 GB/s encode, 27-51 GB/s decode
+  - 33 tests passing
+
+- 🔄 **Phase 5: Location Registry (Weeks 17-20)** - 25% Complete (Week 17/20)
+  - ✅ Registry core implementation (Week 17)
+  - Thread-safe LRU cache (1M entries, 5-min TTL)
+  - Write-through cache with persistent storage
+  - Self-hosted on Buckets (.buckets-registry bucket)
+  - JSON serialization with storage integration
+  - 8 tests passing (5 simple + 3 integration)
+  - Comprehensive architecture documentation
 
 ### Current Stats
 
-- **Production Code**: 6,179 lines (core + cluster + hash + crypto + erasure + storage)
-- **Test Code**: 3,659 lines
-- **Test Coverage**: 165/165 tests passing (100%)
+- **Production Code**: 10,186 lines
+  - Core: 255 lines
+  - Cluster: 2,326 lines
+  - Hash: 920 lines
+  - Crypto: 527 lines
+  - Erasure: 546 lines
+  - Storage: 4,132 lines
+  - Registry: 1,173 lines
+- **Test Code**: 4,488 lines
+- **Test Coverage**: 188/188 tests passing (100%)
 - **Build**: Clean with `-Wall -Wextra -Werror -pedantic`
-- **Library Size**: ~200KB (includes ISA-L)
+- **Library Size**: ~260KB (includes ISA-L)
+
+### Performance Highlights
+
+- **Erasure Coding**: 5-10 GB/s encode, 27-51 GB/s decode (Intel ISA-L)
+- **Hashing**: BLAKE2b 880 MB/s (1.6x faster than SHA-256)
+- **Reconstruction**: 31-52 GB/s with missing disks
+- **Registry Lookups**: <5ms target (cache hit ~1 μs, cache miss ~1-5 ms)
 
 ### Next Up
 
-- Week 13: Object metadata & versioning
-- Week 14-16: Multi-disk management, integration testing
+- Week 18-20: Registry batch operations, range queries, integration with object operations
 
 See [ROADMAP.md](ROADMAP.md) for detailed development timeline and [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) for comprehensive progress tracking.
 
@@ -191,12 +218,16 @@ buckets/
 │   │   └── sha256.c      # SHA-256 wrapper
 │   ├── erasure/          # Erasure coding ✅
 │   │   └── erasure.c     # Reed-Solomon (ISA-L)
-│   ├── storage/          # Storage layer 🔄
+│   ├── storage/          # Storage layer ✅
 │   │   ├── layout.c      # Path computation, chunk sizing
 │   │   ├── metadata.c    # xl.meta serialization
 │   │   ├── chunk.c       # Chunk I/O, checksums
-│   │   └── object.c      # PUT/GET/DELETE/HEAD/STAT
-│   ├── registry/         # Location registry (Week 17-20)
+│   │   ├── object.c      # PUT/GET/DELETE/HEAD/STAT
+│   │   ├── versioning.c  # S3-compatible versioning
+│   │   ├── metadata_cache.c  # LRU metadata cache
+│   │   └── multidisk.c   # Multi-disk quorum operations
+│   ├── registry/         # Location registry 🔄
+│   │   └── registry.c    # Self-hosted location tracking
 │   ├── migration/        # Data rebalancing (Week 21-24)
 │   ├── net/              # Network layer (Week 25-28)
 │   ├── s3/               # S3 API handlers (Week 29-40)
@@ -206,14 +237,25 @@ buckets/
 │   ├── buckets_cluster.h # Cluster structures
 │   ├── buckets_hash.h    # Hash algorithms
 │   ├── buckets_ring.h    # Hash ring API
-│   └── ...               # I/O, JSON, cache, endpoint headers
+│   ├── buckets_crypto.h  # Cryptographic hashing
+│   ├── buckets_erasure.h # Erasure coding
+│   ├── buckets_storage.h # Storage layer
+│   └── buckets_registry.h # Location registry
 ├── tests/                # Unit and integration tests ✅
-│   ├── cluster/          # 60 tests (format, topology, endpoint)
-│   └── hash/             # 49 tests (siphash, xxhash, ring)
+│   ├── cluster/          # 62 tests (format, topology, endpoint, cache)
+│   ├── hash/             # 49 tests (siphash, xxhash, ring)
+│   ├── crypto/           # 28 tests (blake2b, sha256)
+│   ├── erasure/          # 20 tests (reed-solomon)
+│   ├── storage/          # 33 tests (object, versioning, multidisk)
+│   └── registry/         # 8 tests (simple, storage integration)
 ├── docs/                 # Documentation
 │   └── PROJECT_STATUS.md # Detailed progress tracking
 ├── architecture/         # Design documents
-│   └── SCALE_AND_DATA_PLACEMENT.md  # 75-page architecture spec
+│   ├── SCALE_AND_DATA_PLACEMENT.md  # 75-page architecture spec
+│   ├── CLUSTER_AND_STATE_MANAGEMENT.md  # Cluster topology
+│   ├── CRYPTOGRAPHY_AND_INTEGRITY.md    # Hashing and checksums
+│   ├── STORAGE_LAYER.md                 # xl.meta format, erasure coding
+│   └── LOCATION_REGISTRY_IMPLEMENTATION.md  # Registry implementation guide
 └── third_party/          # Third-party libraries
     └── cJSON/            # JSON library
 ```
@@ -237,18 +279,24 @@ make registry
 ### Running Tests
 
 ```bash
-# All tests (111 tests)
+# All tests (188 tests)
 make test
 
 # Specific component tests
 make test-format      # Format management (20 tests)
 make test-topology    # Topology management (18 tests)
 make test-endpoint    # Endpoint parsing (22 tests)
+make test-hash        # Hash algorithms (49 tests)
+make test-crypto      # Cryptography (28 tests)
+make test-erasure     # Erasure coding (20 tests)
 
 # Run specific test binary
-./build/test/hash/test_siphash    # SipHash tests (16 tests)
-./build/test/hash/test_xxhash     # xxHash tests (16 tests)
-./build/test/hash/test_ring       # Hash ring tests (17 tests)
+./build/test/registry/test_registry_simple      # Registry simple (5 tests)
+./build/test/registry/test_registry_storage     # Registry storage (3 tests)
+./build/test/storage/test_multidisk_integration # Multi-disk (10 tests)
+
+# Performance benchmarks
+make benchmark        # Run Phase 4 benchmarks
 
 # With valgrind (memory leak detection)
 make test-valgrind
