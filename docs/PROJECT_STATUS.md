@@ -2,7 +2,7 @@
 
 **Last Updated**: February 26, 2026  
 **Current Phase**: Phase 9 - S3 API Layer (Weeks 35-42) - 🔄 In Progress  
-**Current Week**: Week 39 ✅ COMPLETE (Part 1 + Distributed Erasure Coding Integration)  
+**Current Week**: Week 39 ✅ COMPLETE (Multipart Upload Full Implementation + Distributed EC)  
 **Status**: 🟢 Active Development  
 **Overall Progress**: 39/52 weeks (75% complete)  
 **Phase 1 Status**: ✅ COMPLETE (Foundation - Weeks 1-4)  
@@ -13,7 +13,7 @@
 **Phase 6 Status**: ✅ COMPLETE (Topology Management - Weeks 21-24)  
 **Phase 7 Status**: ✅ COMPLETE (Background Migration - Weeks 25-30)  
 **Phase 8 Status**: ✅ COMPLETE (Network Layer - Weeks 31-34, all 62 tests passing)  
-**Phase 9 Status**: 🔄 In Progress (S3 API Layer - Week 39/42 complete, 60%)
+**Phase 9 Status**: 🔄 In Progress (S3 API Layer - Week 39/42 complete, 65%)
 
 ---
 
@@ -3527,12 +3527,162 @@ Phase 7 implemented a complete background migration engine for rebalancing objec
 - Adapted Go patterns to C idioms
 - Simplified directory structure (no SHA256 hashing, no erasure coding yet)
 
-**Next Steps (Week 39 Part 2 & Week 40)**:
-- CompleteMultipartUpload: Assemble parts into final object
-- AbortMultipartUpload: Clean up upload session and parts
-- ListParts: Query uploaded parts with pagination
-- Unit tests for multipart operations
-- Integration testing with AWS SDK/MinIO mc client
+---
+
+### Week 39 Part 2: Multipart Upload Completion Operations ✅ **COMPLETE**
+
+**Goal**: Complete the S3 multipart upload implementation by adding the remaining three critical operations: ListParts, AbortMultipartUpload, and CompleteMultipartUpload.
+
+**Completed Features**:
+1. **ListParts** (GET `/{bucket}/{key}?uploadId={id}`):
+   - Lists all uploaded parts for a multipart upload session
+   - Returns part metadata: PartNumber, ETag, Size, LastModified
+   - Supports pagination with `max-parts` and `part-number-marker` query params
+   - Default max-parts: 1000 (AWS S3 standard)
+   - Sorts parts by part number in ascending order
+   - Recalculates ETags on-the-fly for each part (MD5 hash)
+   - Returns `IsTruncated` flag and `NextPartNumberMarker` for pagination
+   - XML response format matches S3 API specification
+
+2. **AbortMultipartUpload** (DELETE `/{bucket}/{key}?uploadId={id}`):
+   - Aborts an in-progress multipart upload
+   - Removes all uploaded parts recursively
+   - Deletes upload metadata and directory structure
+   - Returns HTTP 204 No Content on success
+   - Validates upload ID exists before attempting abort
+   - Idempotent: safe to call multiple times (returns 404 after first abort)
+
+3. **CompleteMultipartUpload** (POST `/{bucket}/{key}?uploadId={id}`):
+   - Assembles uploaded parts into final object
+   - Concatenates parts in ascending part number order
+   - Creates parent directories for object path if needed
+   - Calculates final ETag in multipart format: `{md5}-{part_count}`
+   - Returns XML response with Location, Bucket, Key, and ETag
+   - Cleans up multipart upload directory after successful completion
+   - Validates at least one part exists before completing
+   - Reads and validates parts from filesystem
+   - Writes final object to standard bucket location
+   - Handles large objects efficiently with buffered I/O (64KB chunks)
+
+4. **XML Error Handling Enhancement**:
+   - Added new S3 error codes to `buckets_s3_xml_error()` mapping:
+     - `NoSuchUpload`: 404 (upload ID not found)
+     - `InvalidPart`: 400 (no parts uploaded)
+     - `InvalidPartNumber`: 400 (part number out of range)
+     - `MalformedXML`: 400 (invalid request body)
+   - Ensures proper HTTP status codes for all multipart error scenarios
+
+5. **Implementation Details**:
+   - **ListParts**: 
+     - Opens parts directory and reads all `part.N` files
+     - Stats each file for size and last modified time
+     - Reads part data to recalculate MD5 ETags
+     - Builds XML response with pagination support
+     - Buffer size: 1MB for XML response
+   - **AbortMultipartUpload**:
+     - Validates upload metadata before deletion
+     - Uses recursive `remove_directory()` helper
+     - Ensures complete cleanup of all resources
+   - **CompleteMultipartUpload**:
+     - Reads parts directory to discover all uploaded parts
+     - Sorts parts numerically (not lexicographically)
+     - Creates object path with recursive directory creation
+     - Concatenates parts using 64KB buffer for efficiency
+     - Calculates final MD5 hash for entire object
+     - Returns multipart ETag format (`{hash}-{parts}`)
+
+**File Summary**:
+- **Modified**: `src/s3/s3_multipart.c` (+540 lines, now 957 lines total)
+  - ListParts implementation: ~230 lines
+  - AbortMultipartUpload implementation: ~60 lines
+  - CompleteMultipartUpload implementation: ~250 lines
+- **Modified**: `src/s3/s3_xml.c` (+5 lines)
+  - Added 4 new error code mappings for multipart operations
+- **New file**: `tests/s3/test_s3_multipart.c` (678 lines, 14 tests)
+  - InitiateMultipartUpload tests: 3 tests
+  - UploadPart tests: 3 tests
+  - ListParts tests: 2 tests
+  - AbortMultipartUpload tests: 2 tests
+  - CompleteMultipartUpload tests: 3 tests
+  - Helper functions for XML parsing and test fixtures
+- **Modified**: `Makefile` (+10 lines)
+  - Added `test-s3-multipart` target
+  - Added multipart test compilation rule
+
+**Testing Results**:
+- **All 14 tests passing** (100% pass rate) ✅
+- Test coverage:
+  - ✅ Basic multipart upload workflow (initiate → upload → complete)
+  - ✅ Multiple parts upload and concatenation
+  - ✅ ListParts pagination and metadata
+  - ✅ Abort cleanup verification
+  - ✅ Error handling (missing upload ID, invalid part numbers)
+  - ✅ Empty part list detection
+  - ✅ File system verification (directories created/removed)
+  - ✅ ETag calculation and format validation
+  - ✅ XML response parsing and validation
+
+**Design Decisions**:
+1. **Multipart ETag Format**: `{md5}-{part_count}`
+   - Matches S3 specification for multipart uploads
+   - Single dash separator, no "part" suffix
+   - Example: `abc123def456...890-5` (5 parts uploaded)
+   - Allows clients to detect multipart vs single-part objects
+
+2. **Part Assembly Strategy**: Sequential concatenation
+   - Read parts in ascending numerical order
+   - Buffer parts with 64KB chunks for memory efficiency
+   - Single-pass assembly (no temporary files)
+   - Final object written directly to target location
+
+3. **ETag Recalculation in ListParts**: On-demand computation
+   - Don't store ETags in metadata (reduces storage)
+   - Calculate MD5 from part file contents when listing
+   - Tradeoff: ListParts slower but saves disk space
+   - Acceptable for infrequent ListParts calls
+
+4. **Error Handling Philosophy**: Validate early, fail clearly
+   - Check upload ID exists before all operations
+   - Validate part count before completion
+   - Return specific error codes (NoSuchUpload, InvalidPart, etc.)
+   - Detailed error messages in XML responses
+
+**Differences from AWS S3**:
+1. **XML Parsing Simplification**: Current implementation doesn't parse the CompleteMultipartUpload XML body to validate part ETags. It simply assembles all parts found in the directory. Future enhancement: parse XML and validate ETags match uploaded parts.
+
+2. **No Part Ordering Validation**: AWS S3 allows parts to be uploaded out of order and requires explicit ordering in CompleteMultipartUpload XML. Our implementation assembles parts by numerical order regardless of XML body. This is simpler but less flexible.
+
+3. **No Minimum Part Size**: AWS S3 enforces 5MB minimum part size (except last part). Our implementation allows any size for testing convenience. Production deployment should add this validation.
+
+**Performance Characteristics**:
+- **ListParts**: O(N) where N = number of parts (reads all parts)
+- **AbortMultipartUpload**: O(N) where N = number of parts (deletes all)
+- **CompleteMultipartUpload**: O(N) where N = total data size (single-pass read)
+- **Memory usage**: 
+  - ListParts: Up to 1MB XML buffer + part data (temporary)
+  - CompleteMultipartUpload: 64KB buffer for part assembly
+
+**Integration Status**:
+- ✅ All multipart operations integrated into S3 handler routing
+- ✅ Query parameter routing working correctly
+- ✅ POST method support for both initiate and complete
+- ✅ DELETE method support for abort
+- ✅ GET method support for list parts
+- ✅ Error responses properly formatted as XML
+
+**Test Output Summary**:
+```
+[====] Synthesis: Tested: 14 | Passing: 14 | Failing: 0 | Crashing: 0
+```
+
+**Next Steps (Week 40)**:
+- Manual end-to-end testing with curl or AWS CLI
+- Test with large files (>100MB) split into multiple parts
+- Performance testing: upload speed, assembly speed
+- Integration with MinIO mc client
+- Consider adding part size validation (5MB minimum)
+- Consider adding multipart upload listing (list all active uploads)
+- Consider adding upload expiration/cleanup for abandoned uploads
 
 ---
 
@@ -4228,4 +4378,31 @@ $ md5sum retrieved2.bin
 
 ---
 
-**Next Update**: End of Week 39 Part 2 (Distributed Erasure Coding integration complete)
+**Summary Metrics** (as of Week 39 Part 2):
+- **Production Code**: 18,643 lines (src/)
+- **Header Files**: 5,002 lines (include/)
+- **Test Code**: 12,763 lines (tests/)
+- **Total Codebase**: 36,408 lines
+- **Test Coverage**: 319 tests total
+  - Format: 20 tests (19 passing, 1 flaky)
+  - Topology: 67 tests (67 passing)
+  - Hash: 16 tests (16 passing)
+  - Crypto: 16 tests (16 passing)
+  - Erasure: 17 tests (17 passing)
+  - Storage: 16 tests (16 passing)
+  - Migration: 71 tests (68 passing, 3 throttle flaky)
+  - Network: 62 tests (62 passing)
+  - S3 API: 34 tests (34 passing)
+    - XML: 8 tests
+    - Ops: 12 tests
+    - Buckets: 0 tests (placeholder)
+    - Multipart: 14 tests ✨ **NEW**
+
+**Week 39 Part 2 Impact**:
+- Added 678 lines of test code (14 comprehensive multipart tests)
+- Added 540 lines of production code (3 multipart operations)
+- Added 5 lines of error handling code
+- **100% test pass rate for new multipart operations**
+- Total S3 multipart code: 957 lines (initiate, upload, list, abort, complete)
+
+**Next Update**: End of Week 40 (Multipart upload testing and refinement)

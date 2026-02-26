@@ -366,6 +366,22 @@ int main(int argc, char *argv[]) {
         } else {
             buckets_info("Storage directory: /tmp/buckets-data/");
             buckets_info("Running in single-node mode (use --config for clustering)");
+            
+            /* Initialize storage layer with default config */
+            buckets_info("Initializing storage layer...");
+            buckets_storage_config_t storage_cfg = {
+                .data_dir = "/tmp/buckets-data",
+                .inline_threshold = 128 * 1024,  /* 128 KB */
+                .default_ec_k = 2,
+                .default_ec_m = 2,
+                .verify_checksums = true
+            };
+            if (buckets_storage_init(&storage_cfg) != 0) {
+                buckets_error("Failed to initialize storage layer");
+                ret = 1;
+                goto cleanup;
+            }
+            buckets_info("Storage layer initialized");
         }
         buckets_info("Press Ctrl+C to stop");
         

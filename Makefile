@@ -276,6 +276,10 @@ test-s3-buckets: $(TEST_BIN_DIR)/s3/test_s3_buckets
 	@echo "Running S3 bucket operations tests..."
 	@$<
 
+test-s3-multipart: $(TEST_BIN_DIR)/s3/test_s3_multipart
+	@echo "Running S3 multipart upload tests..."
+	@$<
+
 # Test binaries (Criterion-based tests)
 $(TEST_BIN_DIR)/cluster/test_format: $(TEST_DIR)/cluster/test_format.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
@@ -413,6 +417,11 @@ $(TEST_BIN_DIR)/s3/test_s3_ops: $(TEST_DIR)/s3/test_s3_ops.c $(BUILD_DIR)/libbuc
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
 
 $(TEST_BIN_DIR)/s3/test_s3_buckets: $(TEST_DIR)/s3/test_s3_buckets.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/s3/test_s3_multipart: $(TEST_DIR)/s3/test_s3_multipart.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
 	@echo "CC TEST $<"
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion

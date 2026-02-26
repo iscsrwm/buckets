@@ -155,7 +155,8 @@ int buckets_s3_xml_error(buckets_s3_response_t *res,
     
     /* Set HTTP status based on error code */
     if (strcmp(error_code, "NoSuchBucket") == 0 ||
-        strcmp(error_code, "NoSuchKey") == 0) {
+        strcmp(error_code, "NoSuchKey") == 0 ||
+        strcmp(error_code, "NoSuchUpload") == 0) {
         res->status_code = 404;
     } else if (strcmp(error_code, "AccessDenied") == 0 ||
                strcmp(error_code, "SignatureDoesNotMatch") == 0) {
@@ -165,7 +166,10 @@ int buckets_s3_xml_error(buckets_s3_response_t *res,
                strcmp(error_code, "BucketNotEmpty") == 0) {
         res->status_code = 409;
     } else if (strcmp(error_code, "InvalidBucketName") == 0 ||
-               strcmp(error_code, "InvalidRequest") == 0) {
+               strcmp(error_code, "InvalidRequest") == 0 ||
+               strcmp(error_code, "InvalidPart") == 0 ||
+               strcmp(error_code, "InvalidPartNumber") == 0 ||
+               strcmp(error_code, "MalformedXML") == 0) {
         res->status_code = 400;
     } else {
         res->status_code = 500;

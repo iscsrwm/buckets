@@ -202,6 +202,11 @@ int buckets_put_object(const char *bucket, const char *object,
 
     /* For now, use single disk (will integrate topology later) */
     const char *disk_path = g_storage_config.data_dir;
+    
+    /* Fallback to /tmp/buckets-data if storage not initialized (for tests) */
+    if (!disk_path || disk_path[0] == '\0') {
+        disk_path = "/tmp/buckets-data";
+    }
 
     /* Create object directory */
     char full_path[PATH_MAX * 2];
