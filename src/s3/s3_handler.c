@@ -115,6 +115,42 @@ int buckets_s3_parse_request(buckets_http_request_t *http_req,
     req->body = http_req->body;
     req->body_len = http_req->body_len;
     
+    /* Parse query string (simple implementation) */
+    const char *query = strchr(http_req->uri, '?');
+    if (query) {
+        query++; /* Skip the '?' */
+        /* Count parameters */
+        int count = 1;
+        for (const char *p = query; *p; p++) {
+            if (*p == '&') count++;
+        }
+        
+        /* Allocate arrays */
+        req->query_params_keys = buckets_calloc(count, sizeof(char*));
+        req->query_params_values = buckets_calloc(count, sizeof(char*));
+        req->query_count = 0;
+        
+        if (req->query_params_keys && req->query_params_values) {
+            /* Parse key=value pairs */
+            char *query_copy = buckets_strdup(query);
+            char *saveptr;
+            char *pair = strtok_r(query_copy, "&", &saveptr);
+            
+            while (pair && req->query_count < count) {
+                char *equals = strchr(pair, '=');
+                if (equals) {
+                    *equals = '\0';
+                    req->query_params_keys[req->query_count] = buckets_strdup(pair);
+                    req->query_params_values[req->query_count] = buckets_strdup(equals + 1);
+                    req->query_count++;
+                }
+                pair = strtok_r(NULL, "&", &saveptr);
+            }
+            
+            buckets_free(query_copy);
+        }
+    }
+    
     /* Extract headers */
     const char *content_type = get_header(http_req, "Content-Type");
     if (content_type) {
@@ -209,9 +245,22 @@ void buckets_s3_handler(buckets_http_request_t *req,
             /* GET object */
             ret = buckets_s3_get_object(s3_req, s3_res);
         } else if (s3_req->bucket[0] != '\0') {
-            /* LIST objects - not implemented yet (Week 38) */
-            buckets_s3_xml_error(s3_res, "NotImplemented",
-                                "LIST objects not implemented yet", s3_req->bucket);
+            /* LIST objects - check for list-type query parameter */
+            /* If list-type=2, use v2 API, otherwise use v1 */
+            const char *list_type = NULL;
+            for (int i = 0; i < s3_req->query_count; i++) {
+                if (s3_req->query_params_keys[i] &&
+                    strcmp(s3_req->query_params_keys[i], "list-type") == 0) {
+                    list_type = s3_req->query_params_values[i];
+                    break;
+                }
+            }
+            
+            if (list_type && strcmp(list_type, "2") == 0) {
+                ret = buckets_s3_list_objects_v2(s3_req, s3_res);
+            } else {
+                ret = buckets_s3_list_objects_v1(s3_req, s3_res);
+            }
         } else {
             /* LIST buckets */
             ret = buckets_s3_list_buckets(s3_req, s3_res);

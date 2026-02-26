@@ -10,6 +10,7 @@
 #include <time.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <dirent.h>
@@ -627,6 +628,401 @@ int buckets_s3_list_buckets(buckets_s3_request_t *req, buckets_s3_response_t *re
                        "</ListAllMyBucketsResult>\n");
     
     buckets_debug("LIST buckets: returning %d bytes of XML", offset);
+    
+    res->status_code = 200;
+    res->body = buckets_strdup(xml_body);
+    res->body_len = strlen(xml_body);
+    
+    return BUCKETS_OK;
+}
+
+/* ===================================================================
+ * LIST Objects Operations
+ * ===================================================================*/
+
+/**
+ * Get query parameter value by key
+ */
+static const char* get_query_param(buckets_s3_request_t *req, const char *key)
+{
+    if (!req || !key) {
+        return NULL;
+    }
+    
+    for (int i = 0; i < req->query_count; i++) {
+        if (req->query_params_keys[i] && 
+            strcmp(req->query_params_keys[i], key) == 0) {
+            return req->query_params_values[i];
+        }
+    }
+    
+    return NULL;
+}
+
+/**
+ * Parse integer query parameter (returns default if not found or invalid)
+ */
+static int get_query_param_int(buckets_s3_request_t *req, const char *key, int default_value)
+{
+    const char *value = get_query_param(req, key);
+    if (!value) {
+        return default_value;
+    }
+    
+    char *endptr;
+    long result = strtol(value, &endptr, 10);
+    
+    /* Check for conversion errors */
+    if (endptr == value || *endptr != '\0') {
+        return default_value;
+    }
+    
+    /* Check for overflow */
+    if (result < 0 || result > INT_MAX) {
+        return default_value;
+    }
+    
+    return (int)result;
+}
+
+int buckets_s3_list_objects_v1(buckets_s3_request_t *req, buckets_s3_response_t *res)
+{
+    if (!req || !res) {
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    if (req->bucket[0] == '\0') {
+        return buckets_s3_xml_error(res, "InvalidBucketName",
+                                     "Bucket name is required",
+                                     "/");
+    }
+    
+    /* Parse query parameters */
+    const char *prefix = get_query_param(req, "prefix");
+    const char *marker = get_query_param(req, "marker");
+    (void)get_query_param(req, "delimiter"); /* TODO: implement delimiter support */
+    int max_keys = get_query_param_int(req, "max-keys", 1000);
+    
+    if (max_keys <= 0) {
+        max_keys = 1000;
+    }
+    if (max_keys > 1000) {
+        max_keys = 1000; /* S3 limit */
+    }
+    
+    /* Check if bucket exists */
+    char bucket_path[2048];
+    snprintf(bucket_path, sizeof(bucket_path), "/tmp/buckets-data/%s", req->bucket);
+    
+    DIR *dir = opendir(bucket_path);
+    if (!dir) {
+        return buckets_s3_xml_error(res, "NoSuchBucket",
+                                     "The specified bucket does not exist",
+                                     req->bucket);
+    }
+    
+    /* Build XML response */
+    char xml_body[65536]; /* Large buffer for many objects */
+    int offset = snprintf(xml_body, sizeof(xml_body),
+                          "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                          "<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n"
+                          "  <Name>%s</Name>\n",
+                          req->bucket);
+    
+    if (prefix) {
+        offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
+                           "  <Prefix>%s</Prefix>\n", prefix);
+    } else {
+        offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
+                           "  <Prefix></Prefix>\n");
+    }
+    
+    if (marker) {
+        offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
+                           "  <Marker>%s</Marker>\n", marker);
+    } else {
+        offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
+                           "  <Marker></Marker>\n");
+    }
+    
+    offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
+                       "  <MaxKeys>%d</MaxKeys>\n", max_keys);
+    
+    /* Collect and filter objects */
+    struct dirent *entry;
+    int count = 0;
+    bool is_truncated = false;
+    char next_marker[1024] = {0};
+    bool past_marker = (marker == NULL || marker[0] == '\0');
+    
+    while ((entry = readdir(dir)) != NULL && count < max_keys) {
+        /* Skip . and .. */
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        
+        /* Apply marker filter (skip until we pass the marker) */
+        if (!past_marker) {
+            if (strcmp(entry->d_name, marker) <= 0) {
+                continue;
+            }
+            past_marker = true;
+        }
+        
+        /* Apply prefix filter */
+        if (prefix && strncmp(entry->d_name, prefix, strlen(prefix)) != 0) {
+            continue;
+        }
+        
+        /* Get object stats */
+        char object_path[3072];
+        snprintf(object_path, sizeof(object_path), "%s/%s", bucket_path, entry->d_name);
+        
+        struct stat st;
+        if (stat(object_path, &st) != 0) {
+            continue;
+        }
+        
+        /* Skip directories (in case there are any) */
+        if (S_ISDIR(st.st_mode)) {
+            continue;
+        }
+        
+        /* Add object to XML */
+        char timestamp[64];
+        struct tm *tm_info = gmtime(&st.st_mtime);
+        strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000Z", tm_info);
+        
+        /* Calculate ETag (MD5 of file content) - for now, use simplified version */
+        char etag[33] = {0};
+        snprintf(etag, sizeof(etag), "\"%016lx\"", (unsigned long)st.st_mtime);
+        
+        offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
+                           "  <Contents>\n"
+                           "    <Key>%s</Key>\n"
+                           "    <LastModified>%s</LastModified>\n"
+                           "    <ETag>%s</ETag>\n"
+                           "    <Size>%ld</Size>\n"
+                           "    <StorageClass>STANDARD</StorageClass>\n"
+                           "  </Contents>\n",
+                           entry->d_name, timestamp, etag, (long)st.st_size);
+        
+        count++;
+        strncpy(next_marker, entry->d_name, sizeof(next_marker) - 1);
+        
+        if (offset >= (int)sizeof(xml_body) - 1000) {
+            buckets_warn("LIST objects: XML buffer nearly full");
+            is_truncated = true;
+            break;
+        }
+    }
+    
+    /* Check if there are more results */
+    if (!is_truncated && entry != NULL) {
+        is_truncated = true;
+    }
+    
+    closedir(dir);
+    
+    /* Add truncation info */
+    offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
+                       "  <IsTruncated>%s</IsTruncated>\n",
+                       is_truncated ? "true" : "false");
+    
+    if (is_truncated && next_marker[0] != '\0') {
+        offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
+                           "  <NextMarker>%s</NextMarker>\n", next_marker);
+    }
+    
+    /* Close XML */
+    offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
+                       "</ListBucketResult>\n");
+    
+    buckets_debug("LIST objects v1: %s (count=%d, truncated=%s)",
+                  req->bucket, count, is_truncated ? "true" : "false");
+    
+    res->status_code = 200;
+    res->body = buckets_strdup(xml_body);
+    res->body_len = strlen(xml_body);
+    
+    return BUCKETS_OK;
+}
+
+int buckets_s3_list_objects_v2(buckets_s3_request_t *req, buckets_s3_response_t *res)
+{
+    if (!req || !res) {
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    if (req->bucket[0] == '\0') {
+        return buckets_s3_xml_error(res, "InvalidBucketName",
+                                     "Bucket name is required",
+                                     "/");
+    }
+    
+    /* Parse query parameters */
+    const char *prefix = get_query_param(req, "prefix");
+    const char *continuation_token = get_query_param(req, "continuation-token");
+    const char *start_after = get_query_param(req, "start-after");
+    (void)get_query_param(req, "delimiter"); /* TODO: implement delimiter support */
+    int max_keys = get_query_param_int(req, "max-keys", 1000);
+    
+    if (max_keys <= 0) {
+        max_keys = 1000;
+    }
+    if (max_keys > 1000) {
+        max_keys = 1000;
+    }
+    
+    /* continuation-token takes precedence over start-after */
+    const char *marker = continuation_token ? continuation_token : start_after;
+    
+    /* Check if bucket exists */
+    char bucket_path[2048];
+    snprintf(bucket_path, sizeof(bucket_path), "/tmp/buckets-data/%s", req->bucket);
+    
+    DIR *dir = opendir(bucket_path);
+    if (!dir) {
+        return buckets_s3_xml_error(res, "NoSuchBucket",
+                                     "The specified bucket does not exist",
+                                     req->bucket);
+    }
+    
+    /* Build XML response (v2 format) */
+    char xml_body[65536];
+    int offset = snprintf(xml_body, sizeof(xml_body),
+                          "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                          "<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n"
+                          "  <Name>%s</Name>\n",
+                          req->bucket);
+    
+    if (prefix) {
+        offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
+                           "  <Prefix>%s</Prefix>\n", prefix);
+    } else {
+        offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
+                           "  <Prefix></Prefix>\n");
+    }
+    
+    offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
+                       "  <KeyCount>0</KeyCount>\n" /* Will update later */
+                       "  <MaxKeys>%d</MaxKeys>\n", max_keys);
+    
+    if (continuation_token) {
+        offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
+                           "  <ContinuationToken>%s</ContinuationToken>\n",
+                           continuation_token);
+    }
+    
+    if (start_after) {
+        offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
+                           "  <StartAfter>%s</StartAfter>\n", start_after);
+    }
+    
+    /* Collect and filter objects */
+    struct dirent *entry;
+    int count = 0;
+    bool is_truncated = false;
+    char next_token[1024] = {0};
+    bool past_marker = (marker == NULL || marker[0] == '\0');
+    
+    /* Save position to update KeyCount later */
+    int key_count_pos = offset;
+    
+    while ((entry = readdir(dir)) != NULL && count < max_keys) {
+        /* Skip . and .. */
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        
+        /* Apply marker filter */
+        if (!past_marker) {
+            if (strcmp(entry->d_name, marker) <= 0) {
+                continue;
+            }
+            past_marker = true;
+        }
+        
+        /* Apply prefix filter */
+        if (prefix && strncmp(entry->d_name, prefix, strlen(prefix)) != 0) {
+            continue;
+        }
+        
+        /* Get object stats */
+        char object_path[3072];
+        snprintf(object_path, sizeof(object_path), "%s/%s", bucket_path, entry->d_name);
+        
+        struct stat st;
+        if (stat(object_path, &st) != 0) {
+            continue;
+        }
+        
+        if (S_ISDIR(st.st_mode)) {
+            continue;
+        }
+        
+        /* Add object to XML */
+        char timestamp[64];
+        struct tm *tm_info = gmtime(&st.st_mtime);
+        strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000Z", tm_info);
+        
+        char etag[33] = {0};
+        snprintf(etag, sizeof(etag), "\"%016lx\"", (unsigned long)st.st_mtime);
+        
+        offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
+                           "  <Contents>\n"
+                           "    <Key>%s</Key>\n"
+                           "    <LastModified>%s</LastModified>\n"
+                           "    <ETag>%s</ETag>\n"
+                           "    <Size>%ld</Size>\n"
+                           "    <StorageClass>STANDARD</StorageClass>\n"
+                           "  </Contents>\n",
+                           entry->d_name, timestamp, etag, (long)st.st_size);
+        
+        count++;
+        strncpy(next_token, entry->d_name, sizeof(next_token) - 1);
+        
+        if (offset >= (int)sizeof(xml_body) - 1000) {
+            is_truncated = true;
+            break;
+        }
+    }
+    
+    if (!is_truncated && entry != NULL) {
+        is_truncated = true;
+    }
+    
+    closedir(dir);
+    
+    /* Add truncation info */
+    offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
+                       "  <IsTruncated>%s</IsTruncated>\n",
+                       is_truncated ? "true" : "false");
+    
+    if (is_truncated && next_token[0] != '\0') {
+        offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
+                           "  <NextContinuationToken>%s</NextContinuationToken>\n",
+                           next_token);
+    }
+    
+    /* Close XML */
+    offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
+                       "</ListBucketResult>\n");
+    
+    /* Update KeyCount in the XML (a bit hacky but works) */
+    char temp[65536];
+    memcpy(temp, xml_body, key_count_pos);
+    int updated_offset = snprintf(temp + key_count_pos, sizeof(temp) - key_count_pos,
+                                   "  <KeyCount>%d</KeyCount>\n", count);
+    /* Skip the old KeyCount line and copy the rest */
+    const char *rest = strstr(xml_body + key_count_pos, "<MaxKeys>");
+    if (rest) {
+        strcpy(temp + key_count_pos + updated_offset, rest);
+    }
+    memcpy(xml_body, temp, sizeof(xml_body));
+    
+    buckets_debug("LIST objects v2: %s (count=%d, truncated=%s)",
+                  req->bucket, count, is_truncated ? "true" : "false");
     
     res->status_code = 200;
     res->body = buckets_strdup(xml_body);

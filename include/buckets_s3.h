@@ -281,6 +281,46 @@ int buckets_s3_head_bucket(buckets_s3_request_t *req,
 int buckets_s3_list_buckets(buckets_s3_request_t *req,
                             buckets_s3_response_t *res);
 
+/**
+ * LIST Objects v1 operation
+ * 
+ * Lists objects in a bucket (S3 v1 API).
+ * Supports: prefix, marker, max-keys, delimiter
+ * 
+ * Query parameters:
+ * - prefix: Filter by key prefix
+ * - marker: Pagination marker (start after this key)
+ * - max-keys: Maximum number of keys to return (default 1000)
+ * - delimiter: Group keys by common prefix (for "folders")
+ * 
+ * @param req S3 request (bucket name required)
+ * @param res Output: S3 response with XML body (ListBucketResult)
+ * @return BUCKETS_OK on success
+ */
+int buckets_s3_list_objects_v1(buckets_s3_request_t *req,
+                               buckets_s3_response_t *res);
+
+/**
+ * LIST Objects v2 operation
+ * 
+ * Lists objects in a bucket (S3 v2 API - recommended).
+ * Supports: prefix, continuation-token, max-keys, delimiter, start-after
+ * 
+ * Query parameters:
+ * - prefix: Filter by key prefix
+ * - continuation-token: Pagination token from previous response
+ * - max-keys: Maximum number of keys to return (default 1000)
+ * - delimiter: Group keys by common prefix (for "folders")
+ * - start-after: Start listing after this key
+ * - list-type=2: Required parameter to use v2 API
+ * 
+ * @param req S3 request (bucket name required)
+ * @param res Output: S3 response with XML body (ListBucketResult)
+ * @return BUCKETS_OK on success
+ */
+int buckets_s3_list_objects_v2(buckets_s3_request_t *req,
+                                buckets_s3_response_t *res);
+
 /* ===================================================================
  * XML Response Generation
  * ===================================================================*/
