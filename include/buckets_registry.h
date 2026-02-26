@@ -204,6 +204,28 @@ int buckets_registry_lookup_batch(const buckets_registry_key_t *keys,
                                    size_t count,
                                    buckets_object_location_t ***locations);
 
+/* ===== Range Queries ===== */
+
+/**
+ * List all objects in a bucket with optional prefix
+ * 
+ * Scans registry storage to find all objects matching the given criteria.
+ * Useful for bucket listing operations.
+ * 
+ * @param bucket Bucket name
+ * @param prefix Object key prefix (NULL for all objects)
+ * @param max_keys Maximum number of keys to return (0 for unlimited)
+ * @param locations Output array (caller must free each entry and array)
+ * @param count Output count of locations found
+ * @return 0 on success, -1 on error
+ * 
+ * Note: This is a placeholder. Full implementation requires storage integration.
+ */
+int buckets_registry_list(const char *bucket, const char *prefix,
+                          size_t max_keys,
+                          buckets_object_location_t ***locations,
+                          size_t *count);
+
 /* ===== Cache Management ===== */
 
 /**

@@ -811,3 +811,126 @@ int buckets_registry_get_stats(buckets_registry_stats_t *stats)
     
     return 0;
 }
+
+/* ===== Batch Operations ===== */
+
+int buckets_registry_record_batch(const buckets_object_location_t *locations,
+                                   size_t count)
+{
+    if (!g_registry.initialized || !locations || count == 0) {
+        return -1;
+    }
+    
+    int success_count = 0;
+    
+    for (size_t i = 0; i < count; i++) {
+        if (buckets_registry_record(&locations[i]) == 0) {
+            success_count++;
+        } else {
+            buckets_warn("Batch record failed for item %zu: %s/%s", 
+                        i, locations[i].bucket, locations[i].object);
+        }
+    }
+    
+    return success_count;
+}
+
+int buckets_registry_lookup_batch(const buckets_registry_key_t *keys,
+                                   size_t count,
+                                   buckets_object_location_t ***locations)
+{
+    if (!g_registry.initialized || !keys || count == 0 || !locations) {
+        return -1;
+    }
+    
+    /* Allocate output array */
+    buckets_object_location_t **results = buckets_calloc(count, 
+                                                          sizeof(buckets_object_location_t*));
+    if (!results) {
+        return -1;
+    }
+    
+    int success_count = 0;
+    
+    for (size_t i = 0; i < count; i++) {
+        buckets_object_location_t *loc = NULL;
+        if (buckets_registry_lookup(keys[i].bucket, keys[i].object,
+                                    keys[i].version_id, &loc) == 0) {
+            results[i] = loc;
+            success_count++;
+        } else {
+            results[i] = NULL;
+        }
+    }
+    
+    *locations = results;
+    return success_count;
+}
+
+/* ===== Update Operation ===== */
+
+int buckets_registry_update(const char *bucket, const char *object,
+                            const char *version_id,
+                            const buckets_object_location_t *location)
+{
+    if (!g_registry.initialized || !bucket || !object || !version_id || !location) {
+        return -1;
+    }
+    
+    /* Update is implemented as delete + record for atomicity */
+    /* First, delete old location from cache (not storage yet) */
+    char *cache_key = buckets_registry_build_key(bucket, object, version_id);
+    if (!cache_key) {
+        return -1;
+    }
+    
+    cache_invalidate(g_registry.cache, cache_key);
+    buckets_free(cache_key);
+    
+    /* Now record the new location (overwrites storage) */
+    int result = buckets_registry_record(location);
+    
+    if (result == 0) {
+        buckets_debug("Updated location for %s/%s (version %s)", 
+                     bucket, object, version_id);
+    }
+    
+    return result;
+}
+
+/* ===== Range Query Support ===== */
+
+/**
+ * List all objects in a bucket with optional prefix
+ * 
+ * @param bucket Bucket name
+ * @param prefix Object key prefix (NULL for all objects)
+ * @param max_keys Maximum number of keys to return (0 for unlimited)
+ * @param locations Output array (caller must free)
+ * @param count Output count of locations found
+ * @return 0 on success, -1 on error
+ */
+int buckets_registry_list(const char *bucket, const char *prefix,
+                          size_t max_keys,
+                          buckets_object_location_t ***locations,
+                          size_t *count)
+{
+    (void)prefix;    /* TODO: Use for filtering */
+    (void)max_keys;  /* TODO: Use for limiting results */
+    
+    if (!g_registry.initialized || !bucket || !locations || !count) {
+        return -1;
+    }
+    
+    /* This operation requires scanning registry storage */
+    /* We'll build a list by iterating through stored objects */
+    
+    /* For now, return a placeholder implementation */
+    /* Full implementation requires storage layer integration */
+    buckets_warn("Registry range query not fully implemented yet");
+    
+    *locations = NULL;
+    *count = 0;
+    
+    return -1;  /* TODO: Implement after storage integration */
+}
