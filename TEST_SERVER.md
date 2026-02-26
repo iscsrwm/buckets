@@ -32,10 +32,12 @@ curl -v http://localhost:9000/
 
 ```bash
 # Create a bucket called "my-bucket"
-curl -v -X PUT http://localhost:9000/my-bucket
+curl -v -X PUT http://localhost:9000/my-bucket -H "Content-Length: 0"
 ```
 
 **Expected Response**: 200 OK
+
+**Note**: The `Content-Length: 0` header is required by the HTTP server (mongoose) for PUT requests, even when there's no body.
 
 ### 3. List Buckets Again
 
@@ -120,7 +122,7 @@ curl -v -X DELETE http://localhost:9000/my-bucket
 ### Try to Delete Non-Empty Bucket
 
 ```bash
-curl -X PUT http://localhost:9000/test-bucket
+curl -X PUT http://localhost:9000/test-bucket -H "Content-Length: 0"
 echo "data" | curl -X PUT --data-binary @- http://localhost:9000/test-bucket/file.txt
 curl -v -X DELETE http://localhost:9000/test-bucket
 ```
@@ -130,8 +132,8 @@ curl -v -X DELETE http://localhost:9000/test-bucket
 ### Try to Create Duplicate Bucket
 
 ```bash
-curl -X PUT http://localhost:9000/dup-bucket
-curl -v -X PUT http://localhost:9000/dup-bucket
+curl -X PUT http://localhost:9000/dup-bucket -H "Content-Length: 0"
+curl -v -X PUT http://localhost:9000/dup-bucket -H "Content-Length: 0"
 ```
 
 **Expected Response**: 409 Conflict (BucketAlreadyOwnedByYou)
@@ -166,7 +168,7 @@ Here's a complete workflow to test all functionality:
 curl http://localhost:9000/
 
 # Create bucket
-curl -X PUT http://localhost:9000/mybucket
+curl -X PUT http://localhost:9000/mybucket -H "Content-Length: 0"
 
 # List buckets (should show mybucket)
 curl http://localhost:9000/
