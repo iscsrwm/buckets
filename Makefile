@@ -86,6 +86,7 @@ help:
 	@echo "  test-scanner - Test migration scanner"
 	@echo "  test-worker  - Test migration workers"
 	@echo "  test-orchestrator - Test migration orchestrator"
+	@echo "  test-throttle - Test migration throttle"
 	@echo "  test-valgrind- Run tests with valgrind"
 	@echo "  debug        - Build with debug symbols"
 	@echo "  profile      - Build with profiling"
@@ -149,7 +150,7 @@ s3: $(S3_OBJ)
 admin: $(ADMIN_OBJ)
 
 # Tests
-test: test-format test-topology test-endpoint test-erasure test-scanner test-worker test-orchestrator
+test: test-format test-topology test-endpoint test-erasure test-scanner test-worker test-orchestrator test-throttle
 
 test-format: $(TEST_BIN_DIR)/cluster/test_format
 	@echo "Running format tests..."
@@ -207,6 +208,10 @@ test-orchestrator: $(TEST_BIN_DIR)/migration/test_orchestrator
 	@echo "Running migration orchestrator tests..."
 	@$<
 
+test-throttle: $(TEST_BIN_DIR)/migration/test_throttle
+	@echo "Running migration throttle tests..."
+	@$<
+
 # Test binaries (Criterion-based tests)
 $(TEST_BIN_DIR)/cluster/test_format: $(TEST_DIR)/cluster/test_format.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
@@ -254,6 +259,11 @@ $(TEST_BIN_DIR)/migration/test_worker: $(TEST_DIR)/migration/test_worker.c $(BUI
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
 
 $(TEST_BIN_DIR)/migration/test_orchestrator: $(TEST_DIR)/migration/test_orchestrator.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/migration/test_throttle: $(TEST_DIR)/migration/test_throttle.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
 	@echo "CC TEST $<"
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion

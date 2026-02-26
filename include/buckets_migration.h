@@ -437,6 +437,127 @@ buckets_migration_job_t* buckets_migration_job_load(const char *path);
  */
 void buckets_migration_job_cleanup(buckets_migration_job_t *job);
 
+/* ===================================================================
+ * Throttle API (Week 28)
+ * ===================================================================*/
+
+/**
+ * Throttle structure
+ * 
+ * Token bucket algorithm for bandwidth limiting.
+ */
+typedef struct {
+    i64 tokens;                     // Available tokens (bytes)
+    i64 rate_bytes_per_sec;         // Refill rate (bytes/sec)
+    i64 burst_bytes;                // Maximum burst size (bytes)
+    i64 last_refill_us;             // Last refill time (microseconds)
+    bool enabled;                   // Throttling enabled flag
+    pthread_mutex_t lock;           // Thread safety
+} buckets_throttle_t;
+
+/**
+ * Initialize throttle
+ * 
+ * @param throttle Throttle structure
+ * @param rate_bytes_per_sec Rate limit in bytes per second (0 = unlimited)
+ * @param burst_bytes Maximum burst size in bytes
+ * @return BUCKETS_OK on success
+ */
+int buckets_throttle_init(buckets_throttle_t *throttle,
+                           i64 rate_bytes_per_sec,
+                           i64 burst_bytes);
+
+/**
+ * Cleanup throttle
+ * 
+ * @param throttle Throttle structure
+ */
+void buckets_throttle_cleanup(buckets_throttle_t *throttle);
+
+/**
+ * Wait for tokens to become available
+ * 
+ * Blocks until sufficient tokens are available, then consumes them.
+ * 
+ * @param throttle Throttle handle
+ * @param bytes Number of bytes to consume
+ * @return BUCKETS_OK on success
+ */
+int buckets_throttle_wait(buckets_throttle_t *throttle, i64 bytes);
+
+/**
+ * Set throttle rate (can be changed dynamically)
+ * 
+ * @param throttle Throttle handle
+ * @param rate_bytes_per_sec New rate limit (0 = unlimited)
+ * @return BUCKETS_OK on success
+ */
+int buckets_throttle_set_rate(buckets_throttle_t *throttle, i64 rate_bytes_per_sec);
+
+/**
+ * Get current throttle rate
+ * 
+ * @param throttle Throttle handle
+ * @return Current rate in bytes per second
+ */
+i64 buckets_throttle_get_rate(buckets_throttle_t *throttle);
+
+/**
+ * Enable/disable throttling
+ * 
+ * @param throttle Throttle handle
+ * @param enabled Enable flag
+ * @return BUCKETS_OK on success
+ */
+int buckets_throttle_set_enabled(buckets_throttle_t *throttle, bool enabled);
+
+/**
+ * Check if throttling is enabled
+ * 
+ * @param throttle Throttle handle
+ * @return true if enabled, false otherwise
+ */
+bool buckets_throttle_is_enabled(buckets_throttle_t *throttle);
+
+/**
+ * Get throttle statistics
+ * 
+ * @param throttle Throttle handle
+ * @param current_tokens Output: current token count
+ * @param rate_bytes_per_sec Output: current rate
+ * @param enabled Output: enabled flag
+ * @return BUCKETS_OK on success
+ */
+int buckets_throttle_get_stats(buckets_throttle_t *throttle,
+                                i64 *current_tokens,
+                                i64 *rate_bytes_per_sec,
+                                bool *enabled);
+
+/**
+ * Create throttle with default settings
+ * 
+ * Default: 100 MB/s rate, 10 MB burst
+ * 
+ * @return Throttle handle or NULL on error
+ */
+buckets_throttle_t* buckets_throttle_create_default(void);
+
+/**
+ * Create throttle with custom settings
+ * 
+ * @param rate_mbps Rate limit in MB/s (0 = unlimited)
+ * @param burst_mb Burst size in MB
+ * @return Throttle handle or NULL on error
+ */
+buckets_throttle_t* buckets_throttle_create(i64 rate_mbps, i64 burst_mb);
+
+/**
+ * Free throttle
+ * 
+ * @param throttle Throttle handle
+ */
+void buckets_throttle_free(buckets_throttle_t *throttle);
+
 #ifdef __cplusplus
 }
 #endif
