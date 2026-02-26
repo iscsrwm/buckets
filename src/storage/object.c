@@ -17,6 +17,7 @@
 #include "buckets_erasure.h"
 #include "buckets_crypto.h"
 #include "buckets_hash.h"
+#include "buckets_registry.h"
 
 /* Global storage configuration */
 static buckets_storage_config_t g_storage_config = {
@@ -26,6 +27,41 @@ static buckets_storage_config_t g_storage_config = {
     .default_ec_m = 4,
     .verify_checksums = true
 };
+
+/* Helper: Record object location in registry */
+static void record_object_location(const char *bucket, const char *object, size_t size)
+{
+    /* Don't record registry's own objects to prevent infinite recursion */
+    if (strcmp(bucket, ".buckets-registry") == 0) {
+        return;
+    }
+    
+    /* Check if registry is available (it's optional) */
+    /* We check by trying to get config - if NULL, registry not initialized */
+    const buckets_registry_config_t *config = buckets_registry_get_config();
+    if (!config) {
+        /* Registry not initialized, skip silently */
+        return;
+    }
+    
+    /* Create location record for registry */
+    buckets_object_location_t loc = {0};
+    loc.bucket = (char*)bucket;  /* Cast away const for struct assignment */
+    loc.object = (char*)object;
+    loc.version_id = "latest";   /* TODO: Use actual version_id when versioning is integrated */
+    loc.pool_idx = 0;            /* TODO: Get from topology */
+    loc.set_idx = 0;             /* TODO: Get from topology */
+    loc.disk_count = 1;          /* TODO: Get from topology */
+    loc.disk_idxs[0] = 0;        /* TODO: Get from topology */
+    loc.generation = 1;          /* TODO: Get from topology */
+    loc.mod_time = time(NULL);
+    loc.size = size;
+    
+    /* Record in registry (non-fatal if fails) */
+    if (buckets_registry_record(&loc) != 0) {
+        buckets_warn("Failed to record object location in registry: %s/%s", bucket, object);
+    }
+}
 
 /* Initialize storage system */
 int buckets_storage_init(const buckets_storage_config_t *config)
@@ -198,6 +234,11 @@ int buckets_put_object(const char *bucket, const char *object,
         /* Write xl.meta only */
         result = buckets_write_xl_meta(disk_path, object_path, &meta);
         
+        /* Record in registry if write succeeded */
+        if (result == 0) {
+            record_object_location(bucket, object, size);
+        }
+        
         buckets_xl_meta_free(&meta);
         return result;
     }
@@ -284,6 +325,11 @@ int buckets_put_object(const char *bucket, const char *object,
 
     /* Write xl.meta */
     result = buckets_write_xl_meta(disk_path, object_path, &meta);
+
+    /* Record in registry if write succeeded */
+    if (result == 0) {
+        record_object_location(bucket, object, size);
+    }
 
     /* Cleanup */
     buckets_ec_free(&ec_ctx);
@@ -443,6 +489,15 @@ int buckets_delete_object(const char *bucket, const char *object)
     rmdir(dir_path);
 
     buckets_xl_meta_free(&meta);
+    
+    /* Remove from registry (if initialized) */
+    const buckets_registry_config_t *reg_config = buckets_registry_get_config();
+    if (reg_config) {
+        if (buckets_registry_delete(bucket, object, "latest") != 0) {
+            buckets_warn("Failed to delete object location from registry: %s/%s", bucket, object);
+        }
+    }
+    
     buckets_info("Object deleted: %s/%s", bucket, object);
 
     return 0;
