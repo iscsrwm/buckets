@@ -3839,7 +3839,7 @@ $ cat /tmp/buckets-node1/disk1/.buckets.sys/topology.json | jq .pools[0].sets[0]
 ```
 
 **Next Steps**:
-- Initialize topology and registry on server startup (currently formatted but not loaded)
+- Initialize topology and registry on server startup ✅ DONE
 - Connect S3 PUT/GET operations to multi-disk storage layer
 - Implement distributed object placement using SIPMOD+PARITY algorithm
 - Test actual object writes across erasure-coded disk sets
@@ -3848,6 +3848,143 @@ $ cat /tmp/buckets-node1/disk1/.buckets.sys/topology.json | jq .pools[0].sets[0]
 - MinIO's `cmd/format-erasure.go` for format structure
 - MinIO's disk initialization uses shared deployment ID (requires quorum)
 - Buckets uses independent deployment IDs (simplified bootstrapping)
+
+---
+
+### Topology & Registry Integration ✅ **COMPLETE**
+
+**Goal**: Initialize topology manager and location registry on server startup to enable distributed cluster coordination and object location tracking.
+
+**Completed Features**:
+1. **Topology Manager Initialization** (`src/main.c`):
+   - Initialize topology manager with disk paths from configuration
+   - Call `buckets_topology_manager_init()` after multi-disk initialization
+   - Load topology from disks using quorum algorithm
+   - Cache topology in memory for fast access
+
+2. **Topology Loading with Quorum**:
+   - Loads `topology.json` from all formatted disks
+   - Requires 2 out of 4 disks to agree on topology hash
+   - Verifies topology consistency across disks
+   - Caches loaded topology with deployment ID and generation
+
+3. **Location Registry Initialization**:
+   - Initialize registry with `buckets_registry_init(NULL)` for defaults
+   - 1M entry LRU cache for fast object location lookups
+   - 300 second (5 minute) TTL for cache entries
+   - Ready to track object locations across cluster
+
+4. **Cleanup on Shutdown**:
+   - Proper cleanup order: registry → topology → multidisk
+   - Prevents resource leaks on server shutdown
+   - Cleanup in all error paths (HTTP server creation, handler setup, start)
+
+5. **Logging Integration**:
+   - Logs topology load with quorum status
+   - Displays deployment ID and generation counter
+   - Shows registry cache size and TTL settings
+   - Helps debugging cluster coordination issues
+
+**Server Startup Sequence** (with config):
+```
+1. Load configuration from JSON file
+2. Initialize multi-disk storage (format.json validation)
+3. Initialize topology manager with disk paths
+4. Load topology from disks with quorum (2/4 agreement)
+5. Cache topology (deployment ID, generation, pool/set info)
+6. Initialize location registry (1M cache, 300s TTL)
+7. Start HTTP server and S3 API
+```
+
+**File Summary**:
+- **Modified**: `src/main.c` (+52 lines)
+  - Added `#include "buckets_registry.h"`
+  - Topology manager init after multi-disk success
+  - Registry initialization after topology load
+  - Cleanup functions in shutdown and error paths
+
+**Verified Functionality**:
+```bash
+# Start server with formatted disks
+$ ./bin/buckets server --config config/node1.json
+
+# Logs show successful initialization:
+[INFO] Multi-disk storage initialized successfully
+[INFO] Initializing topology manager...
+[INFO] Topology manager initialized with 4 disks
+[INFO] Loading topology from 4 disks with quorum
+[INFO] Topology read quorum achieved: 2/4 (hash=a7abab93bb44bb70)
+[INFO] Topology cached: generation=1, deployment_id=353ad490-...
+[INFO] Topology loaded successfully: generation=1, pools=1
+[INFO] Topology loaded: generation=1, pools=1
+[INFO] Deployment ID: 353ad490-e978-4cfc-a7b6-8c9a877439ec
+[INFO] Initializing location registry...
+[INFO] Registry initialized (cache_size=1000000, ttl=300 seconds)
+[INFO] Location registry initialized
+[INFO] Server started successfully!
+```
+
+**Design Decisions**:
+1. **Quorum-Based Loading**: Topology requires 2/4 disk agreement
+   - Prevents using corrupted or outdated topology
+   - Tolerates 1-2 disk failures during startup
+   - MinIO uses majority quorum (N/2 + 1)
+   
+2. **Topology Manager Pattern**: Centralized topology access
+   - Single point of truth for cluster topology
+   - Thread-safe access via manager API
+   - Simplifies S3 operations (no need to pass topology around)
+   
+3. **Default Registry Config**: Sensible defaults for registry
+   - 1M cache entries (enough for most deployments)
+   - 5-minute TTL balances freshness vs performance
+   - Can be tuned later if needed
+
+4. **Cleanup Order**: Registry before topology before multidisk
+   - Registry may reference topology structures
+   - Topology may reference disk structures
+   - Prevents use-after-free errors
+
+**Testing**:
+- All 3 nodes load topology successfully with quorum
+- Each node shows unique deployment ID (from formatting)
+- Registry initialized with 1M cache on all nodes
+- Topology generation=1, pools=1 on all nodes
+- S3 API continues working on all nodes
+- No errors or warnings during initialization
+
+**Test Results (3-Node Cluster)**:
+```bash
+# Node 1 (deployment_id: 353ad490-...)
+Topology read quorum achieved: 2/4 (hash=a7abab93bb44bb70)
+Registry initialized (cache_size=1000000, ttl=300 seconds)
+
+# Node 2 (deployment_id: f3c0963d-...)
+Topology read quorum achieved: 2/4 (hash=0a33b00135953400)
+Registry initialized (cache_size=1000000, ttl=300 seconds)
+
+# Node 3 (deployment_id: e1a3d481-...)
+Topology read quorum achieved: 2/4 (hash=a07d2e5f12717ffe)
+Registry initialized (cache_size=1000000, ttl=300 seconds)
+```
+
+**What's Now Available**:
+- `buckets_topology_manager_get()`: Get cached topology
+- `buckets_registry_record()`: Record object locations (ready to use)
+- `buckets_registry_lookup()`: Find object locations (ready to use)
+- Topology information for object placement decisions
+- Registry for tracking where objects are stored
+
+**Next Steps**:
+- Modify S3 PUT to use `buckets_object_put()` with registry recording
+- Modify S3 GET to use `buckets_object_get()` with registry lookup
+- Implement SIPMOD+PARITY object placement using topology
+- Test end-to-end: PUT object → distributed storage → GET object
+
+**Reference Implementation**:
+- MinIO's topology loading in `cmd/erasure-server-pool.go`
+- MinIO's location tracking uses in-memory hash tables
+- Buckets uses persistent registry (survives restarts)
 
 ---
 

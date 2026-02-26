@@ -58,9 +58,9 @@
 **Next Steps**: 
 1. Week 39 Part 2 - CompleteMultipartUpload, AbortMultipartUpload, ListParts
 2. Disk formatting command: `buckets format --config <file>` ✅ DONE
-3. Topology and registry initialization on server startup
+3. Topology and registry initialization on server startup ✅ DONE
 4. Connect S3 operations to distributed storage layer
-5. Implement distributed object placement
+5. Implement distributed object placement using topology
 
 ---
 
