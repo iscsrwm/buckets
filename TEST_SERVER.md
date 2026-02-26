@@ -218,10 +218,107 @@ Press `Ctrl+C` in the terminal where the server is running.
 
 ## Notes
 
-- This is a development server for testing Week 35 and Week 37 functionality
+- This is a development server for testing Weeks 35, 37, 38, and 39 functionality
 - Authentication is not yet enforced (simplified for development)
 - Storage is file-based in `/tmp/buckets-data/` (data is lost on reboot)
 - Production deployment would use proper storage backends and authentication
+
+## Multipart Upload (Week 39)
+
+Multipart upload allows uploading large files in parts, which can be uploaded in parallel and resumed if interrupted.
+
+### Initiate Multipart Upload
+
+```bash
+# Initiate a multipart upload for a large file
+curl -X POST "http://localhost:9000/my-bucket/large-file.bin?uploads" \
+  -H "Content-Length: 0"
+```
+
+**Expected Response**: XML with `<UploadId>` - save this ID for subsequent operations
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>my-bucket</Bucket>
+  <Key>large-file.bin</Key>
+  <UploadId>d4b805f5ec82421cade120af8595973c</UploadId>
+</InitiateMultipartUploadResult>
+```
+
+### Upload Parts
+
+```bash
+# Set the upload ID from the previous response
+UPLOAD_ID="d4b805f5ec82421cade120af8595973c"
+
+# Upload part 1 (must include Content-Length)
+echo "Part 1 data here" | curl -X PUT \
+  "http://localhost:9000/my-bucket/large-file.bin?uploadId=${UPLOAD_ID}&partNumber=1" \
+  -H "Content-Length: 17" \
+  --data-binary @- -i
+
+# Upload part 2
+echo "Part 2 data here" | curl -X PUT \
+  "http://localhost:9000/my-bucket/large-file.bin?uploadId=${UPLOAD_ID}&partNumber=2" \
+  -H "Content-Length: 17" \
+  --data-binary @- -i
+```
+
+**Expected Response**: 200 OK with `ETag` header (MD5 hash of part)
+```
+HTTP/1.1 200 OK
+ETag: "e8130839e04b834104325e178da8d8a9"
+Content-Type: application/xml
+Content-Length: 0
+```
+
+**Note**: Save the ETags from each part - you'll need them to complete the upload.
+
+### Complete Multipart Upload (Coming in Week 39 Part 2)
+
+```bash
+# Complete the multipart upload (not yet implemented)
+curl -X POST "http://localhost:9000/my-bucket/large-file.bin?uploadId=${UPLOAD_ID}" \
+  -H "Content-Type: application/xml" \
+  --data '<CompleteMultipartUpload>
+    <Part>
+      <PartNumber>1</PartNumber>
+      <ETag>"e8130839e04b834104325e178da8d8a9"</ETag>
+    </Part>
+    <Part>
+      <PartNumber>2</PartNumber>
+      <ETag>"057a106664d27c1295d959d298b6a746"</ETag>
+    </Part>
+  </CompleteMultipartUpload>'
+```
+
+### Abort Multipart Upload (Coming in Week 39 Part 2)
+
+```bash
+# Abort/cancel a multipart upload (not yet implemented)
+curl -X DELETE "http://localhost:9000/my-bucket/large-file.bin?uploadId=${UPLOAD_ID}"
+```
+
+### List Parts (Coming in Week 39 Part 2)
+
+```bash
+# List uploaded parts (not yet implemented)
+curl "http://localhost:9000/my-bucket/large-file.bin?uploadId=${UPLOAD_ID}"
+```
+
+### Verify Uploaded Parts
+
+```bash
+# Parts are stored in .multipart directory
+ls -la /tmp/buckets-data/my-bucket/.multipart/${UPLOAD_ID}/parts/
+
+# View part contents
+cat /tmp/buckets-data/my-bucket/.multipart/${UPLOAD_ID}/parts/part.1
+cat /tmp/buckets-data/my-bucket/.multipart/${UPLOAD_ID}/parts/part.2
+
+# View upload metadata
+cat /tmp/buckets-data/my-bucket/.multipart/${UPLOAD_ID}/metadata.json
+```
 
 ## Troubleshooting
 

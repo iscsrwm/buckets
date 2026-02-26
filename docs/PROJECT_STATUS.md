@@ -2,9 +2,9 @@
 
 **Last Updated**: February 26, 2026  
 **Current Phase**: Phase 9 - S3 API Layer (Weeks 35-42) - 🔄 In Progress  
-**Current Week**: Week 38 ✅ COMPLETE  
+**Current Week**: Week 39 Part 1 ✅ COMPLETE  
 **Status**: 🟢 Active Development  
-**Overall Progress**: 38/52 weeks (73% complete)  
+**Overall Progress**: 39/52 weeks (75% complete)  
 **Phase 1 Status**: ✅ COMPLETE (Foundation - Weeks 1-4)  
 **Phase 2 Status**: ✅ COMPLETE (Hashing - Weeks 5-7)  
 **Phase 3 Status**: ✅ COMPLETE (Cryptography & Erasure - Weeks 8-11)  
@@ -13,7 +13,7 @@
 **Phase 6 Status**: ✅ COMPLETE (Topology Management - Weeks 21-24)  
 **Phase 7 Status**: ✅ COMPLETE (Background Migration - Weeks 25-30)  
 **Phase 8 Status**: ✅ COMPLETE (Network Layer - Weeks 31-34, all 62 tests passing)  
-**Phase 9 Status**: 🔄 In Progress (S3 API Layer - Week 38/42 complete, 50%)
+**Phase 9 Status**: 🔄 In Progress (S3 API Layer - Week 39 Part 1/42 complete, 56%)
 
 ---
 
@@ -3139,7 +3139,7 @@ Phase 7 implemented a complete background migration engine for rebalancing objec
 
 ### Phase 9: S3 API Layer (Weeks 35-42)
 
-**Current Status**: 🔄 In Progress (Weeks 35, 37, 38 COMPLETE - 50%)
+**Current Status**: 🔄 In Progress (Weeks 35, 37, 38, 39 Part 1 COMPLETE - 56%)
 
 ### Week 35: S3 PUT/GET Operations ✅ **COMPLETE**
 
@@ -3425,10 +3425,114 @@ Phase 7 implemented a complete background migration engine for rebalancing objec
    - Doubles when full
    - Freed after XML generation
 
-**Next Steps (Week 39-40)**:
-- Multipart upload operations (InitiateMultipartUpload, UploadPart, CompleteMultipartUpload)
-- Large file handling (>5MB objects)
-- Part management and assembly
+---
+
+### Week 39 Part 1: Multipart Upload (Initiate & UploadPart) ✅ **COMPLETE**
+
+**Goal**: Implement the first half of S3-compatible multipart upload functionality, allowing clients to initiate uploads and upload individual parts for large files.
+
+**Completed Features**:
+1. **InitiateMultipartUpload** (POST `/{bucket}/{key}?uploads`):
+   - Generates UUID-based upload IDs (32-character hex string)
+   - Creates upload directory structure: `.multipart/{uploadId}/`
+   - Stores metadata in JSON format (bucket, key, initiated timestamp)
+   - Returns XML response with Bucket, Key, and UploadId
+   - Validates bucket exists before initiating
+
+2. **UploadPart** (PUT `/{bucket}/{key}?uploadId={id}&partNumber={n}`):
+   - Validates upload ID exists and matches bucket/key
+   - Validates part number (1-10,000 range, S3 spec)
+   - Writes part data to `.multipart/{uploadId}/parts/part.{n}`
+   - Calculates MD5 ETag for each part
+   - Returns ETag header in response (quoted hex string)
+   - Supports parts of any size (no minimum for testing)
+
+3. **Storage Structure**:
+   ```
+   /tmp/buckets-data/{bucket}/.multipart/{uploadId}/
+   ├── metadata.json    - Upload session metadata (bucket, key, initiated time)
+   └── parts/           - Directory containing uploaded parts
+       ├── part.1
+       ├── part.2
+       └── ...
+   ```
+
+4. **S3 Handler Integration**:
+   - Added POST method support to S3 handler
+   - Query parameter routing: `?uploads` → initiate, `?uploadId&partNumber` → upload part
+   - Enhanced PUT routing to detect multipart upload part vs regular object
+   - Enhanced GET routing to detect list parts vs regular object
+   - Enhanced DELETE routing to detect abort multipart vs regular delete
+
+5. **Query Parameter Parsing Enhancement**:
+   - Fixed to handle valueless query parameters (e.g., `?uploads`)
+   - Previous implementation only parsed `key=value` format
+   - Now supports both `key=value` and `key` (empty value) formats
+   - Critical for S3 spec compliance (many operations use valueless params)
+
+6. **Helper Functions**:
+   - `generate_upload_id()`: UUID generation without dashes
+   - `create_upload_dirs()`: Recursive directory creation
+   - `save_upload_metadata()`: JSON metadata persistence
+   - `load_upload_metadata()`: JSON metadata loading with validation
+   - `remove_directory()`: Recursive cleanup for abort operations
+   - `has_query_param()`: Check for query parameter existence
+
+**File Summary**:
+- **New file**: `src/s3/s3_multipart.c` (417 lines)
+  - Helper functions: ~200 lines
+  - InitiateMultipartUpload: ~80 lines
+  - UploadPart: ~100 lines
+  - Stub functions for Week 40: ~40 lines
+- **Modified**: `include/buckets_s3.h` (+120 lines)
+  - Added `buckets_s3_part_t` structure
+  - Added `buckets_s3_upload_t` structure
+  - Declared 5 multipart operations
+- **Modified**: `src/s3/s3_handler.c` (+50 lines)
+  - POST method routing
+  - Query parameter parsing fix
+  - Multipart operation integration
+
+**Design Decisions**:
+1. **UUID-Based Upload IDs**: Simple, unique, no coordination required
+   - MinIO uses base64-encoded UUIDs; we use hex for simplicity
+   - 32 characters provide sufficient uniqueness
+   
+2. **JSON Metadata**: Lightweight, human-readable, easy to extend
+   - Alternative: Binary format (more efficient but harder to debug)
+   - JSON allows easy inspection and manual recovery
+   
+3. **Hidden `.multipart/` Directory**: Keeps in-progress uploads separate
+   - Won't appear in object listings
+   - Clear separation between complete and incomplete objects
+   - Easy cleanup of stale uploads
+   
+4. **Per-Upload Directory Structure**: Isolates uploads for concurrent safety
+   - Each upload gets its own directory
+   - Parts numbered sequentially (part.1, part.2, ...)
+   - Metadata in same directory for atomic operations
+
+**Testing**:
+- Manual testing with curl commands
+- Successfully initiated upload and received upload ID
+- Uploaded 2 parts with proper ETags
+- Parts correctly stored in filesystem at expected paths
+- Metadata JSON correctly persisted with all fields
+- ETags verified to match MD5 of uploaded content
+- Validated upload ID verification (wrong ID rejected)
+- Validated part number range (1-10,000)
+
+**Reference Implementation**:
+- Studied MinIO's `cmd/erasure-multipart.go` and `cmd/object-multipart-handlers.go`
+- Adapted Go patterns to C idioms
+- Simplified directory structure (no SHA256 hashing, no erasure coding yet)
+
+**Next Steps (Week 39 Part 2 & Week 40)**:
+- CompleteMultipartUpload: Assemble parts into final object
+- AbortMultipartUpload: Clean up upload session and parts
+- ListParts: Query uploaded parts with pagination
+- Unit tests for multipart operations
+- Integration testing with AWS SDK/MinIO mc client
 
 ---
 
