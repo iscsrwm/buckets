@@ -99,8 +99,8 @@ buckets-admin cluster migration-status
 
 ## Project Status
 
-**Current Phase**: Phase 6 - Topology Management (Week 23)  
-**Progress**: 5 phases complete, Week 23 of 52 (44%)
+**Current Phase**: Phase 7 - Background Migration (Week 27 complete)  
+**Progress**: 6 phases complete, Week 27 of 52 (52%)
 
 ### Completed
 
@@ -150,7 +150,7 @@ buckets-admin cluster migration-status
   - Cache hit latency: 0.323 μs
   - 15 tests passing (100%)
 
-- 🔄 **Phase 6: Topology Management (Weeks 21-24)** - 83% Complete (Week 23/24)
+- ✅ **Phase 6: Topology Management (Weeks 21-24)** - 100% Complete
   - ✅ Dynamic topology operations (Week 21)
     - Add pool, add set, state transitions
     - Generation tracking
@@ -164,11 +164,35 @@ buckets-admin cluster migration-status
     - Automatic quorum persistence
     - Event callbacks with user data
     - 11 tests passing
-  - ⏳ Production readiness (Week 24)
+  - ✅ Integration testing (Week 24)
+    - End-to-end topology change workflows
+    - Critical bug fixes (pool count tracking)
+    - 10 integration tests passing
+
+- 🔄 **Phase 7: Background Migration (Weeks 25-30)** - 50% Complete (Week 27/30)
+  - ✅ Migration scanner (Week 25)
+    - Parallel per-disk scanning
+    - Hash ring integration for location computation
+    - Task queue with size-based priority (small objects first)
+    - 10 tests passing (100%)
+  - ✅ Worker pool (Week 26)
+    - Thread pool with configurable workers (default: 16)
+    - Task queue with producer-consumer pattern
+    - Retry logic with exponential backoff (3 attempts)
+    - 12 tests passing (100%)
+  - ✅ Migration orchestrator (Week 27)
+    - State machine with 6 states, 10 valid transitions
+    - Job lifecycle (create, start, pause, resume, stop, wait)
+    - Real-time progress tracking with ETA calculation
+    - Event callback system
+    - 14 tests passing (100%)
+  - ⏳ Throttling (Week 28)
+  - ⏳ Checkpointing (Week 29)
+  - ⏳ Integration (Week 30)
 
 ### Current Stats
 
-- **Production Code**: 11,353 lines
+- **Production Code**: ~13,128 lines
   - Core: 255 lines
   - Cluster: 3,050 lines (+420 manager)
   - Hash: 920 lines
@@ -176,9 +200,18 @@ buckets-admin cluster migration-status
   - Erasure: 546 lines
   - Storage: 4,171 lines
   - Registry: 1,266 lines
+  - Migration: 1,775 lines (scanner, worker pool, orchestrator)
   - Benchmarks: 618 lines
-- **Test Code**: 5,942 lines
-- **Test Coverage**: 231/231 tests passing (100%)
+- **Test Code**: ~7,135 lines
+- **Test Coverage**: 267/267 tests passing (100%)
+  - Foundation: 62 tests
+  - Hashing: 49 tests
+  - Crypto & Erasure: 36 tests
+  - Storage: 33 tests
+  - Registry: 15 tests
+  - Topology: 31 tests
+  - Migration: 36 tests (scanner 10, worker 12, orchestrator 14)
+  - Storage Integration: 5 tests
 - **Build**: Clean with `-Wall -Wextra -Werror -pedantic`
 - **Library Size**: ~260KB (includes ISA-L)
 

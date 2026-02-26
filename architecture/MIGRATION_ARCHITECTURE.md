@@ -2,7 +2,7 @@
 
 **Document Version**: 1.0  
 **Last Updated**: February 25, 2026  
-**Status**: IN PROGRESS (Weeks 25-26 complete)  
+**Status**: IN PROGRESS (Weeks 25-27 complete)  
 **Implementation**: Phase 7 (Weeks 25-30)
 
 ---
@@ -65,7 +65,7 @@ The migration engine moves objects between sets when the cluster topology change
 |-----------|--------|------|-------|-------|
 | Scanner | ✅ Complete | 25 | 10/10 | 544 |
 | Worker Pool | ✅ Complete | 26 | 12/12 | 692 |
-| Orchestrator | ⏳ Pending | 27 | 0 | 0 |
+| Orchestrator | ✅ Complete | 27 | 14/14 | 526 |
 | Throttling | ⏳ Pending | 28 | 0 | 0 |
 | Checkpointing | ⏳ Pending | 29 | 0 | 0 |
 | Integration | ⏳ Pending | 30 | 0 | 0 |
@@ -567,18 +567,22 @@ int buckets_worker_pool_get_stats(pool, stats) {
 
 ### 5.1 Overview
 
+**Status**: ✅ Complete (526 lines, 14 tests passing)
+
 **Responsibilities:**
-- Job lifecycle management
-- State machine coordination
-- Integration of scanner + workers
-- Progress reporting
-- Pause/resume
+- Job lifecycle management (create, start, pause, resume, stop, wait)
+- State machine coordination (6 states, 10 valid transitions)
+- Integration of scanner + worker pool
+- Progress tracking with real-time ETA calculation
+- Event callback system for state changes
+- Job persistence API (placeholders for Week 29)
 
 ### 5.2 State Machine
 
+**Implemented States:**
 ```
 ┌──────┐
-│ IDLE │
+│ IDLE │ (Initial state)
 └───┬──┘
     │ start_migration()
     ▼
@@ -586,6 +590,7 @@ int buckets_worker_pool_get_stats(pool, stats) {
 │SCANNING  │ (Scanner enumerating objects)
 └────┬─────┘
      │ scan_complete()
+     ├──────────▶ (no objects) ──▶ COMPLETED
      ▼
 ┌───────────┐
 │MIGRATING  │ (Workers processing tasks)
@@ -601,36 +606,257 @@ int buckets_worker_pool_get_stats(pool, stats) {
 ┌───────────┐              ┌─────────┐
 │ COMPLETED │              │ FAILED  │
 └───────────┘              └─────────┘
+ (Terminal)                (Terminal)
 ```
 
-**Implementation** (planned):
+**Valid State Transitions:**
+1. IDLE → SCANNING (start)
+2. IDLE → FAILED (initialization error)
+3. SCANNING → MIGRATING (objects found)
+4. SCANNING → COMPLETED (no objects to migrate)
+5. SCANNING → FAILED (scan error)
+6. MIGRATING → PAUSED (pause request)
+7. MIGRATING → COMPLETED (all tasks done)
+8. MIGRATING → FAILED (worker error)
+9. PAUSED → MIGRATING (resume)
+10. PAUSED → FAILED (stop while paused)
+
+**State Validation:**
+- All transitions validated before execution
+- Terminal states (COMPLETED/FAILED) cannot transition
+- Invalid transitions return `BUCKETS_ERR_INVALID_ARG`
+
+### 5.3 Implementation
+
+**Data Structure:**
 ```c
-typedef enum {
-    STATE_IDLE,
-    STATE_SCANNING,
-    STATE_MIGRATING,
-    STATE_PAUSED,
-    STATE_COMPLETED,
-    STATE_FAILED
-} migration_state_t;
-
-typedef struct {
-    char job_id[64];
-    migration_state_t state;
+typedef struct buckets_migration_job {
+    char job_id[64];                        // "migration-gen-42-to-43"
+    i64 source_generation;                  // Old topology generation
+    i64 target_generation;                  // New topology generation
     
-    buckets_scanner_state_t *scanner;
-    buckets_worker_pool_t *worker_pool;
+    // State
+    buckets_migration_state_t state;        // Current state
+    time_t start_time;                      // When job started
+    time_t estimated_completion;            // ETA (seconds)
     
-    i64 total_objects;
-    i64 migrated_objects;
-    i64 failed_objects;
+    // Progress
+    i64 total_objects;                      // Total objects to migrate
+    i64 migrated_objects;                   // Successfully migrated
+    i64 failed_objects;                     // Failed migrations
+    i64 bytes_total;                        // Total bytes to migrate
+    i64 bytes_migrated;                     // Bytes migrated so far
     
-    time_t start_time;
-    time_t estimated_completion;
+    // Topologies
+    buckets_cluster_topology_t *old_topology;
+    buckets_cluster_topology_t *new_topology;
     
-    pthread_mutex_t lock;
-} migration_job_t;
+    // Disk paths
+    char **disk_paths;
+    int disk_count;
+    
+    // Components
+    buckets_scanner_state_t *scanner;       // Scanner (SCANNING state)
+    buckets_worker_pool_t *worker_pool;     // Worker pool (MIGRATING state)
+    
+    // Event callback
+    buckets_migration_event_callback_t callback;
+    void *callback_user_data;
+    
+    pthread_mutex_t lock;                   // Thread safety
+} buckets_migration_job_t;
 ```
+
+**API Functions:**
+```c
+// Job lifecycle
+buckets_migration_job_t* buckets_migration_job_create(
+    i64 source_gen, i64 target_gen,
+    buckets_cluster_topology_t *old_topology,
+    buckets_cluster_topology_t *new_topology,
+    char **disk_paths, int disk_count);
+
+int buckets_migration_job_start(buckets_migration_job_t *job);
+int buckets_migration_job_pause(buckets_migration_job_t *job);
+int buckets_migration_job_resume(buckets_migration_job_t *job);
+int buckets_migration_job_stop(buckets_migration_job_t *job);
+int buckets_migration_job_wait(buckets_migration_job_t *job);
+void buckets_migration_job_cleanup(buckets_migration_job_t *job);
+
+// Progress tracking
+buckets_migration_state_t buckets_migration_job_get_state(
+    buckets_migration_job_t *job);
+
+int buckets_migration_job_get_progress(
+    buckets_migration_job_t *job,
+    i64 *total, i64 *completed, i64 *failed,
+    double *percent, i64 *eta);
+
+// Event callbacks
+int buckets_migration_job_set_callback(
+    buckets_migration_job_t *job,
+    buckets_migration_event_callback_t callback,
+    void *user_data);
+
+// Persistence (placeholders for Week 29)
+int buckets_migration_job_save(buckets_migration_job_t *job, const char *path);
+buckets_migration_job_t* buckets_migration_job_load(const char *path);
+```
+
+### 5.4 Workflow
+
+**Start Operation:**
+```c
+int buckets_migration_job_start(job) {
+    // 1. Validate state (must be IDLE)
+    if (job->state != IDLE) return ERROR;
+    
+    // 2. Transition to SCANNING
+    transition_state(job, SCANNING);
+    
+    // 3. Initialize and run scanner
+    job->scanner = buckets_scanner_init(...);
+    buckets_scanner_scan(job->scanner, &tasks, &count);
+    
+    // 4. Handle scan results
+    if (count == 0) {
+        // No migration needed
+        transition_state(job, COMPLETED);
+        return OK;
+    }
+    
+    // 5. Transition to MIGRATING
+    transition_state(job, MIGRATING);
+    
+    // 6. Initialize and start worker pool
+    job->worker_pool = buckets_worker_pool_create(16, ...);
+    buckets_worker_pool_start(job->worker_pool);
+    
+    // 7. Submit tasks to workers
+    buckets_worker_pool_submit(job->worker_pool, tasks, count);
+    
+    return OK;
+}
+```
+
+**Wait Operation:**
+```c
+int buckets_migration_job_wait(job) {
+    while (true) {
+        // Check if terminal state
+        if (job->state == COMPLETED || job->state == FAILED) {
+            break;
+        }
+        
+        // Update progress from worker pool
+        if (job->state == MIGRATING) {
+            update_progress(job);
+            
+            // Fire progress callback
+            if (job->callback) {
+                job->callback(job, "progress", job->callback_user_data);
+            }
+            
+            // Check if all tasks complete
+            if (all_tasks_done(job->worker_pool)) {
+                transition_state(job, COMPLETED);
+                break;
+            }
+        }
+        
+        // Poll every 100ms
+        nanosleep({0, 100000000L}, NULL);
+    }
+    
+    return OK;
+}
+```
+
+### 5.5 Progress Tracking
+
+**ETA Calculation:**
+```c
+void update_progress(job) {
+    // Get worker pool statistics
+    buckets_worker_stats_t stats;
+    buckets_worker_pool_get_stats(job->worker_pool, &stats);
+    
+    // Update job progress
+    job->migrated_objects = stats.tasks_completed;
+    job->failed_objects = stats.tasks_failed;
+    job->bytes_migrated = stats.bytes_migrated;
+    
+    // Calculate ETA from throughput
+    if (stats.throughput_mbps > 0 && job->bytes_total > 0) {
+        i64 bytes_remaining = job->bytes_total - job->bytes_migrated;
+        double mb_remaining = bytes_remaining / (1024.0 * 1024.0);
+        job->estimated_completion = (i64)(mb_remaining / stats.throughput_mbps);
+    }
+}
+```
+
+### 5.6 Event Callbacks
+
+**Callback Signature:**
+```c
+typedef void (*buckets_migration_event_callback_t)(
+    buckets_migration_job_t *job,
+    const char *event_type,
+    void *user_data);
+```
+
+**Event Types:**
+- `"state_change"` - State machine transition
+- `"progress"` - Progress update (during wait polling)
+
+**Example Usage:**
+```c
+void my_callback(buckets_migration_job_t *job, 
+                 const char *event_type,
+                 void *user_data) {
+    if (strcmp(event_type, "state_change") == 0) {
+        printf("Job %s transitioned to state %d\n", 
+               job->job_id, job->state);
+    } else if (strcmp(event_type, "progress") == 0) {
+        i64 total, completed;
+        double percent;
+        buckets_migration_job_get_progress(job, &total, &completed, 
+                                             NULL, &percent, NULL);
+        printf("Progress: %.1f%% (%lld/%lld)\n", 
+               percent, completed, total);
+    }
+}
+
+// Register callback
+buckets_migration_job_set_callback(job, my_callback, my_context);
+```
+
+### 5.7 Design Decisions
+
+1. **Empty Migration Handling**: SCANNING → COMPLETED transition for zero-object migrations
+2. **Terminal State Protection**: `stop()` is idempotent for COMPLETED/FAILED jobs
+3. **Opaque Worker Pool**: Forward declaration prevents circular dependencies
+4. **Job ID Format**: Auto-generated as `"migration-gen-{source}-to-{target}"`
+5. **Wait Polling**: 100ms sleep between state checks (balances responsiveness and CPU)
+6. **Synchronous Callbacks**: Fired during state transitions (simple, no threading issues)
+
+### 5.8 Testing
+
+**Test Coverage (14 tests):**
+1. Job creation with valid arguments ✅
+2. Job creation with NULL arguments (validation) ✅
+3. Get job state ✅
+4. Start empty job (no objects to migrate) ✅
+5. Get progress (total, completed, failed, percent, ETA) ✅
+6. Set event callback ✅
+7. Stop job (accepts terminal states) ✅
+8. Wait for completion ✅
+9. Job cleanup ✅
+10. Invalid state transitions (pause from IDLE, resume from IDLE) ✅
+11. Job ID format validation ✅
+12. Progress percentage calculation ✅
+13. Multiple topology generations ✅
+14. Job persistence (save/load placeholders) ✅
 
 ---
 
