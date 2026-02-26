@@ -83,6 +83,7 @@ help:
 	@echo "  test         - Run all tests"
 	@echo "  test-core    - Test core components"
 	@echo "  test-hash    - Test hashing"
+	@echo "  test-scanner - Test migration scanner"
 	@echo "  test-valgrind- Run tests with valgrind"
 	@echo "  debug        - Build with debug symbols"
 	@echo "  profile      - Build with profiling"
@@ -146,7 +147,7 @@ s3: $(S3_OBJ)
 admin: $(ADMIN_OBJ)
 
 # Tests
-test: test-format test-topology test-endpoint test-erasure
+test: test-format test-topology test-endpoint test-erasure test-scanner
 
 test-format: $(TEST_BIN_DIR)/cluster/test_format
 	@echo "Running format tests..."
@@ -192,6 +193,10 @@ test-erasure: $(TEST_BIN_DIR)/erasure/test_erasure
 	@echo "Running erasure coding tests..."
 	@$<
 
+test-scanner: $(TEST_BIN_DIR)/migration/test_scanner
+	@echo "Running migration scanner tests..."
+	@$<
+
 # Test binaries (Criterion-based tests)
 $(TEST_BIN_DIR)/cluster/test_format: $(TEST_DIR)/cluster/test_format.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
@@ -227,6 +232,11 @@ $(TEST_BIN_DIR)/erasure/test_erasure: $(TEST_DIR)/erasure/test_erasure.c $(BUILD
 	@mkdir -p $(dir $@)
 	@echo "CC TEST $<"
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lisal -lcriterion
+
+$(TEST_BIN_DIR)/migration/test_scanner: $(TEST_DIR)/migration/test_scanner.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
 
 # Generic test binary rule
 $(TEST_BIN_DIR)/%: $(TEST_DIR)/%.c $(BUILD_DIR)/libbuckets.a

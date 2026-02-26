@@ -1,14 +1,15 @@
 # Buckets Project Status
 
 **Last Updated**: February 25, 2026  
-**Current Phase**: Phase 6 - Week 24 (Topology Management) - ✅ COMPLETE  
+**Current Phase**: Phase 7 - Week 25 (Background Migration) - ✅ COMPLETE  
 **Status**: 🟢 Active Development  
 **Phase 1 Status**: ✅ COMPLETE (Foundation - Weeks 1-4)  
 **Phase 2 Status**: ✅ COMPLETE (Hashing - Weeks 5-7)  
 **Phase 3 Status**: ✅ COMPLETE (Cryptography & Erasure - Weeks 8-11)  
 **Phase 4 Status**: ✅ COMPLETE (Storage Layer - Weeks 12-16)  
 **Phase 5 Status**: ✅ COMPLETE (Location Registry - Weeks 17-20, 100% complete)  
-**Phase 6 Status**: ✅ COMPLETE (Topology Management - Weeks 21-24, 100% complete)
+**Phase 6 Status**: ✅ COMPLETE (Topology Management - Weeks 21-24, 100% complete)  
+**Phase 7 Status**: 🔄 IN PROGRESS (Background Migration - Weeks 25-30, Week 25 complete)
 
 ---
 
@@ -2008,6 +2009,92 @@ Comprehensive benchmarks were run to validate performance characteristics and id
 - ✅ Horizontal scaling ready (architecture supports it)
 - ✅ Automatic tracking of all object operations
 - ✅ Production-ready implementation
+
+---
+
+## 🚀 Phase 7: Background Data Migration (Weeks 25-30) - IN PROGRESS
+
+### Overview
+Phase 7 implements background data migration for rebalancing objects after topology changes (pool additions, set removals). The migration engine runs in the background, moving objects to their correct locations based on the consistent hash ring without disrupting normal operations.
+
+### Week 25: Migration Scanner ✅ **COMPLETE**
+
+**Goal**: Enumerate objects and identify migration candidates
+
+**Implemented Features**:
+- [x] Migration scanner with parallel per-disk approach
+- [x] Per-disk scanner threads for independent scanning
+- [x] Hash ring integration for location computation
+- [x] Migration detection logic (old vs new topology)
+- [x] Task queue with size-based priority sorting (small first)
+- [x] Statistics tracking (objects scanned, affected, bytes)
+- [x] Comprehensive test suite (10 tests, 100% passing)
+
+**Architecture Decisions**:
+- **Parallel per-disk scanning**: One thread per disk for optimal I/O utilization
+- **Hash ring encoding**: Node IDs encode pool/set as `pool*1000 + set`
+- **Small objects first**: Sort by size (ascending) for quick progress wins
+- **Topology comparison**: Build old/new rings, compare locations for each object
+
+**Functions Implemented**:
+1. `buckets_scanner_init()` - Initialize scanner with disk paths and topologies
+2. `buckets_scanner_scan()` - Parallel scan with thread pool
+3. `buckets_scanner_get_stats()` - Retrieve scan statistics
+4. `buckets_scanner_cleanup()` - Free scanner resources
+
+**Internal Implementation**:
+- `topology_to_ring()` - Build hash ring from topology (150 vnodes per set)
+- `needs_migration()` - Check if object location changed between topologies
+- `add_migration_task()` - Add task to queue with metadata
+- `scan_directory()` - Recursive directory traversal looking for xl.meta files
+- `scan_disk_buckets()` - Iterate over all buckets on a disk
+- `disk_scanner_thread()` - Per-disk worker thread
+- `compare_tasks_by_size()` - qsort comparator for priority sorting
+
+**Files Created**:
+- `include/buckets_migration.h` - NEW (218 lines)
+  - Migration state enum (6 states)
+  - Task structure (per-object migration info)
+  - Scanner state structure (progress tracking)
+  - Scanner statistics structure
+  - Migration job structure (for Week 27)
+  - Scanner API (4 functions)
+- `src/migration/scanner.c` - NEW (544 lines)
+  - Parallel scanner implementation
+  - Hash ring integration
+  - Task queue with sorting
+  - Thread-safe statistics
+- `tests/migration/test_scanner.c` - NEW (481 lines, 10 tests)
+
+**Test Coverage** (10 tests, 100% passing):
+1. Empty cluster (no objects to scan) ✅
+2. Scanner initialization validation ✅
+3. Single pool scanning ✅
+4. Statistics tracking accuracy ✅
+5. Multiple pools handling ✅
+6. Invalid argument validation ✅
+7. Cleanup and resource freeing ✅
+8. Task sorting by size (small first) ✅
+9. Null argument handling for scan ✅
+10. Large object count (100 objects) ✅
+
+**Code Statistics**:
+- **Header**: 218 lines (data structures + API)
+- **Implementation**: 544 lines (scanner core)
+- **Tests**: 481 lines (10 comprehensive tests)
+- **Total Week 25**: **1,243 lines**
+
+**Performance Characteristics**:
+- **Parallel per-disk**: N threads for N disks
+- **Memory efficient**: Dynamic task array growth (starts at 1000, doubles as needed)
+- **Scan speed**: Limited by disk I/O (directory traversal)
+- **Sorting**: O(n log n) qsort by size at end
+
+**Next Steps** (Week 26):
+- Migration workers (parallel object movement)
+- Worker pool (16 threads)
+- Task queue (producer-consumer)
+- Object movement operations (read, write, delete)
 
 ---
 

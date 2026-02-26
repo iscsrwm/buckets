@@ -298,36 +298,51 @@ This roadmap tracks the development of Buckets from initial C foundation through
 
 ---
 
-## Phase 7: Migration Engine (Weeks 25-30)
+## Phase 7: Migration Engine (Weeks 25-30) - 🔄 IN PROGRESS
 
 **Goal**: Background data migration on topology changes
 
-### Scanner
-- [ ] Object enumeration across sets
-- [ ] Affected object identification
-- [ ] Migration queue generation
+### Week 25: Scanner ✅ COMPLETE
+- [x] Object enumeration across sets (parallel per-disk scanning)
+- [x] Affected object identification (hash ring comparison)
+- [x] Migration queue generation (task array with sorting)
+- [x] Hash ring integration (old vs new topology)
+- [x] Task priority sorting (small objects first)
+- [x] Statistics tracking (scanned, affected, bytes)
+- [x] 10 comprehensive tests (100% passing)
+- [x] **Files**: `include/buckets_migration.h`, `src/migration/scanner.c`, tests (1,243 lines)
 
-### Workers
+### Week 26: Workers (NEXT)
 - [ ] Parallel migration workers (16 threads)
 - [ ] Object read from source set
 - [ ] Object write to destination set
 - [ ] Registry update (atomic)
 - [ ] Source cleanup
 
-### Orchestration
+### Week 27: Orchestration
 - [ ] Migration state machine
 - [ ] Progress tracking
 - [ ] Pause/resume capability
-- [ ] Checkpointing (every 1000 objects)
-- [ ] Interruption recovery
+- [ ] Job management
 
-### Throttling
+### Week 28: Throttling
 - [ ] Bandwidth limiting
 - [ ] I/O prioritization (user > migration)
 - [ ] CPU throttling
 
+### Week 29: Checkpointing
+- [ ] Checkpointing (every 1000 objects)
+- [ ] Interruption recovery
+- [ ] Resume from checkpoint
+
+### Week 30: Integration Testing
+- [ ] End-to-end migration tests
+- [ ] Performance validation (>500 MB/s)
+- [ ] Crash recovery testing
+
 **Deliverables**:
-- [ ] `src/migration/` - Migration orchestrator
+- [x] Week 25: Scanner (1,243 lines, 10 tests) ✅
+- [ ] Week 26-30: Workers, orchestration, throttling, checkpointing
 - [ ] >500 MB/s migration throughput
 - [ ] Resumable after crash
 
