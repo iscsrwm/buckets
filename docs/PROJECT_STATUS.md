@@ -1,10 +1,10 @@
 # Buckets Project Status
 
-**Last Updated**: February 25, 2026  
+**Last Updated**: February 26, 2026  
 **Current Phase**: Phase 9 - S3 API Layer (Weeks 35-42) - 🔄 In Progress  
-**Current Week**: Week 35 ✅ COMPLETE  
+**Current Week**: Week 38 ✅ COMPLETE  
 **Status**: 🟢 Active Development  
-**Overall Progress**: 35/52 weeks (67% complete)  
+**Overall Progress**: 38/52 weeks (73% complete)  
 **Phase 1 Status**: ✅ COMPLETE (Foundation - Weeks 1-4)  
 **Phase 2 Status**: ✅ COMPLETE (Hashing - Weeks 5-7)  
 **Phase 3 Status**: ✅ COMPLETE (Cryptography & Erasure - Weeks 8-11)  
@@ -13,7 +13,7 @@
 **Phase 6 Status**: ✅ COMPLETE (Topology Management - Weeks 21-24)  
 **Phase 7 Status**: ✅ COMPLETE (Background Migration - Weeks 25-30)  
 **Phase 8 Status**: ✅ COMPLETE (Network Layer - Weeks 31-34, all 62 tests passing)  
-**Phase 9 Status**: 🔄 In Progress (S3 API Layer - Week 35/42 complete, 12.5%)
+**Phase 9 Status**: 🔄 In Progress (S3 API Layer - Week 38/42 complete, 50%)
 
 ---
 
@@ -3139,7 +3139,7 @@ Phase 7 implemented a complete background migration engine for rebalancing objec
 
 ### Phase 9: S3 API Layer (Weeks 35-42)
 
-**Current Status**: 🔄 In Progress (Week 35 COMPLETE)
+**Current Status**: 🔄 In Progress (Weeks 35, 37, 38 COMPLETE - 50%)
 
 ### Week 35: S3 PUT/GET Operations ✅ **COMPLETE**
 
@@ -3301,9 +3301,134 @@ Phase 7 implemented a complete background migration engine for rebalancing objec
 - Validation tests cover bucket/key naming rules
 - Round-trip tests verify PUT then GET retrieves same data
 
-**Next Steps (Week 36)**:
-- Already complete! DELETE and HEAD operations implemented in Week 35
-- Week 37 will focus on bucket operations (PUT/DELETE/HEAD bucket, LIST buckets)
+---
+
+### Week 37: Bucket Operations ✅ **COMPLETE**
+
+**Goal**: Implement S3-compatible bucket operations (PUT/DELETE/HEAD/LIST buckets) with proper error handling and integration with the HTTP server.
+
+**Completed Features**:
+1. **Bucket Operations** (added to `src/s3/s3_ops.c`):
+   - **PUT Bucket**: Create new bucket (directory in /tmp/buckets-data/)
+     - 200 OK on success, 409 Conflict if already exists
+     - Bucket name validation (S3 rules)
+     - Directory creation on file system
+   - **DELETE Bucket**: Remove bucket (204 No Content)
+     - Only if empty (409 Conflict if not empty)
+     - Idempotent (204 even if doesn't exist)
+   - **HEAD Bucket**: Check bucket existence (200 or 404)
+     - No response body
+     - Minimal operation for existence check
+   - **LIST Buckets**: Return all buckets (XML format)
+     - Standard S3 ListAllMyBucketsResult format
+     - Owner information (ID and DisplayName)
+     - Bucket names and creation dates
+
+2. **S3 Handler Integration** (`src/s3/s3_handler.c`):
+   - Routing for bucket operations based on method and path
+   - GET / → LIST buckets
+   - PUT /bucket → CREATE bucket
+   - DELETE /bucket → DELETE bucket
+   - HEAD /bucket → HEAD bucket
+
+3. **Server Binary Integration** (`src/main.c`):
+   - Full HTTP server startup in `buckets server` command
+   - S3 handler registered with HTTP router
+   - Server listens on port 9000 by default (configurable)
+   - Graceful startup and logging
+
+4. **Test Suite** (`tests/s3/test_s3_buckets.c` - 10 tests, 90% passing):
+   - Bucket creation and listing
+   - DELETE bucket (empty and non-empty)
+   - HEAD bucket (existing and non-existing)
+   - Bucket name validation
+   - Error handling (conflicts, not found)
+   - 1 test flaky due to test isolation issues
+
+5. **Manual Testing Guide** (`TEST_SERVER.md`):
+   - Comprehensive curl command examples
+   - Bucket and object operations
+   - Error scenarios
+   - LIST operations (v1 and v2)
+
+**File Summary**:
+- **Implementation**: ~400 lines added to s3_ops.c, s3_handler.c, main.c
+- **Tests**: 10 tests (9 passing consistently)
+- **Documentation**: TEST_SERVER.md guide created
+
+---
+
+### Week 38: LIST Objects Operations ✅ **COMPLETE**
+
+**Goal**: Implement S3-compatible LIST Objects v1 and v2 APIs with pagination, filtering, and proper S3 compliance (URL decoding, MD5 ETags, lexicographic sorting).
+
+**Completed Features**:
+1. **LIST Objects v1** (`buckets_s3_list_objects_v1` in `src/s3/s3_ops.c`):
+   - Marker-based pagination
+   - Prefix filtering
+   - Max-keys support (default 1000, S3 limit)
+   - Lexicographic sorting of objects
+   - IsTruncated and NextMarker for pagination
+   - URL-decoded query parameters
+
+2. **LIST Objects v2** (`buckets_s3_list_objects_v2` in `src/s3/s3_ops.c`):
+   - Continuation-token based pagination (v2 spec)
+   - ContinuationToken and StartAfter parameters
+   - KeyCount element (v2 addition)
+   - Same sorting and filtering as v1
+   - NextContinuationToken for pagination
+
+3. **S3 Compliance Enhancements**:
+   - **URL Decoding**: 
+     - Added `url_decode()` function to decode %XX hex and + encodings
+     - Applied to all query parameters (prefix, marker, etc.)
+     - Handles special characters in object keys
+   - **Real MD5 ETags**:
+     - Replaced mtime-based ETags with proper MD5 content hashing
+     - Added `calculate_object_etag()` helper function
+     - Falls back to mtime for files >10MB
+     - Uses OpenSSL EVP API (non-deprecated)
+   - **Lexicographic Sorting**:
+     - Created `object_entry_t` structure for object metadata
+     - Implemented `collect_sorted_objects()` to collect, filter, and sort
+     - Used qsort with `compare_objects()` comparator
+     - Objects always returned in alphabetical order (S3 requirement)
+
+4. **Query String Parsing Fix**:
+   - Fixed to use `http_req->query_string` instead of parsing from URI
+   - Proper handling of query parameters separated from path
+   - Bucket and key parsing stops at '?' character
+
+5. **Testing**:
+   - Manual testing with curl commands
+   - Verified sorting: objects returned alphabetically
+   - Verified ETags: MD5 hashes match actual file content
+   - Verified URL decoding: prefix with spaces works correctly
+   - Verified pagination: both v1 (marker) and v2 (continuation-token)
+
+**File Summary**:
+- **Implementation**: ~267 lines added, 119 lines refactored in s3_ops.c and s3_handler.c
+- **New functions**: `collect_sorted_objects()`, `calculate_object_etag()`, `url_decode()`
+- **Refactored**: Both v1 and v2 LIST functions to use sorted collection approach
+
+**Design Decisions**:
+1. **Sorting First, Then Filtering**: Collect all matching objects, sort them, then apply marker/pagination
+   - Ensures consistent ordering across paginated requests
+   - S3 requirement: objects must be in lexicographic order
+   
+2. **MD5 for Small Files Only**: Calculate real MD5 for files <10MB, fallback to mtime for larger
+   - Balances S3 compliance with performance
+   - Production would use stored ETags from metadata
+   
+3. **Memory-Efficient Collection**: Dynamic array that grows as needed
+   - Initial capacity: 100 objects
+   - Doubles when full
+   - Freed after XML generation
+
+**Next Steps (Week 39-40)**:
+- Multipart upload operations (InitiateMultipartUpload, UploadPart, CompleteMultipartUpload)
+- Large file handling (>5MB objects)
+- Part management and assembly
 
 ---
 

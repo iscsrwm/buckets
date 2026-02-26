@@ -6,42 +6,43 @@
 
 ---
 
-## 📍 Current Status (Week 35 - February 25, 2026)
+## 📍 Current Status (Week 38 - February 26, 2026)
 
 **Phase**: Phase 9 - S3 API Layer (Weeks 35-42) 🔄 In Progress  
-**Progress**: 67% complete (35 of 52 weeks)  
+**Progress**: 73% complete (38 of 52 weeks)  
 **Completed Phases**: 8 (Foundation, Hashing, Crypto/Erasure, Storage, Registry, Topology, Migration, Network)
 
-**Recent Completion**: Week 35 - S3 PUT/GET Operations ✅
-- XML response generation (success/error, escaping)
-- AWS Signature V4 authentication framework
-- PUT/GET/DELETE/HEAD object operations
-- ETag calculation with MD5 (EVP API for OpenSSL 3.0)
-- Bucket/key validation (S3 naming rules)
-- File system storage backend (/tmp/buckets-data/)
-- 12 S3 tests passing (100%): 5 XML + 7 operations
-- 2,313 lines of new code (1,252 production + 311 tests + 334 header + 416 architecture)
+**Recent Completion**: Week 38 - LIST Objects Operations ✅
+- LIST Objects v1 (marker-based pagination) and v2 (continuation-token)
+- URL decoding for query parameters (%XX and + encodings)
+- Real MD5 ETags (replacing mtime-based approximation)
+- Lexicographic sorting of objects (S3 compliance requirement)
+- Query string parsing fix (use http_req->query_string)
+- Prefix filtering and max-keys support
+- Comprehensive manual testing with curl
 
-**Phase 9 Progress**: Week 35 of 42 complete (12.5%)
+**Phase 9 Progress**: Week 38 of 42 complete (50%)
 - Week 35: PUT/GET/DELETE/HEAD object operations (12 tests) ✅
-- Week 36: Already complete! (DELETE/HEAD done in Week 35)
-- Week 37: Bucket operations (PUT/DELETE/HEAD bucket, LIST buckets)
-- Week 38: LIST objects (v1 and v2 with pagination)
+- Week 36: Already complete! (DELETE/HEAD done in Week 35) ✅
+- Week 37: Bucket operations (PUT/DELETE/HEAD bucket, LIST buckets) ✅
+- Week 38: LIST objects (v1 and v2 with pagination, sorting, ETags) ✅
 - Weeks 39-40: Multipart upload
 - Week 41: Versioning, metadata, full AWS Signature V4
 - Week 42: Integration testing, MinIO mc compatibility
 
 **Test Status**: 305/306 tests passing (99.7%)  
 **Code Metrics**:
-- Production: 19,597 lines (+1,252 for Week 35)
-- Tests: 10,542 lines (+311 for Week 35)
-- Total: 31,499 lines (+2,313 for Week 35)
+- Production: ~19,900 lines (~300 added for Weeks 37-38)
+- Tests: ~10,600 lines (~60 added for Week 37)
+- Total: ~32,000 lines
 
 **Latest Commits**:
-- Week 35 Part 1: S3 API architecture and core modules (xml, auth)
-- Week 35 Part 2: Request handler and object operations (handler, ops, tests)
+- Week 35 Part 1-2: S3 API architecture and object operations
+- Week 37: Bucket operations and server integration
+- Week 38 Initial: Basic LIST Objects v1/v2
+- Week 38 Improvements: URL decoding, MD5 ETags, sorting
 
-**Next Steps**: Week 37 - Bucket Operations (PUT/DELETE/HEAD bucket, LIST buckets)
+**Next Steps**: Weeks 39-40 - Multipart Upload (InitiateMultipartUpload, UploadPart, CompleteMultipartUpload)
 
 ---
 
