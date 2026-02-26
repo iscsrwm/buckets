@@ -1661,27 +1661,56 @@ Phase 6 implements dynamic topology operations, allowing the cluster to grow/shr
 - **Tests**: +390 lines (12 tests passing 100%)
 - **Total Week 22**: +558 lines
 
-### Phase 6 Progress Summary (Weeks 21-22 COMPLETE)
+### Phase 6 Progress Summary (Weeks 21-23 COMPLETE)
 
 **Total Code Added**:
-- **Implementation**: 304 lines (topology ops + quorum)
-- **Tests**: 655 lines (20 tests, 100% passing)
-- **Total Phase 6 So Far**: 959 lines
+- **Implementation**: 724 lines (topology ops + quorum + manager)
+- **Tests**: 1,042 lines (31 tests, 100% passing)
+- **Total Phase 6 So Far**: 1,766 lines
 
 **Test Summary**:
 - **Week 21**: 8 tests (topology operations)
 - **Week 22**: 12 tests (quorum persistence)
-- **Total**: 20 tests, 100% passing
+- **Week 23**: 11 tests (topology manager)
+- **Total**: 31 tests, 100% passing
 
-**Remaining Work** (Weeks 23-24):
-- [ ] **Week 23**: Topology manager singleton API
-  - [ ] Topology change coordination
-  - [ ] Topology broadcast to peers (RPC integration)
-  - [ ] Topology change events/callbacks
+### Week 23: Topology Manager API ✅ **COMPLETE**
+
+**Implemented Features**:
+- [x] Topology manager singleton with thread-safe coordination
+- [x] Initialization with disk paths configuration
+- [x] Quorum-based topology loading from disk
+- [x] Coordinated topology change operations
+- [x] Automatic quorum persistence on all changes
+- [x] Cache synchronization after modifications
+- [x] Event callback system with user data support
+- [x] 11 comprehensive tests (100% passing)
+
+**Functions Implemented**:
+- `buckets_topology_manager_init()` - Initialize manager with disk paths
+- `buckets_topology_manager_cleanup()` - Cleanup manager resources
+- `buckets_topology_manager_get()` - Get current topology (read-only)
+- `buckets_topology_manager_load()` - Load topology with quorum consensus
+- `buckets_topology_manager_add_pool()` - Add pool with auto-persist
+- `buckets_topology_manager_add_set()` - Add erasure set with auto-persist
+- `buckets_topology_manager_mark_set_draining()` - Mark set draining
+- `buckets_topology_manager_mark_set_removed()` - Mark set removed
+- `buckets_topology_manager_set_callback()` - Register change callback
+
+**Files Created**:
+- `src/cluster/topology_manager.c` - NEW (420 lines, manager implementation)
+- `tests/cluster/test_topology_manager.c` - NEW (387 lines, 11 tests)
+
+**Code Statistics**:
+- **Implementation**: +420 lines
+- **Tests**: +387 lines (11 tests passing 100%)
+- **Total Week 23**: +807 lines
+
+**Remaining Work** (Week 24):
 - [ ] **Week 24**: Production readiness
   - [ ] Integration tests (full cluster scenarios)
   - [ ] Topology change time validation (<1 second target)
-  - [ ] Automatic peer synchronization
+  - [ ] Peer broadcast (deferred to Phase 8: Network Layer)
   - [ ] Documentation updates
 
 ---

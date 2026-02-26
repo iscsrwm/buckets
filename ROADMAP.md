@@ -267,23 +267,28 @@ This roadmap tracks the development of Buckets from initial C foundation through
 - [x] `buckets_topology_load_quorum()` - Read quorum with consensus
 - [x] `tests/cluster/test_topology_quorum.c` - Test suite (390 lines, 12 tests)
 
-### Week 23: Topology Manager API ⏳ **NEXT**
-- [ ] Topology manager singleton
-- [ ] Topology change coordination
-- [ ] Topology broadcast to peers (requires RPC)
-- [ ] Topology change events/callbacks
-- [ ] Integration with storage layer
+### Week 23: Topology Manager API ✅ **COMPLETE**
+- [x] Topology manager singleton
+- [x] Topology change coordination with automatic persistence
+- [x] Topology change events/callbacks with user data
+- [x] Thread-safe operations with mutex protection
+- [x] Cache integration and synchronization
+- [x] 11 comprehensive tests (100% passing)
+- [x] src/cluster/topology_manager.c (420 lines)
+- [x] tests/cluster/test_topology_manager.c (387 lines)
 
-### Week 24: Production Readiness ⏳ **PENDING**
+**Note**: Topology broadcast to peers deferred to Phase 8 (Network Layer) when RPC is available
+
+### Week 24: Production Readiness ⏳ **NEXT**
 - [ ] Integration tests (full cluster scenarios)
 - [ ] Topology changes in <1 second (validation)
 - [ ] Automatic peer synchronization
 - [ ] Performance benchmarks
 - [ ] Documentation updates
 
-**Phase 6 Progress**: 67% complete (2/4 weeks)  
-**Code Written**: 959 lines (304 implementation + 655 tests)  
-**Tests**: 20 tests (100% passing)
+**Phase 6 Progress**: 83% complete (3/4 weeks)  
+**Code Written**: 1,766 lines (724 implementation + 1,042 tests)  
+**Tests**: 31 tests (100% passing)
 
 ---
 
@@ -544,22 +549,23 @@ Join us in building the next generation of object storage!
 - ✅ **Phase 5: Location Registry** (2,741 lines, 15 tests)
   - Self-hosted registry, LRU cache, automatic tracking
 
-### In Progress (Week 22)
-- 🔄 **Phase 6: Topology Management** (959 lines, 20 tests - 67% complete)
+### In Progress (Week 23)
+- 🔄 **Phase 6: Topology Management** (1,766 lines, 31 tests - 83% complete)
   - ✅ Week 21: Dynamic topology operations (add pool, add set, state transitions)
   - ✅ Week 22: Quorum persistence (write/read quorum with consensus)
-  - ⏳ Next: Week 23 - Topology manager API & peer coordination
+  - ✅ Week 23: Topology manager API (coordination, callbacks, auto-persist)
+  - ⏳ Next: Week 24 - Production readiness & integration tests
 
 ### Statistics
-- **Total Production Code**: 10,933 lines (was 6,179)
-- **Total Test Code**: 5,555 lines (was 3,659)
-- **Test Coverage**: 220/220 tests passing (100%)
+- **Total Production Code**: 11,353 lines
+- **Total Test Code**: 5,942 lines
+- **Test Coverage**: 231/231 tests passing (100%)
 - **Build Quality**: Clean with `-Wall -Wextra -Werror -pedantic`
-- **Library Size**: ~250KB (includes ISA-L)
-- **Completion**: 5 of 11 phases complete, Phase 6 at 67% (42% overall)
-- **Weeks Completed**: 22 of 52 weeks
+- **Library Size**: ~260KB (includes ISA-L)
+- **Completion**: 5 of 11 phases complete, Phase 6 at 83% (44% overall)
+- **Weeks Completed**: 23 of 52 weeks
 
 ---
 
 **Last Updated**: February 25, 2026  
-**Current Focus**: Phase 6 - Topology Management (Week 22: Quorum Persistence - COMPLETE)
+**Current Focus**: Phase 6 - Topology Management (Week 23: Topology Manager API - COMPLETE)
