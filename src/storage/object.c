@@ -247,7 +247,18 @@ int buckets_put_object(const char *bucket, const char *object,
     u32 k = g_storage_config.default_ec_k;
     u32 m = g_storage_config.default_ec_m;
     
-    buckets_debug("Erasure encoding object: size=%zu, k=%u, m=%u", size, k, m);
+    buckets_info("Erasure encoding object: size=%zu, k=%u, m=%u", size, k, m);
+    
+    /* Log input data for debugging */
+    const u8 *input = (const u8 *)data;
+    if (size >= 4) {
+        buckets_info("Input data first 4 bytes: %02x %02x %02x %02x", 
+                    input[0], input[1], input[2], input[3]);
+    }
+    if (size > 131072) {
+        buckets_info("Input data at offset 131072 (4 bytes): %02x %02x %02x %02x",
+                    input[131072], input[131073], input[131074], input[131075]);
+    }
 
     /* Calculate chunk size */
     size_t chunk_size = buckets_calculate_chunk_size(size, k);
@@ -305,26 +316,76 @@ int buckets_put_object(const char *bucket, const char *object,
                                        &meta.erasure.checksums[k + i]);
     }
 
-    /* Write chunks */
-    for (u32 i = 0; i < k; i++) {
-        if (buckets_write_chunk(disk_path, object_path, i + 1, 
-                               data_chunks[i], chunk_size) != 0) {
-            buckets_error("Failed to write data chunk %u", i);
-            buckets_ec_free(&ec_ctx);
-            goto cleanup_chunks;
+    /* Get disk paths for set 0 (we'll use topology later for set selection) */
+    char *set_disk_paths[BUCKETS_EC_MAX_TOTAL];
+    memset(set_disk_paths, 0, sizeof(set_disk_paths));
+    
+    extern int buckets_multidisk_get_set_disks(int set_index, char **disk_paths, int max_disks);
+    int disk_count = buckets_multidisk_get_set_disks(0, set_disk_paths, k + m);
+    
+    if (disk_count < (int)(k + m)) {
+        buckets_warn("Not enough disks (%d) for erasure coding (%u+%u), using single disk",
+                    disk_count, k, m);
+        
+        /* Fallback: write all chunks to single disk */
+        for (u32 i = 0; i < k; i++) {
+            if (buckets_write_chunk(disk_path, object_path, i + 1, 
+                                   data_chunks[i], chunk_size) != 0) {
+                buckets_error("Failed to write data chunk %u", i);
+                buckets_ec_free(&ec_ctx);
+                goto cleanup_chunks;
+            }
+        }
+        for (u32 i = 0; i < m; i++) {
+            if (buckets_write_chunk(disk_path, object_path, k + i + 1,
+                                   parity_chunks[i], chunk_size) != 0) {
+                buckets_error("Failed to write parity chunk %u", i);
+                buckets_ec_free(&ec_ctx);
+                goto cleanup_chunks;
+            }
+        }
+        
+        /* Write xl.meta to single disk */
+        result = buckets_write_xl_meta(disk_path, object_path, &meta);
+    } else {
+        /* Distributed write: each chunk to a different disk */
+        buckets_info("Writing %u data + %u parity chunks across %d disks", k, m, disk_count);
+        
+        /* Write data chunks */
+        for (u32 i = 0; i < k; i++) {
+            const char *target_disk = set_disk_paths[i];
+            if (buckets_write_chunk(target_disk, object_path, i + 1, 
+                                   data_chunks[i], chunk_size) != 0) {
+                buckets_error("Failed to write data chunk %u to disk %s", i, target_disk);
+                buckets_ec_free(&ec_ctx);
+                goto cleanup_chunks;
+            }
+            buckets_debug("Wrote data chunk %u to disk: %s", i, target_disk);
+        }
+        
+        /* Write parity chunks */
+        for (u32 i = 0; i < m; i++) {
+            const char *target_disk = set_disk_paths[k + i];
+            if (buckets_write_chunk(target_disk, object_path, k + i + 1,
+                                   parity_chunks[i], chunk_size) != 0) {
+                buckets_error("Failed to write parity chunk %u to disk %s", i, target_disk);
+                buckets_ec_free(&ec_ctx);
+                goto cleanup_chunks;
+            }
+            buckets_debug("Wrote parity chunk %u to disk: %s", i, target_disk);
+        }
+        
+        /* Write xl.meta to all disks */
+        result = 0;
+        for (u32 i = 0; i < k + m; i++) {
+            meta.erasure.index = i + 1;  /* Update disk index for each disk */
+            if (buckets_write_xl_meta(set_disk_paths[i], object_path, &meta) != 0) {
+                buckets_error("Failed to write xl.meta to disk %s", set_disk_paths[i]);
+                result = -1;
+                break;
+            }
         }
     }
-    for (u32 i = 0; i < m; i++) {
-        if (buckets_write_chunk(disk_path, object_path, k + i + 1,
-                               parity_chunks[i], chunk_size) != 0) {
-            buckets_error("Failed to write parity chunk %u", i);
-            buckets_ec_free(&ec_ctx);
-            goto cleanup_chunks;
-        }
-    }
-
-    /* Write xl.meta */
-    result = buckets_write_xl_meta(disk_path, object_path, &meta);
 
     /* Record in registry if write succeeded */
     if (result == 0) {
@@ -347,7 +408,7 @@ cleanup_chunks:
     return result;
 }
 
-/* Get object (read) - simplified single-disk version */
+/* Get object (read) - multi-disk with erasure decoding */
 int buckets_get_object(const char *bucket, const char *object,
                        void **data, size_t *size)
 {
@@ -360,12 +421,33 @@ int buckets_get_object(const char *bucket, const char *object,
     char object_path[PATH_MAX];
     buckets_compute_object_path(bucket, object, object_path, sizeof(object_path));
 
-    const char *disk_path = g_storage_config.data_dir;
+    /* Get disk paths for erasure set 0 (SIPMOD placement) */
+    char *set_disk_paths[64]; /* Max 64 disks per set */
+    int set_disk_count = buckets_multidisk_get_set_disks(0, set_disk_paths, 64);
+    
+    if (set_disk_count > 0) {
+        buckets_debug("Reading from %d disks in set 0", set_disk_count);
+    } else {
+        /* Fallback to single disk */
+        set_disk_paths[0] = (char*)g_storage_config.data_dir;
+        set_disk_count = 1;
+        buckets_debug("Fallback: reading from single disk");
+    }
 
-    /* Read xl.meta */
+    /* Try to read xl.meta from first available disk */
     buckets_xl_meta_t meta;
-    if (buckets_read_xl_meta(disk_path, object_path, &meta) != 0) {
-        buckets_error("Failed to read xl.meta for %s/%s", bucket, object);
+    int meta_found = 0;
+    
+    for (int i = 0; i < set_disk_count && !meta_found; i++) {
+        if (buckets_read_xl_meta(set_disk_paths[i], object_path, &meta) == 0) {
+            buckets_debug("Read xl.meta from disk %d: %s", i + 1, set_disk_paths[i]);
+            meta_found = 1;
+            break;
+        }
+    }
+    
+    if (!meta_found) {
+        buckets_error("Failed to read xl.meta for %s/%s from any disk", bucket, object);
         return -1;
     }
 
@@ -377,40 +459,90 @@ int buckets_get_object(const char *bucket, const char *object,
         return 0;
     }
 
-    /* Read chunks */
+    /* Read chunks from distributed disks */
     u32 k = meta.erasure.data;
     u32 m = meta.erasure.parity;
     size_t chunk_size = meta.erasure.blockSize;
+    u32 total_chunks = k + m;
 
-    buckets_debug("Reading erasure-coded object: k=%u, m=%u, chunk_size=%zu",
-                  k, m, chunk_size);
+    buckets_debug("Reading erasure-coded object: k=%u, m=%u, chunk_size=%zu, total_chunks=%u",
+                  k, m, chunk_size, total_chunks);
 
     /* Allocate chunk pointers */
-    u8 *chunks[k + m];
-    for (u32 i = 0; i < k + m; i++) {
+    u8 *chunks[total_chunks];
+    u32 available_chunks = 0;
+    
+    /* Read each chunk from its corresponding disk */
+    for (u32 i = 0; i < total_chunks; i++) {
+        chunks[i] = NULL;
+        
+        /* Get disk index from erasure distribution (or use i if not present) */
+        int disk_idx = (int)i;
+        if (meta.erasure.distribution && i < 16 && meta.erasure.distribution[i] > 0) {
+            disk_idx = (int)(meta.erasure.distribution[i] - 1); /* distribution is 1-indexed */
+        }
+        
+        /* Ensure disk_idx is within bounds */
+        if (disk_idx >= set_disk_count || disk_idx < 0) {
+            buckets_warn("Chunk %u: disk_idx %d out of bounds (max %d)", 
+                        i + 1, disk_idx, set_disk_count);
+            continue;
+        }
+        
+        const char *chunk_disk_path = set_disk_paths[disk_idx];
         size_t read_size;
-        if (buckets_read_chunk(disk_path, object_path, i + 1,
+        
+        if (buckets_read_chunk(chunk_disk_path, object_path, i + 1,
                               (void**)&chunks[i], &read_size) != 0) {
-            buckets_warn("Chunk %u missing or unreadable", i + 1);
-            chunks[i] = NULL;
-        } else {
-            /* Verify checksum if enabled */
-            if (g_storage_config.verify_checksums) {
-                if (!buckets_verify_chunk(chunks[i], chunk_size,
-                                         &meta.erasure.checksums[i])) {
-                    buckets_warn("Chunk %u checksum mismatch", i + 1);
-                    buckets_free(chunks[i]);
-                    chunks[i] = NULL;
-                }
+            buckets_warn("Chunk %u missing from disk %u (%s)", 
+                        i + 1, disk_idx + 1, chunk_disk_path);
+            continue;
+        }
+        
+        buckets_debug("Read chunk %u from disk %u (%s): %zu bytes",
+                     i + 1, disk_idx + 1, chunk_disk_path, read_size);
+        
+        /* Verify checksum if enabled */
+        if (g_storage_config.verify_checksums && meta.erasure.checksums) {
+            if (!buckets_verify_chunk(chunks[i], chunk_size,
+                                     &meta.erasure.checksums[i])) {
+                buckets_warn("Chunk %u checksum mismatch", i + 1);
+                buckets_free(chunks[i]);
+                chunks[i] = NULL;
+                continue;
             }
         }
+        
+        available_chunks++;
     }
+    
+    /* Check if we have enough chunks to reconstruct (need at least K) */
+    if (available_chunks < k) {
+        buckets_error("Not enough chunks available: %u/%u (need at least %u)", 
+                     available_chunks, total_chunks, k);
+        goto cleanup_read;
+    }
+    
+    buckets_info("Successfully read %u/%u chunks (need %u for reconstruction)", 
+                available_chunks, total_chunks, k);
 
     /* Allocate output buffer */
     *data = buckets_malloc(meta.stat.size);
     *size = meta.stat.size;
 
     /* Decode object */
+    buckets_debug("Preparing to decode: k=%u, m=%u, chunk_size=%zu, data_size=%zu",
+                 k, m, chunk_size, meta.stat.size);
+    
+    /* Debug: show which chunks are available */
+    for (u32 i = 0; i < total_chunks; i++) {
+        if (chunks[i]) {
+            buckets_debug("  Chunk %u: available (%p)", i, (void*)chunks[i]);
+        } else {
+            buckets_debug("  Chunk %u: NULL", i);
+        }
+    }
+    
     buckets_ec_ctx_t ec_ctx;
     if (buckets_ec_init(&ec_ctx, k, m) != 0) {
         buckets_error("Failed to initialize erasure context");
@@ -427,19 +559,30 @@ int buckets_get_object(const char *bucket, const char *object,
         goto cleanup_read;
     }
     
+    buckets_debug("Decode completed successfully");
+    
     buckets_ec_free(&ec_ctx);
     buckets_info("Object read: %s/%s (size=%zu)", bucket, object, *size);
 
+    /* Success - free chunks and metadata */
+    for (u32 i = 0; i < total_chunks; i++) {
+        if (chunks[i]) {
+            buckets_free(chunks[i]);
+        }
+    }
+    buckets_xl_meta_free(&meta);
+    return 0;
+
 cleanup_read:
-    /* Free chunks */
-    for (u32 i = 0; i < k + m; i++) {
+    /* Error cleanup - free any allocated chunks */
+    for (u32 i = 0; i < total_chunks; i++) {
         if (chunks[i]) {
             buckets_free(chunks[i]);
         }
     }
     buckets_xl_meta_free(&meta);
 
-    return 0;
+    return -1;
 }
 
 /* Delete object */

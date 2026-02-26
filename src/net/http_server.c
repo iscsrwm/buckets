@@ -334,7 +334,16 @@ static void mg_event_handler(struct mg_connection *c, int ev, void *ev_data)
         req.method = hm->method.buf ? strndup(hm->method.buf, hm->method.len) : NULL;
         req.uri = hm->uri.buf ? strndup(hm->uri.buf, hm->uri.len) : NULL;
         req.query_string = hm->query.buf ? strndup(hm->query.buf, hm->query.len) : NULL;
-        req.body = hm->body.buf ? strndup(hm->body.buf, hm->body.len) : NULL;
+        
+        /* Use malloc+memcpy for body to preserve binary data (strndup stops at null bytes) */
+        if (hm->body.buf && hm->body.len > 0) {
+            req.body = malloc(hm->body.len);
+            if (req.body) {
+                memcpy((void*)req.body, hm->body.buf, hm->body.len);
+            }
+        } else {
+            req.body = NULL;
+        }
         req.body_len = hm->body.len;
         req.internal = hm;
         
@@ -365,8 +374,26 @@ static void mg_event_handler(struct mg_connection *c, int ev, void *ev_data)
         
         /* Send response */
         if (handled) {
-            mg_http_reply(c, res.status_code, res.headers ? res.headers : "",
-                          res.body ? "%.*s" : "", (int)res.body_len, res.body);
+            if (res.body && res.body_len > 0) {
+                /* For binary data, send headers manually then body with mg_send */
+                buckets_debug("Sending binary response: %zu bytes", res.body_len);
+                mg_printf(c, "HTTP/1.1 %d OK\r\n", res.status_code);
+                
+                /* Send custom headers if any */
+                if (res.headers && strlen(res.headers) > 0) {
+                    /* Headers should already include trailing \r\n */
+                    mg_printf(c, "%s", res.headers);
+                }
+                
+                /* Send Content-Length and end headers */
+                mg_printf(c, "Content-Length: %llu\r\n\r\n", (unsigned long long)res.body_len);
+                
+                /* Send binary body */
+                mg_send(c, res.body, res.body_len);
+            } else {
+                /* No body - use regular reply */
+                mg_http_reply(c, res.status_code, res.headers ? res.headers : "", "");
+            }
         } else {
             /* No handler - send 404 */
             mg_http_reply(c, 404, "Content-Type: text/plain\r\n",

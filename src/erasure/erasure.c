@@ -146,14 +146,26 @@ int buckets_ec_encode(buckets_ec_ctx_t *ctx,
     const u8 *src = (const u8 *)data;
     size_t bytes_per_chunk = (data_size + ctx->k - 1) / ctx->k;
     
+    buckets_info("Encode: data_size=%zu, k=%u, bytes_per_chunk=%zu, chunk_size=%zu",
+                data_size, ctx->k, bytes_per_chunk, chunk_size);
+    
     for (u32 i = 0; i < ctx->k; i++) {
         size_t offset = i * bytes_per_chunk;
         size_t remaining = (offset < data_size) ? (data_size - offset) : 0;
         size_t copy_size = (remaining > bytes_per_chunk) ? bytes_per_chunk : remaining;
         
+        buckets_info("  Chunk %u: offset=%zu, remaining=%zu, copy_size=%zu", 
+                    i, offset, remaining, copy_size);
+        
         /* Copy data chunk */
         if (copy_size > 0) {
             memcpy(data_chunks[i], src + offset, copy_size);
+            /* Log first few bytes */
+            if (copy_size >= 4) {
+                buckets_info("    First 4 bytes: %02x %02x %02x %02x", 
+                            data_chunks[i][0], data_chunks[i][1], 
+                            data_chunks[i][2], data_chunks[i][3]);
+            }
         }
         
         /* Zero-pad remainder */
@@ -209,10 +221,15 @@ int buckets_ec_decode(buckets_ec_ctx_t *ctx,
         u8 *dest = (u8 *)data;
         size_t bytes_per_chunk = (data_size + ctx->k - 1) / ctx->k;
         
+        buckets_debug("Reassembling data: bytes_per_chunk=%zu, data_size=%zu, chunk_size=%zu",
+                     bytes_per_chunk, data_size, chunk_size);
+        
         for (u32 i = 0; i < ctx->k; i++) {
             size_t offset = i * bytes_per_chunk;
             size_t remaining = (offset < data_size) ? (data_size - offset) : 0;
             size_t copy_size = (remaining > bytes_per_chunk) ? bytes_per_chunk : remaining;
+            
+            buckets_debug("  Chunk %u: offset=%zu, copy_size=%zu", i, offset, copy_size);
             
             if (copy_size > 0) {
                 memcpy(dest + offset, chunks[i], copy_size);

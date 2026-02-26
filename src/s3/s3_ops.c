@@ -171,6 +171,18 @@ int buckets_s3_put_object(buckets_s3_request_t *req, buckets_s3_response_t *res)
     const void *data = req->body ? req->body : "";
     size_t size = req->body_len;
     
+    buckets_info("S3 PUT: body_len=%zu, body_ptr=%p", size, (void*)data);
+    if (size >= 4) {
+        const u8 *bytes = (const u8 *)data;
+        buckets_info("S3 PUT: first 4 bytes: %02x %02x %02x %02x", 
+                    bytes[0], bytes[1], bytes[2], bytes[3]);
+    }
+    if (size > 131072) {
+        const u8 *bytes = (const u8 *)data;
+        buckets_info("S3 PUT: bytes at 131072: %02x %02x %02x %02x",
+                    bytes[131072], bytes[131073], bytes[131074], bytes[131075]);
+    }
+    
     int ret = buckets_put_object(req->bucket, req->key, data, size, content_type);
     if (ret != 0) {
         buckets_error("Failed to write object to distributed storage: %s/%s", 

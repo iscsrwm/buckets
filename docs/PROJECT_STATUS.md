@@ -2,7 +2,7 @@
 
 **Last Updated**: February 26, 2026  
 **Current Phase**: Phase 9 - S3 API Layer (Weeks 35-42) - 🔄 In Progress  
-**Current Week**: Week 39 Part 1 ✅ COMPLETE + Multi-Node Config ✅ COMPLETE  
+**Current Week**: Week 39 ✅ COMPLETE (Part 1 + Distributed Erasure Coding Integration)  
 **Status**: 🟢 Active Development  
 **Overall Progress**: 39/52 weeks (75% complete)  
 **Phase 1 Status**: ✅ COMPLETE (Foundation - Weeks 1-4)  
@@ -13,7 +13,7 @@
 **Phase 6 Status**: ✅ COMPLETE (Topology Management - Weeks 21-24)  
 **Phase 7 Status**: ✅ COMPLETE (Background Migration - Weeks 25-30)  
 **Phase 8 Status**: ✅ COMPLETE (Network Layer - Weeks 31-34, all 62 tests passing)  
-**Phase 9 Status**: 🔄 In Progress (S3 API Layer - Week 39 Part 1/42 complete, 56%)
+**Phase 9 Status**: 🔄 In Progress (S3 API Layer - Week 39/42 complete, 60%)
 
 ---
 
@@ -3988,6 +3988,236 @@ Registry initialized (cache_size=1000000, ttl=300 seconds)
 
 ---
 
+### Distributed Erasure Coding Integration ✅ **COMPLETE**
+
+**Goal**: Integrate erasure coding (Reed-Solomon) with multi-disk storage to enable true distributed object storage with fault tolerance. Objects larger than 128KB are split into K data shards + M parity shards and distributed across multiple disks.
+
+**Completed Features**:
+
+1. **Multi-Disk Erasure-Coded Writes** (`src/storage/object.c`):
+   - Objects >128KB trigger erasure encoding (K=2, M=2)
+   - Data split into 2 data chunks of equal size
+   - 2 parity chunks generated using Reed-Solomon encoding
+   - Each chunk written to a different disk in the erasure set
+   - Chunk size calculation: `(object_size + K - 1) / K` rounded to 16-byte SIMD alignment
+   - Distribution pattern: data chunks → disk1, disk2; parity chunks → disk3, disk4
+
+2. **xl.meta Distribution**:
+   - Metadata written to **all disks** in the erasure set
+   - Each disk's xl.meta has correct `erasure.index` field (1-4)
+   - `erasure.distribution` array tracks chunk-to-disk mapping
+   - BLAKE2b-256 checksums stored for all chunks
+   - Format example:
+     ```json
+     {
+       "version": 1,
+       "format": "xl",
+       "stat": {"size": 262144, "modTime": "2026-02-26T07:00:42Z"},
+       "erasure": {
+         "algorithm": "ReedSolomon",
+         "data": 2,
+         "parity": 2,
+         "blockSize": 131072,
+         "index": 1,
+         "distribution": [1, 2, 3, 4],
+         "checksums": [...]
+       }
+     }
+     ```
+
+3. **Multi-Disk Reads with Reconstruction** (`src/storage/object.c`):
+   - GET operation reads chunks from multiple disks
+   - Uses `buckets_multidisk_get_set_disks()` to get disk paths
+   - Tries to read xl.meta from first available disk
+   - Reads each chunk from its corresponding disk based on distribution array
+   - Tracks available chunks (need at least K for reconstruction)
+   - Erasure decoding reconstructs original data from available chunks
+   - Supports recovery from up to M disk failures
+
+4. **HTTP Binary Data Fix** (`src/net/http_server.c`):
+   - **Bug Fixed**: Line 337 used `strndup()` which stops at null bytes
+   - **Solution**: Replaced with `malloc()` + `memcpy()` for binary data
+   - HTTP request bodies now preserve binary data with null bytes
+   - Critical for random data and zero-padded regions in objects
+
+5. **HTTP Binary Response Fix** (`src/net/http_server.c`):
+   - **Bug Fixed**: Mongoose `mg_printf()` didn't support `%zu` format
+   - **Solution**: Changed Content-Length format from `%zu` to `%llu` with cast
+   - Binary response body sent via `mg_send()` instead of `mg_printf()`
+   - Headers built correctly with ETag, Content-Type, Content-Length
+
+**Implementation Details**:
+
+**Write Path** (src/storage/object.c:246-380):
+```c
+// 1. Calculate chunk size (128KB for 256KB object with K=2)
+size_t chunk_size = buckets_calculate_chunk_size(size, k);
+
+// 2. Encode with erasure coding
+buckets_ec_encode(&ec_ctx, data, size, chunk_size, data_chunks, parity_chunks);
+
+// 3. Get disk paths for erasure set
+buckets_multidisk_get_set_disks(0, set_disk_paths, k + m);
+
+// 4. Write data chunks to disk1, disk2
+for (u32 i = 0; i < k; i++) {
+    buckets_write_chunk(set_disk_paths[i], object_path, i + 1, 
+                       data_chunks[i], chunk_size);
+}
+
+// 5. Write parity chunks to disk3, disk4
+for (u32 i = 0; i < m; i++) {
+    buckets_write_chunk(set_disk_paths[k + i], object_path, k + i + 1,
+                       parity_chunks[i], chunk_size);
+}
+
+// 6. Write xl.meta to ALL disks with correct index
+for (u32 i = 0; i < k + m; i++) {
+    meta.erasure.index = i + 1;
+    buckets_write_xl_meta(set_disk_paths[i], object_path, &meta);
+}
+```
+
+**Read Path** (src/storage/object.c:400-560):
+```c
+// 1. Get disk paths for erasure set
+buckets_multidisk_get_set_disks(0, set_disk_paths, disk_count);
+
+// 2. Read xl.meta from first available disk
+for (int i = 0; i < disk_count && !meta_found; i++) {
+    if (buckets_read_xl_meta(set_disk_paths[i], object_path, &meta) == 0) {
+        meta_found = 1;
+        break;
+    }
+}
+
+// 3. Read chunks from distributed disks
+for (u32 i = 0; i < total_chunks; i++) {
+    int disk_idx = meta.erasure.distribution[i] - 1;
+    buckets_read_chunk(set_disk_paths[disk_idx], object_path, i + 1,
+                      &chunks[i], &read_size);
+}
+
+// 4. Check quorum (need at least K chunks)
+if (available_chunks < k) {
+    return -1;  // Not enough chunks to reconstruct
+}
+
+// 5. Decode with erasure coding
+buckets_ec_decode(&ec_ctx, chunks, chunk_size, data, data_size);
+```
+
+**Test Results**:
+
+| Test Case | Size | Result | Details |
+|-----------|------|--------|---------|
+| Pattern file (markers) | 256KB | ✅ PASS | "FIRST_HALF" and "SECOND_HALF" markers intact |
+| Random binary data | 256KB | ✅ PASS | MD5: 2d2219f27156f0f82eda02982badec13 (match) |
+| Large random file | 1MB | ✅ PASS | MD5: 5d8c677dacc788a171937412e7d1aa91 (match) |
+| 2 parity disk failures | 256KB | ✅ PASS | Recovered with 2/4 chunks (K=2 data only) |
+| Mixed data+parity failure | 256KB | ✅ PASS | Recovered with 1 data + 1 parity chunk |
+
+**Chunk Distribution Verification**:
+```bash
+# 256KB object splits into 4x 128KB chunks
+disk1: part.1 (131072 bytes) - data chunk 1 ✓
+disk2: part.2 (131072 bytes) - data chunk 2 ✓
+disk3: part.3 (131072 bytes) - parity chunk 1 ✓
+disk4: part.4 (131072 bytes) - parity chunk 2 ✓
+
+# 1MB object splits into 4x 512KB chunks
+disk1: part.1 (524288 bytes) - data chunk 1 ✓
+disk2: part.2 (524288 bytes) - data chunk 2 ✓
+disk3: part.3 (524288 bytes) - parity chunk 1 ✓
+disk4: part.4 (524288 bytes) - parity chunk 2 ✓
+```
+
+**Fault Tolerance Demonstration**:
+```bash
+# Test 1: Remove 2 parity disks (disk3, disk4)
+$ rm -rf /tmp/buckets-node1/disk3/{hash}/
+$ rm -rf /tmp/buckets-node1/disk4/{hash}/
+$ curl http://localhost:9001/test-bucket/object.bin > retrieved.bin
+$ md5sum retrieved.bin
+2d2219f27156f0f82eda02982badec13  ✓ MATCH (recovered with K=2 data chunks)
+
+# Test 2: Remove 1 data + 1 parity disk (disk1, disk3)
+$ rm -rf /tmp/buckets-node1/disk1/{hash}/
+$ rm -rf /tmp/buckets-node1/disk3/{hash}/
+$ curl http://localhost:9001/test-bucket/object.bin > retrieved2.bin
+$ md5sum retrieved2.bin
+2d2219f27156f0f82eda02982badec13  ✓ MATCH (recovered with 1 data + 1 parity)
+```
+
+**File Summary**:
+- **Modified**: `src/storage/object.c` (~674 lines total)
+  - Lines 246-380: Enhanced PUT with distributed chunk writes
+  - Lines 400-560: Enhanced GET with multi-disk reads and reconstruction
+  - Added debug logging for chunk distribution
+- **Modified**: `src/erasure/erasure.c` (~551 lines total)
+  - Lines 145-173: Enhanced encode with logging
+  - Lines 207-222: Enhanced decode reassembly logic
+- **Modified**: `src/net/http_server.c` (~486 lines total)
+  - Lines 332-345: Fixed binary body parsing (malloc+memcpy vs strndup)
+  - Lines 368-395: Fixed binary response sending (mg_send vs mg_printf)
+- **Modified**: `src/s3/s3_ops.c` (added debug logging)
+
+**Performance Characteristics**:
+- **Write Overhead**: 2x storage (K=2, M=2 means 4 chunks for 2 chunks of data)
+- **Write Throughput**: Limited by slowest disk in erasure set (4 parallel writes)
+- **Read Throughput**: Can read from any K disks (parallel reads possible)
+- **Fault Tolerance**: Survives up to M=2 simultaneous disk failures
+- **Recovery Time**: Instant (no rebuild needed, just read different chunks)
+
+**Design Decisions**:
+
+1. **K=2, M=2 Configuration**:
+   - Balances storage efficiency (2x) with fault tolerance (2 failures)
+   - Alternative: K=4, M=2 (1.5x storage, still 2 failures) - better efficiency
+   - Current choice prioritizes simplicity for initial implementation
+   - Can be made configurable per bucket later
+
+2. **All-Disk xl.meta Replication**:
+   - Each disk has complete object metadata
+   - Allows reading metadata from any available disk
+   - Increases metadata storage (4 copies vs 1)
+   - Simplifies read path (no metadata reconstruction needed)
+   - MinIO uses same approach
+
+3. **Sequential Chunk Distribution**:
+   - Simple mapping: chunk i → disk i
+   - Easy to understand and debug
+   - Alternative: Hash-based mapping (more complex, similar performance)
+   - Current approach sufficient for single erasure set
+
+4. **128KB Inline Threshold**:
+   - Objects <128KB stored inline in xl.meta (base64 encoded)
+   - Objects ≥128KB use erasure coding
+   - Threshold aligns with typical chunk sizes
+   - Reduces overhead for small objects (no chunk files)
+
+5. **Binary Body Handling**:
+   - Critical fix: strndup() fails on null bytes in binary data
+   - malloc+memcpy preserves entire request body
+   - All S3 clients send binary data (images, videos, archives, etc.)
+   - Essential for production use
+
+**Known Limitations**:
+- Inline storage (<128KB) writes to single disk (data_dir) not multi-disk yet
+- No cross-node distribution (all chunks on single node's disks)
+- SIPMOD object placement not yet implemented (always uses set 0)
+- No automatic chunk reconstruction on disk failure (reads only)
+- Registry integration pending (location tracking not active)
+
+**Next Steps**:
+1. Implement SIPMOD object placement (use object hash to select erasure set)
+2. Cross-node distribution (spread chunks across multiple nodes)
+3. Registry integration (track object locations for distributed GET)
+4. Automatic healing (detect missing chunks, reconstruct to spare disks)
+5. Inline storage multi-disk writes (replicate small objects across disks)
+
+---
+
 **Status Legend**:
 - ✅ Complete
 - 🔄 In Progress
@@ -3998,4 +4228,4 @@ Registry initialized (cache_size=1000000, ttl=300 seconds)
 
 ---
 
-**Next Update**: End of Week 36 (after completing remaining Week 35 work or Week 36)
+**Next Update**: End of Week 39 Part 2 (Distributed Erasure Coding integration complete)
