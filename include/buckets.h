@@ -47,6 +47,7 @@ typedef enum {
     BUCKETS_ERR_QUORUM,
     BUCKETS_ERR_CORRUPT,
     BUCKETS_ERR_UNSUPPORTED,
+    BUCKETS_ERR_CRYPTO,
 } buckets_error_t;
 
 /* Return result with error handling */

@@ -109,7 +109,7 @@ directories:
 	@mkdir -p $(OBJ_DIR)/erasure $(OBJ_DIR)/storage $(OBJ_DIR)/registry
 	@mkdir -p $(OBJ_DIR)/topology $(OBJ_DIR)/migration $(OBJ_DIR)/net
 	@mkdir -p $(OBJ_DIR)/s3 $(OBJ_DIR)/admin
-	@mkdir -p $(TEST_BIN_DIR)/net $(TEST_BIN_DIR)/migration
+	@mkdir -p $(TEST_BIN_DIR)/net $(TEST_BIN_DIR)/migration $(TEST_BIN_DIR)/s3
 
 # Library target
 libbuckets: $(BUILD_DIR)/libbuckets.a $(BUILD_DIR)/libbuckets.so
@@ -161,7 +161,7 @@ s3: $(S3_OBJ)
 admin: $(ADMIN_OBJ)
 
 # Tests
-test: test-format test-topology test-endpoint test-erasure test-scanner test-worker test-orchestrator test-throttle test-checkpoint test-http-server test-router test-conn-pool test-peer-grid test-rpc test-broadcast
+test: test-format test-topology test-endpoint test-erasure test-scanner test-worker test-orchestrator test-throttle test-checkpoint test-http-server test-router test-conn-pool test-peer-grid test-rpc test-broadcast test-s3-xml test-s3-ops
 
 test-format: $(TEST_BIN_DIR)/cluster/test_format
 	@echo "Running format tests..."
@@ -260,6 +260,14 @@ test-rpc: $(TEST_BIN_DIR)/net/test_rpc
 
 test-broadcast: $(TEST_BIN_DIR)/net/test_broadcast
 	@echo "Running broadcast tests..."
+	@$<
+
+test-s3-xml: $(TEST_BIN_DIR)/s3/test_s3_xml
+	@echo "Running S3 XML tests..."
+	@$<
+
+test-s3-ops: $(TEST_BIN_DIR)/s3/test_s3_ops
+	@echo "Running S3 operations tests..."
 	@$<
 
 # Test binaries (Criterion-based tests)
@@ -384,6 +392,16 @@ $(TEST_BIN_DIR)/net/test_rpc: $(TEST_DIR)/net/test_rpc.c $(BUILD_DIR)/libbuckets
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
 
 $(TEST_BIN_DIR)/net/test_broadcast: $(TEST_DIR)/net/test_broadcast.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/s3/test_s3_xml: $(TEST_DIR)/s3/test_s3_xml.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/s3/test_s3_ops: $(TEST_DIR)/s3/test_s3_ops.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
 	@echo "CC TEST $<"
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion

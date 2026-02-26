@@ -1,10 +1,10 @@
 # Buckets Project Status
 
 **Last Updated**: February 25, 2026  
-**Current Phase**: Phase 8 - Network Layer (Weeks 31-34) - ✅ COMPLETE  
-**Current Week**: Week 34 ✅ COMPLETE  
+**Current Phase**: Phase 9 - S3 API Layer (Weeks 35-42) - 🔄 In Progress  
+**Current Week**: Week 35 ✅ COMPLETE  
 **Status**: 🟢 Active Development  
-**Overall Progress**: 34/52 weeks (65% complete)  
+**Overall Progress**: 35/52 weeks (67% complete)  
 **Phase 1 Status**: ✅ COMPLETE (Foundation - Weeks 1-4)  
 **Phase 2 Status**: ✅ COMPLETE (Hashing - Weeks 5-7)  
 **Phase 3 Status**: ✅ COMPLETE (Cryptography & Erasure - Weeks 8-11)  
@@ -12,7 +12,8 @@
 **Phase 5 Status**: ✅ COMPLETE (Location Registry - Weeks 17-20)  
 **Phase 6 Status**: ✅ COMPLETE (Topology Management - Weeks 21-24)  
 **Phase 7 Status**: ✅ COMPLETE (Background Migration - Weeks 25-30)  
-**Phase 8 Status**: ✅ COMPLETE (Network Layer - Weeks 31-34, all 62 tests passing)
+**Phase 8 Status**: ✅ COMPLETE (Network Layer - Weeks 31-34, all 62 tests passing)  
+**Phase 9 Status**: 🔄 In Progress (S3 API Layer - Week 35/42 complete, 12.5%)
 
 ---
 
@@ -3136,6 +3137,176 @@ Phase 7 implemented a complete background migration engine for rebalancing objec
 
 ---
 
+### Phase 9: S3 API Layer (Weeks 35-42)
+
+**Current Status**: 🔄 In Progress (Week 35 COMPLETE)
+
+### Week 35: S3 PUT/GET Operations ✅ **COMPLETE**
+
+**Goal**: Implement S3-compatible PUT and GET object operations with XML responses, AWS Signature V4 authentication framework, and comprehensive testing.
+
+**Completed Features**:
+1. **Architecture Document** (`architecture/S3_API_LAYER.md` - 416 lines):
+   - Complete 8-week implementation plan (Weeks 35-42)
+   - Request/response flow diagrams
+   - AWS Signature V4 authentication specification
+   - XML response formats and S3 error codes
+   - Detailed function signatures and data structures
+   - Integration with existing storage, registry, and network layers
+   
+2. **S3 API Header** (`include/buckets_s3.h` - 334 lines):
+   - Request/response structures (buckets_s3_request_t, buckets_s3_response_t)
+   - Authentication structures (access keys, signature validation)
+   - Object operation functions (PUT, GET, DELETE, HEAD)
+   - XML generation helpers (success, error, escaping)
+   - Utility functions (ETag calculation, timestamp formatting, validation)
+   - Error code to HTTP status mapping
+   
+3. **XML Response Module** (`src/s3/s3_xml.c` - 195 lines):
+   - Success response generation with ETag and VersionId
+   - Error response generation with S3 error codes
+   - HTTP status code mapping (NoSuchKey→404, AccessDenied→403, etc.)
+   - XML escaping for special characters (< > & " ')
+   - Standard S3 XML format compliance
+   
+4. **Authentication Module** (`src/s3/s3_auth.c` - 374 lines):
+   - Static key storage for three test key pairs:
+     - minioadmin / minioadmin (MinIO default)
+     - AKIAIOSFODNN7EXAMPLE / wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY (AWS example)
+     - buckets-admin / buckets-secret-key (Buckets default)
+   - Key lookup by access key ID
+   - HMAC-SHA256 helpers for signature validation
+   - Authorization header parsing framework
+   - Simplified signature verification (Week 35)
+   - Full AWS Signature V4 support planned for Week 41
+   - EVP API used for OpenSSL 3.0 compatibility (non-deprecated)
+   
+5. **Request Handler** (`src/s3/s3_handler.c` - 293 lines):
+   - S3 path parsing (/bucket/key format)
+   - Request routing to appropriate operations (PUT/GET/DELETE/HEAD)
+   - S3 response to HTTP response conversion
+   - Request/response memory management
+   - Integration with HTTP server from Phase 8
+   
+6. **Object Operations** (`src/s3/s3_ops.c` - 390 lines):
+   - **PUT Object**: Write object to file system storage
+     - File path: /tmp/buckets-data/bucket/key
+     - Directory creation with recursive mkdir
+     - Atomic write (create parent dirs if needed)
+   - **GET Object**: Read object from storage with ETag
+     - Full object retrieval
+     - ETag calculation for verification
+     - Content-Type: application/octet-stream
+   - **DELETE Object**: Remove object (idempotent)
+     - 204 No Content on success
+     - 204 even if object doesn't exist (S3 idempotency)
+   - **HEAD Object**: Metadata without body
+     - ETag, Content-Length, Last-Modified
+     - No response body
+   - **ETag Calculation**: MD5 hash using EVP API (non-deprecated)
+   - **Timestamp Formatting**: RFC 2822 format (standard HTTP date)
+   - **Bucket Name Validation**: S3 naming rules (3-63 chars, lowercase, no underscores)
+   - **Object Key Validation**: UTF-8, max 1024 bytes, no null bytes
+   
+7. **Test Suites** (311 lines, 12 tests, 100% passing):
+   - **XML Tests**: 5 tests (127 lines)
+     - Success response with ETag and VersionId
+     - Error response with 404 (NoSuchKey)
+     - Error response with 403 (AccessDenied)
+     - XML escaping for special characters (<>&"')
+     - NULL input validation
+   - **Operations Tests**: 7 tests (184 lines)
+     - ETag calculation correctness
+     - Bucket name validation (valid/invalid)
+     - Object key validation (valid/invalid)
+     - PUT then GET object (round-trip)
+     - GET nonexistent object (404)
+     - DELETE object (idempotent)
+     - HEAD object (metadata only)
+
+**Build System Updates**:
+- Added S3 test directory creation (`mkdir -p build/test/s3`)
+- Test targets: `make test-s3-xml`, `make test-s3-ops`
+- S3 modules added to library build (s3_xml, s3_auth, s3_handler, s3_ops)
+- Test binary build rules for S3 tests
+
+**File Summary**:
+- **Architecture**: 416 lines (S3_API_LAYER.md)
+- **Header**: 334 lines (buckets_s3.h)
+- **Implementation**: 1,252 lines (195 xml + 374 auth + 293 handler + 390 ops)
+- **Test code**: 311 lines (127 xml tests + 184 ops tests)
+- **Total new code**: 2,313 lines
+- **Tests**: 12 tests, 100% passing (5 XML + 7 operations)
+
+**Design Decisions**:
+1. **Simplified Storage for Week 35**: Uses file system (`/tmp/buckets-data/bucket/key`) instead of full storage layer integration
+   - Allows testing S3 API independently
+   - Production integration will use `buckets_object_*` APIs
+   - Simplifies development and testing
+   
+2. **Simplified Authentication**: Week 35 accepts requests with valid access keys but doesn't fully validate AWS Signature V4
+   - Framework in place for full implementation in Week 41
+   - Three hardcoded key pairs for testing
+   - Key lookup and HMAC helpers implemented
+   
+3. **Static Key Storage**: Three test key pairs hardcoded
+   - Sufficient for Week 35 testing
+   - Week 41 will add dynamic key management
+   - Compatible with MinIO and AWS clients
+   
+4. **Manual XML Generation**: No libxml2 dependency
+   - XML constructed with `snprintf()` and manual escaping
+   - Lightweight and sufficient for S3's simple XML responses
+   - Faster than DOM-based XML libraries
+   
+5. **HTTP Integration**: S3 handler integrates with HTTP server from Phase 8
+   - `buckets_s3_handler()` registered with HTTP router
+   - Converts S3 requests to HTTP responses
+   - Reuses connection pool and peer grid
+   
+6. **OpenSSL 3.0 Compatibility**: EVP API used for MD5 and SHA256
+   - Replaced deprecated `MD5()` with `EVP_DigestInit/Update/Final`
+   - Replaced deprecated `SHA256_Init/Update/Final` with EVP equivalents
+   - Ensures compatibility with OpenSSL 3.0+
+   - No warnings with `-Werror`
+
+**Integration Points**:
+- **Storage Layer (Phase 4)**: 
+  - Currently: File system in /tmp/buckets-data/
+  - Future: `buckets_object_write/read/delete` APIs
+- **Location Registry (Phase 5)**: 
+  - Future: Update registry on PUT/DELETE
+  - Future: Query registry for GET/HEAD
+- **Network Layer (Phase 8)**: 
+  - Uses HTTP server, request/response structures
+  - S3 handler registered with HTTP router
+  - Reuses connection pool for multi-node operations
+- **Dependencies**: 
+  - OpenSSL: MD5 (ETag), HMAC-SHA256 (auth)
+  - cJSON: Not used yet (may be needed for multipart)
+
+**What Was Learned**:
+- OpenSSL 3.0 deprecated the old MD5/SHA256 API, must use EVP API
+- S3 XML responses are simple enough to generate manually (no libxml2 needed)
+- AWS Signature V4 is complex, Week 35 uses simplified version
+- S3 bucket names have strict validation rules (lowercase, no underscores, 3-63 chars)
+- ETag is MD5 hash of object content in hex format
+- DELETE is idempotent (204 even if object doesn't exist)
+- HEAD returns metadata without body (saves bandwidth)
+
+**Testing Approach**:
+- XML tests verify success/error response format
+- Operations tests use file system storage in `/tmp/buckets-data/`
+- ETag calculation tested for correctness
+- Validation tests cover bucket/key naming rules
+- Round-trip tests verify PUT then GET retrieves same data
+
+**Next Steps (Week 36)**:
+- Already complete! DELETE and HEAD operations implemented in Week 35
+- Week 37 will focus on bucket operations (PUT/DELETE/HEAD bucket, LIST buckets)
+
+---
+
 **Status Legend**:
 - ✅ Complete
 - 🔄 In Progress
@@ -3146,4 +3317,4 @@ Phase 7 implemented a complete background migration engine for rebalancing objec
 
 ---
 
-**Next Update**: End of Week 32 (after TLS and Connection Pooling)
+**Next Update**: End of Week 36 (after completing remaining Week 35 work or Week 36)

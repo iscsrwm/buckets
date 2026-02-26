@@ -8,8 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <openssl/evp.h>
 #include <openssl/hmac.h>
-#include <openssl/sha.h>
 
 #include "buckets.h"
 #include "buckets_s3.h"
@@ -75,26 +75,40 @@ static int hmac_sha256(const unsigned char *key, size_t key_len,
 }
 
 /**
- * Calculate SHA256 hash
+ * Calculate SHA256 hash using EVP API (non-deprecated)
  */
 static int sha256_hash(const unsigned char *data, size_t len, unsigned char *output)
 {
-    SHA256_CTX ctx;
-    if (!SHA256_Init(&ctx)) {
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    if (!ctx) {
         return BUCKETS_ERR_CRYPTO;
     }
-    if (!SHA256_Update(&ctx, data, len)) {
+    
+    if (EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1) {
+        EVP_MD_CTX_free(ctx);
         return BUCKETS_ERR_CRYPTO;
     }
-    if (!SHA256_Final(output, &ctx)) {
+    
+    if (EVP_DigestUpdate(ctx, data, len) != 1) {
+        EVP_MD_CTX_free(ctx);
         return BUCKETS_ERR_CRYPTO;
     }
+    
+    unsigned int digest_len = 0;
+    if (EVP_DigestFinal_ex(ctx, output, &digest_len) != 1) {
+        EVP_MD_CTX_free(ctx);
+        return BUCKETS_ERR_CRYPTO;
+    }
+    
+    EVP_MD_CTX_free(ctx);
     return BUCKETS_OK;
 }
 
 /**
  * Convert hex string to bytes
+ * NOTE: Will be used in full AWS Signature V4 implementation (Week 41)
  */
+__attribute__((unused))
 static int hex_to_bytes(const char *hex, unsigned char *bytes, size_t max_len)
 {
     size_t hex_len = strlen(hex);
@@ -133,7 +147,9 @@ static void bytes_to_hex(const unsigned char *bytes, size_t len, char *hex)
  * 
  * Format: AWS4-HMAC-SHA256 Credential=ACCESS_KEY/DATE/REGION/SERVICE/aws4_request,
  *         SignedHeaders=host;x-amz-date,Signature=SIGNATURE
+ * NOTE: Will be used in full AWS Signature V4 implementation (Week 41)
  */
+__attribute__((unused))
 static int parse_auth_header(const char *auth_header, buckets_s3_request_t *req)
 {
     if (!auth_header || !req) {
@@ -214,7 +230,9 @@ static int parse_auth_header(const char *auth_header, buckets_s3_request_t *req)
  * 
  * This is a simplified version that handles basic GET/PUT requests.
  * Full implementation would include all headers, query params, etc.
+ * NOTE: Will be used in full AWS Signature V4 implementation (Week 41)
  */
+__attribute__((unused))
 static int build_canonical_request(buckets_s3_request_t *req,
                                    const char *method,
                                    char *canonical_request,
@@ -262,7 +280,9 @@ static int build_canonical_request(buckets_s3_request_t *req,
 
 /**
  * Calculate signing key
+ * NOTE: Will be used in full AWS Signature V4 implementation (Week 41)
  */
+__attribute__((unused))
 static int calculate_signing_key(const char *secret_key,
                                   const char *date,        /* YYYYMMDD */
                                   const char *region,
