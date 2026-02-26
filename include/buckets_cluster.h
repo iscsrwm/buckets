@@ -93,6 +93,18 @@ buckets_cluster_topology_t* buckets_topology_load(const char *disk_path);
 int buckets_topology_save(const char *disk_path, buckets_cluster_topology_t *topology);
 buckets_cluster_topology_t* buckets_topology_from_format(buckets_format_t *format);
 
+/* Topology modification operations */
+int buckets_topology_add_pool(buckets_cluster_topology_t *topology);
+int buckets_topology_add_set(buckets_cluster_topology_t *topology, int pool_idx,
+                              buckets_disk_info_t *disks, int disk_count);
+int buckets_topology_mark_set_draining(buckets_cluster_topology_t *topology,
+                                        int pool_idx, int set_idx);
+int buckets_topology_mark_set_removed(buckets_cluster_topology_t *topology,
+                                       int pool_idx, int set_idx);
+int buckets_topology_set_state(buckets_cluster_topology_t *topology,
+                                int pool_idx, int set_idx,
+                                buckets_set_state_t new_state);
+
 /* ===== Endpoints ===== */
 
 typedef struct {

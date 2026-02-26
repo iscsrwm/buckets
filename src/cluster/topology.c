@@ -391,3 +391,124 @@ buckets_cluster_topology_t* buckets_topology_load(const char *disk_path)
     
     return topology;
 }
+
+/* ========================================================================
+ * Topology Modification Operations
+ * ======================================================================== */
+
+int buckets_topology_add_pool(buckets_cluster_topology_t *topology)
+{
+    if (!topology) {
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    /* Reallocate pools array */
+    int new_pool_count = topology->pool_count + 1;
+    buckets_pool_topology_t *new_pools = buckets_realloc(topology->pools,
+                                                          new_pool_count * sizeof(buckets_pool_topology_t));
+    if (!new_pools) {
+        return BUCKETS_ERR_NOMEM;
+    }
+    
+    /* Initialize new pool */
+    topology->pools = new_pools;
+    buckets_pool_topology_t *new_pool = &topology->pools[topology->pool_count];
+    memset(new_pool, 0, sizeof(buckets_pool_topology_t));
+    new_pool->idx = topology->pool_count;
+    new_pool->sets = NULL;
+    new_pool->set_count = 0;
+    
+    topology->pool_count = new_pool_count;
+    topology->generation++;
+    
+    buckets_info("Added pool %d (generation=%ld)", new_pool->idx, topology->generation);
+    
+    return BUCKETS_OK;
+}
+
+int buckets_topology_add_set(buckets_cluster_topology_t *topology, int pool_idx,
+                              buckets_disk_info_t *disks, int disk_count)
+{
+    if (!topology || pool_idx < 0 || pool_idx >= topology->pool_count || !disks || disk_count <= 0) {
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    buckets_pool_topology_t *pool = &topology->pools[pool_idx];
+    
+    /* Reallocate sets array */
+    int new_set_count = pool->set_count + 1;
+    buckets_set_topology_t *new_sets = buckets_realloc(pool->sets,
+                                                        new_set_count * sizeof(buckets_set_topology_t));
+    if (!new_sets) {
+        return BUCKETS_ERR_NOMEM;
+    }
+    
+    /* Initialize new set */
+    pool->sets = new_sets;
+    buckets_set_topology_t *new_set = &pool->sets[pool->set_count];
+    memset(new_set, 0, sizeof(buckets_set_topology_t));
+    new_set->idx = pool->set_count;
+    new_set->state = SET_STATE_ACTIVE;
+    new_set->disk_count = disk_count;
+    
+    /* Allocate and copy disk info */
+    new_set->disks = buckets_malloc(disk_count * sizeof(buckets_disk_info_t));
+    if (!new_set->disks) {
+        return BUCKETS_ERR_NOMEM;
+    }
+    memcpy(new_set->disks, disks, disk_count * sizeof(buckets_disk_info_t));
+    
+    pool->set_count = new_set_count;
+    topology->generation++;
+    
+    buckets_info("Added set %d to pool %d with %d disks (generation=%ld)",
+                 new_set->idx, pool_idx, disk_count, topology->generation);
+    
+    return BUCKETS_OK;
+}
+
+int buckets_topology_set_state(buckets_cluster_topology_t *topology,
+                                int pool_idx, int set_idx,
+                                buckets_set_state_t new_state)
+{
+    if (!topology || pool_idx < 0 || pool_idx >= topology->pool_count) {
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    buckets_pool_topology_t *pool = &topology->pools[pool_idx];
+    if (set_idx < 0 || set_idx >= pool->set_count) {
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    buckets_set_topology_t *set = &pool->sets[set_idx];
+    buckets_set_state_t old_state = set->state;
+    
+    if (old_state == new_state) {
+        /* No change needed */
+        return BUCKETS_OK;
+    }
+    
+    /* Update state */
+    set->state = new_state;
+    topology->generation++;
+    
+    const char *state_names[] = {"ACTIVE", "DRAINING", "REMOVED"};
+    buckets_info("Set %d in pool %d: %s -> %s (generation=%ld)",
+                 set_idx, pool_idx,
+                 state_names[old_state], state_names[new_state],
+                 topology->generation);
+    
+    return BUCKETS_OK;
+}
+
+int buckets_topology_mark_set_draining(buckets_cluster_topology_t *topology,
+                                        int pool_idx, int set_idx)
+{
+    return buckets_topology_set_state(topology, pool_idx, set_idx, SET_STATE_DRAINING);
+}
+
+int buckets_topology_mark_set_removed(buckets_cluster_topology_t *topology,
+                                       int pool_idx, int set_idx)
+{
+    return buckets_topology_set_state(topology, pool_idx, set_idx, SET_STATE_REMOVED);
+}
