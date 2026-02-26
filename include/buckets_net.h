@@ -358,6 +358,163 @@ int buckets_conn_send_request(buckets_connection_t *conn,
                                char **response,
                                int *status_code);
 
+/* ===================================================================
+ * Peer Discovery (Week 33)
+ * ===================================================================*/
+
+/**
+ * Peer information
+ */
+typedef struct {
+    char node_id[64];          /* Unique node ID (UUID) */
+    char endpoint[256];        /* http://host:port or https://host:port */
+    bool online;               /* Peer status (true=online, false=offline) */
+    time_t last_seen;          /* Last heartbeat timestamp */
+} buckets_peer_t;
+
+/**
+ * Peer grid (opaque)
+ */
+typedef struct buckets_peer_grid buckets_peer_grid_t;
+
+/**
+ * Create peer grid
+ * 
+ * @return Peer grid handle or NULL on error
+ */
+buckets_peer_grid_t* buckets_peer_grid_create(void);
+
+/**
+ * Add peer to grid
+ * 
+ * @param grid Peer grid
+ * @param endpoint Peer endpoint (e.g., "http://192.168.1.10:9000")
+ * @return BUCKETS_OK on success
+ */
+int buckets_peer_grid_add_peer(buckets_peer_grid_t *grid,
+                                const char *endpoint);
+
+/**
+ * Remove peer from grid
+ * 
+ * @param grid Peer grid
+ * @param node_id Node ID to remove
+ * @return BUCKETS_OK on success
+ */
+int buckets_peer_grid_remove_peer(buckets_peer_grid_t *grid,
+                                   const char *node_id);
+
+/**
+ * Get list of peers
+ * 
+ * Returns array of peer pointers. Caller must NOT free individual peers.
+ * 
+ * @param grid Peer grid
+ * @param count Output: number of peers
+ * @return Array of peer pointers (internal, do not free)
+ */
+buckets_peer_t** buckets_peer_grid_get_peers(buckets_peer_grid_t *grid,
+                                              int *count);
+
+/**
+ * Get peer by node ID
+ * 
+ * @param grid Peer grid
+ * @param node_id Node ID
+ * @return Peer handle or NULL if not found
+ */
+buckets_peer_t* buckets_peer_grid_get_peer(buckets_peer_grid_t *grid,
+                                            const char *node_id);
+
+/**
+ * Update peer last seen timestamp
+ * 
+ * @param grid Peer grid
+ * @param node_id Node ID
+ * @param timestamp New timestamp
+ * @return BUCKETS_OK on success
+ */
+int buckets_peer_grid_update_last_seen(buckets_peer_grid_t *grid,
+                                        const char *node_id,
+                                        time_t timestamp);
+
+/**
+ * Free peer grid
+ * 
+ * @param grid Peer grid
+ */
+void buckets_peer_grid_free(buckets_peer_grid_t *grid);
+
+/* ===================================================================
+ * Health Checking (Week 33)
+ * ===================================================================*/
+
+/**
+ * Health status change callback
+ * 
+ * @param node_id Node ID
+ * @param online true if online, false if offline
+ * @param user_data User data
+ */
+typedef void (*buckets_health_callback_t)(const char *node_id,
+                                           bool online,
+                                           void *user_data);
+
+/**
+ * Health checker (opaque)
+ */
+typedef struct buckets_health_checker buckets_health_checker_t;
+
+/**
+ * Create health checker
+ * 
+ * @param grid Peer grid to monitor
+ * @param interval_sec Heartbeat interval in seconds
+ * @return Health checker handle or NULL on error
+ */
+buckets_health_checker_t* buckets_health_checker_create(
+    buckets_peer_grid_t *grid,
+    int interval_sec);
+
+/**
+ * Start health checker
+ * 
+ * Starts background thread that sends heartbeats.
+ * 
+ * @param checker Health checker
+ * @return BUCKETS_OK on success
+ */
+int buckets_health_checker_start(buckets_health_checker_t *checker);
+
+/**
+ * Stop health checker
+ * 
+ * @param checker Health checker
+ * @return BUCKETS_OK on success
+ */
+int buckets_health_checker_stop(buckets_health_checker_t *checker);
+
+/**
+ * Set health status callback
+ * 
+ * @param checker Health checker
+ * @param callback Callback function
+ * @param user_data User data passed to callback
+ * @return BUCKETS_OK on success
+ */
+int buckets_health_checker_set_callback(buckets_health_checker_t *checker,
+                                         buckets_health_callback_t callback,
+                                         void *user_data);
+
+/**
+ * Free health checker
+ * 
+ * Stops checker if running.
+ * 
+ * @param checker Health checker
+ */
+void buckets_health_checker_free(buckets_health_checker_t *checker);
+
 #ifdef __cplusplus
 }
 #endif

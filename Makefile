@@ -159,7 +159,7 @@ s3: $(S3_OBJ)
 admin: $(ADMIN_OBJ)
 
 # Tests
-test: test-format test-topology test-endpoint test-erasure test-scanner test-worker test-orchestrator test-throttle test-checkpoint test-http-server test-router test-conn-pool
+test: test-format test-topology test-endpoint test-erasure test-scanner test-worker test-orchestrator test-throttle test-checkpoint test-http-server test-router test-conn-pool test-peer-grid
 
 test-format: $(TEST_BIN_DIR)/cluster/test_format
 	@echo "Running format tests..."
@@ -246,6 +246,10 @@ test-router: $(TEST_BIN_DIR)/net/test_router
 
 test-conn-pool: $(TEST_BIN_DIR)/net/test_conn_pool
 	@echo "Running connection pool tests..."
+	@$<
+
+test-peer-grid: $(TEST_BIN_DIR)/net/test_peer_grid
+	@echo "Running peer grid tests..."
 	@$<
 
 # Test binaries (Criterion-based tests)
@@ -355,6 +359,11 @@ $(TEST_BIN_DIR)/net/test_router: $(TEST_DIR)/net/test_router.c $(BUILD_DIR)/libb
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
 
 $(TEST_BIN_DIR)/net/test_conn_pool: $(TEST_DIR)/net/test_conn_pool.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/net/test_peer_grid: $(TEST_DIR)/net/test_peer_grid.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
 	@echo "CC TEST $<"
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
