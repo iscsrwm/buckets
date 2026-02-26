@@ -641,6 +641,24 @@ int buckets_s3_list_buckets(buckets_s3_request_t *req, buckets_s3_response_t *re
  * ===================================================================*/
 
 /**
+ * Object entry for sorting
+ */
+typedef struct {
+    char name[1024];
+    struct stat st;
+} object_entry_t;
+
+/**
+ * Comparison function for qsort (lexicographic order)
+ */
+static int compare_objects(const void *a, const void *b)
+{
+    const object_entry_t *obj_a = (const object_entry_t *)a;
+    const object_entry_t *obj_b = (const object_entry_t *)b;
+    return strcmp(obj_a->name, obj_b->name);
+}
+
+/**
  * Get query parameter value by key
  */
 static const char* get_query_param(buckets_s3_request_t *req, const char *key)
@@ -657,6 +675,113 @@ static const char* get_query_param(buckets_s3_request_t *req, const char *key)
     }
     
     return NULL;
+}
+
+/**
+ * Collect and sort objects from directory
+ * Returns number of objects collected, or -1 on error
+ */
+static int collect_sorted_objects(const char *bucket_path, 
+                                   const char *prefix,
+                                   object_entry_t **objects,
+                                   int *capacity)
+{
+    DIR *dir = opendir(bucket_path);
+    if (!dir) {
+        return -1;
+    }
+    
+    int count = 0;
+    int cap = 100; /* Initial capacity */
+    object_entry_t *objs = buckets_calloc(cap, sizeof(object_entry_t));
+    if (!objs) {
+        closedir(dir);
+        return -1;
+    }
+    
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        /* Skip . and .. */
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        
+        /* Apply prefix filter */
+        if (prefix && strncmp(entry->d_name, prefix, strlen(prefix)) != 0) {
+            continue;
+        }
+        
+        /* Get object stats */
+        char object_path[3072];
+        snprintf(object_path, sizeof(object_path), "%s/%s", bucket_path, entry->d_name);
+        
+        struct stat st;
+        if (stat(object_path, &st) != 0 || S_ISDIR(st.st_mode)) {
+            continue;
+        }
+        
+        /* Expand array if needed */
+        if (count >= cap) {
+            cap *= 2;
+            object_entry_t *new_objs = buckets_realloc(objs, cap * sizeof(object_entry_t));
+            if (!new_objs) {
+                buckets_free(objs);
+                closedir(dir);
+                return -1;
+            }
+            objs = new_objs;
+        }
+        
+        /* Add object */
+        strncpy(objs[count].name, entry->d_name, sizeof(objs[count].name) - 1);
+        objs[count].name[sizeof(objs[count].name) - 1] = '\0';
+        objs[count].st = st;
+        count++;
+    }
+    closedir(dir);
+    
+    /* Sort lexicographically */
+    if (count > 0) {
+        qsort(objs, count, sizeof(object_entry_t), compare_objects);
+    }
+    
+    *objects = objs;
+    *capacity = cap;
+    return count;
+}
+
+/**
+ * Calculate ETag for an object (MD5 of content, or fallback to mtime)
+ */
+static void calculate_object_etag(const char *object_path, struct stat *st, char *etag, size_t etag_size)
+{
+    FILE *fp = fopen(object_path, "rb");
+    if (fp) {
+        fseek(fp, 0, SEEK_END);
+        long fsize = ftell(fp);
+        fseek(fp, 0, SEEK_SET);
+        
+        if (fsize > 0 && fsize < 10485760) { /* Only for files < 10MB */
+            unsigned char *content = buckets_malloc(fsize);
+            if (content && fread(content, 1, fsize, fp) == (size_t)fsize) {
+                char md5_hex[33];
+                buckets_s3_calculate_etag(content, fsize, md5_hex);
+                snprintf(etag, etag_size, "\"%s\"", md5_hex);
+                buckets_free(content);
+            } else {
+                /* Fallback to mtime-based ETag */
+                snprintf(etag, etag_size, "\"%016lx\"", (unsigned long)st->st_mtime);
+                if (content) buckets_free(content);
+            }
+        } else {
+            /* Fallback for large files */
+            snprintf(etag, etag_size, "\"%016lx\"", (unsigned long)st->st_mtime);
+        }
+        fclose(fp);
+    } else {
+        /* Fallback if can't open file */
+        snprintf(etag, etag_size, "\"%016lx\"", (unsigned long)st->st_mtime);
+    }
 }
 
 /**
@@ -710,12 +835,15 @@ int buckets_s3_list_objects_v1(buckets_s3_request_t *req, buckets_s3_response_t 
         max_keys = 1000; /* S3 limit */
     }
     
-    /* Check if bucket exists */
+    /* Check if bucket exists and collect sorted objects */
     char bucket_path[2048];
     snprintf(bucket_path, sizeof(bucket_path), "/tmp/buckets-data/%s", req->bucket);
     
-    DIR *dir = opendir(bucket_path);
-    if (!dir) {
+    object_entry_t *objects = NULL;
+    int capacity = 0;
+    int total_objects = collect_sorted_objects(bucket_path, prefix, &objects, &capacity);
+    
+    if (total_objects < 0) {
         return buckets_s3_xml_error(res, "NoSuchBucket",
                                      "The specified bucket does not exist",
                                      req->bucket);
@@ -748,55 +876,31 @@ int buckets_s3_list_objects_v1(buckets_s3_request_t *req, buckets_s3_response_t 
     offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
                        "  <MaxKeys>%d</MaxKeys>\n", max_keys);
     
-    /* Collect and filter objects */
-    struct dirent *entry;
+    /* Iterate through sorted objects, applying marker filter and max-keys limit */
     int count = 0;
     bool is_truncated = false;
     char next_marker[1024] = {0};
-    bool past_marker = (marker == NULL || marker[0] == '\0');
     
-    while ((entry = readdir(dir)) != NULL && count < max_keys) {
-        /* Skip . and .. */
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
-        
+    for (int i = 0; i < total_objects && count < max_keys; i++) {
         /* Apply marker filter (skip until we pass the marker) */
-        if (!past_marker) {
-            if (strcmp(entry->d_name, marker) <= 0) {
-                continue;
-            }
-            past_marker = true;
-        }
-        
-        /* Apply prefix filter */
-        if (prefix && strncmp(entry->d_name, prefix, strlen(prefix)) != 0) {
+        if (marker && strcmp(objects[i].name, marker) <= 0) {
             continue;
         }
         
-        /* Get object stats */
+        /* Build object path for ETag calculation */
         char object_path[3072];
-        snprintf(object_path, sizeof(object_path), "%s/%s", bucket_path, entry->d_name);
+        snprintf(object_path, sizeof(object_path), "%s/%s", bucket_path, objects[i].name);
         
-        struct stat st;
-        if (stat(object_path, &st) != 0) {
-            continue;
-        }
-        
-        /* Skip directories (in case there are any) */
-        if (S_ISDIR(st.st_mode)) {
-            continue;
-        }
-        
-        /* Add object to XML */
+        /* Format timestamp */
         char timestamp[64];
-        struct tm *tm_info = gmtime(&st.st_mtime);
+        struct tm *tm_info = gmtime(&objects[i].st.st_mtime);
         strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000Z", tm_info);
         
-        /* Calculate ETag (MD5 of file content) - for now, use simplified version */
-        char etag[33] = {0};
-        snprintf(etag, sizeof(etag), "\"%016lx\"", (unsigned long)st.st_mtime);
+        /* Calculate ETag */
+        char etag[64];
+        calculate_object_etag(object_path, &objects[i].st, etag, sizeof(etag));
         
+        /* Add object to XML */
         offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
                            "  <Contents>\n"
                            "    <Key>%s</Key>\n"
@@ -805,10 +909,10 @@ int buckets_s3_list_objects_v1(buckets_s3_request_t *req, buckets_s3_response_t 
                            "    <Size>%ld</Size>\n"
                            "    <StorageClass>STANDARD</StorageClass>\n"
                            "  </Contents>\n",
-                           entry->d_name, timestamp, etag, (long)st.st_size);
+                           objects[i].name, timestamp, etag, (long)objects[i].st.st_size);
         
         count++;
-        strncpy(next_marker, entry->d_name, sizeof(next_marker) - 1);
+        strncpy(next_marker, objects[i].name, sizeof(next_marker) - 1);
         
         if (offset >= (int)sizeof(xml_body) - 1000) {
             buckets_warn("LIST objects: XML buffer nearly full");
@@ -817,12 +921,26 @@ int buckets_s3_list_objects_v1(buckets_s3_request_t *req, buckets_s3_response_t 
         }
     }
     
-    /* Check if there are more results */
-    if (!is_truncated && entry != NULL) {
-        is_truncated = true;
+    /* Check if there are more results beyond what we returned */
+    if (!is_truncated) {
+        /* Find the index of the last returned object */
+        int last_idx = -1;
+        for (int i = 0; i < total_objects; i++) {
+            if (marker && strcmp(objects[i].name, marker) <= 0) {
+                continue;
+            }
+            last_idx++;
+            if (last_idx >= count - 1) {
+                /* Check if there's another object after this one */
+                if (i + 1 < total_objects) {
+                    is_truncated = true;
+                }
+                break;
+            }
+        }
     }
     
-    closedir(dir);
+    buckets_free(objects);
     
     /* Add truncation info */
     offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
@@ -877,12 +995,15 @@ int buckets_s3_list_objects_v2(buckets_s3_request_t *req, buckets_s3_response_t 
     /* continuation-token takes precedence over start-after */
     const char *marker = continuation_token ? continuation_token : start_after;
     
-    /* Check if bucket exists */
+    /* Check if bucket exists and collect sorted objects */
     char bucket_path[2048];
     snprintf(bucket_path, sizeof(bucket_path), "/tmp/buckets-data/%s", req->bucket);
     
-    DIR *dir = opendir(bucket_path);
-    if (!dir) {
+    object_entry_t *objects = NULL;
+    int capacity = 0;
+    int total_objects = collect_sorted_objects(bucket_path, prefix, &objects, &capacity);
+    
+    if (total_objects < 0) {
         return buckets_s3_xml_error(res, "NoSuchBucket",
                                      "The specified bucket does not exist",
                                      req->bucket);
@@ -904,9 +1025,24 @@ int buckets_s3_list_objects_v2(buckets_s3_request_t *req, buckets_s3_response_t 
                            "  <Prefix></Prefix>\n");
     }
     
+    /* Iterate through sorted objects, applying marker filter and max-keys limit */
+    int count = 0;
+    bool is_truncated = false;
+    char next_token[1024] = {0};
+    
+    /* First pass to count objects for KeyCount */
+    for (int i = 0; i < total_objects && count < max_keys; i++) {
+        /* Apply marker filter (skip until we pass the marker) */
+        if (marker && strcmp(objects[i].name, marker) <= 0) {
+            continue;
+        }
+        count++;
+    }
+    
+    /* Now output KeyCount and MaxKeys */
     offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
-                       "  <KeyCount>0</KeyCount>\n" /* Will update later */
-                       "  <MaxKeys>%d</MaxKeys>\n", max_keys);
+                       "  <KeyCount>%d</KeyCount>\n"
+                       "  <MaxKeys>%d</MaxKeys>\n", count, max_keys);
     
     if (continuation_token) {
         offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
@@ -919,56 +1055,28 @@ int buckets_s3_list_objects_v2(buckets_s3_request_t *req, buckets_s3_response_t 
                            "  <StartAfter>%s</StartAfter>\n", start_after);
     }
     
-    /* Collect and filter objects */
-    struct dirent *entry;
-    int count = 0;
-    bool is_truncated = false;
-    char next_token[1024] = {0};
-    bool past_marker = (marker == NULL || marker[0] == '\0');
-    
-    /* Save position to update KeyCount later */
-    int key_count_pos = offset;
-    
-    while ((entry = readdir(dir)) != NULL && count < max_keys) {
-        /* Skip . and .. */
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
-        
+    /* Second pass to generate XML for objects */
+    count = 0; /* Reset count */
+    for (int i = 0; i < total_objects && count < max_keys; i++) {
         /* Apply marker filter */
-        if (!past_marker) {
-            if (strcmp(entry->d_name, marker) <= 0) {
-                continue;
-            }
-            past_marker = true;
-        }
-        
-        /* Apply prefix filter */
-        if (prefix && strncmp(entry->d_name, prefix, strlen(prefix)) != 0) {
+        if (marker && strcmp(objects[i].name, marker) <= 0) {
             continue;
         }
         
-        /* Get object stats */
+        /* Build object path for ETag calculation */
         char object_path[3072];
-        snprintf(object_path, sizeof(object_path), "%s/%s", bucket_path, entry->d_name);
+        snprintf(object_path, sizeof(object_path), "%s/%s", bucket_path, objects[i].name);
         
-        struct stat st;
-        if (stat(object_path, &st) != 0) {
-            continue;
-        }
-        
-        if (S_ISDIR(st.st_mode)) {
-            continue;
-        }
-        
-        /* Add object to XML */
+        /* Format timestamp */
         char timestamp[64];
-        struct tm *tm_info = gmtime(&st.st_mtime);
+        struct tm *tm_info = gmtime(&objects[i].st.st_mtime);
         strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000Z", tm_info);
         
-        char etag[33] = {0};
-        snprintf(etag, sizeof(etag), "\"%016lx\"", (unsigned long)st.st_mtime);
+        /* Calculate ETag */
+        char etag[64];
+        calculate_object_etag(object_path, &objects[i].st, etag, sizeof(etag));
         
+        /* Add object to XML */
         offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
                            "  <Contents>\n"
                            "    <Key>%s</Key>\n"
@@ -977,22 +1085,38 @@ int buckets_s3_list_objects_v2(buckets_s3_request_t *req, buckets_s3_response_t 
                            "    <Size>%ld</Size>\n"
                            "    <StorageClass>STANDARD</StorageClass>\n"
                            "  </Contents>\n",
-                           entry->d_name, timestamp, etag, (long)st.st_size);
+                           objects[i].name, timestamp, etag, (long)objects[i].st.st_size);
         
         count++;
-        strncpy(next_token, entry->d_name, sizeof(next_token) - 1);
+        strncpy(next_token, objects[i].name, sizeof(next_token) - 1);
         
         if (offset >= (int)sizeof(xml_body) - 1000) {
+            buckets_warn("LIST objects: XML buffer nearly full");
             is_truncated = true;
             break;
         }
     }
     
-    if (!is_truncated && entry != NULL) {
-        is_truncated = true;
+    /* Check if there are more results beyond what we returned */
+    if (!is_truncated) {
+        /* Find the index of the last returned object */
+        int last_idx = -1;
+        for (int i = 0; i < total_objects; i++) {
+            if (marker && strcmp(objects[i].name, marker) <= 0) {
+                continue;
+            }
+            last_idx++;
+            if (last_idx >= count - 1) {
+                /* Check if there's another object after this one */
+                if (i + 1 < total_objects) {
+                    is_truncated = true;
+                }
+                break;
+            }
+        }
     }
     
-    closedir(dir);
+    buckets_free(objects);
     
     /* Add truncation info */
     offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
@@ -1008,18 +1132,6 @@ int buckets_s3_list_objects_v2(buckets_s3_request_t *req, buckets_s3_response_t 
     /* Close XML */
     offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
                        "</ListBucketResult>\n");
-    
-    /* Update KeyCount in the XML (a bit hacky but works) */
-    char temp[65536];
-    memcpy(temp, xml_body, key_count_pos);
-    int updated_offset = snprintf(temp + key_count_pos, sizeof(temp) - key_count_pos,
-                                   "  <KeyCount>%d</KeyCount>\n", count);
-    /* Skip the old KeyCount line and copy the rest */
-    const char *rest = strstr(xml_body + key_count_pos, "<MaxKeys>");
-    if (rest) {
-        strcpy(temp + key_count_pos + updated_offset, rest);
-    }
-    memcpy(xml_body, temp, sizeof(xml_body));
     
     buckets_debug("LIST objects v2: %s (count=%d, truncated=%s)",
                   req->bucket, count, is_truncated ? "true" : "false");

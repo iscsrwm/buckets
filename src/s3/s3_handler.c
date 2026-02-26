@@ -37,17 +37,18 @@ static int parse_s3_path(const char *uri, buckets_s3_request_t *req)
         return BUCKETS_OK;
     }
     
-    /* Find first slash (separates bucket from key) */
+    /* Find first slash (separates bucket from key) and query string */
     const char *slash = strchr(uri, '/');
+    const char *question = strchr(uri, '?');
     
     if (!slash) {
         /* Just bucket, no key */
-        size_t bucket_len = strlen(uri);
+        size_t bucket_len = question ? (size_t)(question - uri) : strlen(uri);
         if (bucket_len >= sizeof(req->bucket)) {
             return BUCKETS_ERR_INVALID_ARG;
         }
-        strncpy(req->bucket, uri, sizeof(req->bucket) - 1);
-        req->bucket[sizeof(req->bucket) - 1] = '\0';
+        strncpy(req->bucket, uri, bucket_len);
+        req->bucket[bucket_len] = '\0';
         req->key[0] = '\0';
         return BUCKETS_OK;
     }
@@ -60,16 +61,45 @@ static int parse_s3_path(const char *uri, buckets_s3_request_t *req)
     strncpy(req->bucket, uri, bucket_len);
     req->bucket[bucket_len] = '\0';
     
-    /* Extract key (everything after first slash) */
+    /* Extract key (everything after first slash, up to query string) */
     const char *key = slash + 1;
-    size_t key_len = strlen(key);
+    size_t key_len = question ? (size_t)(question - key) : strlen(key);
     if (key_len >= sizeof(req->key)) {
         return BUCKETS_ERR_INVALID_ARG;
     }
-    strncpy(req->key, key, sizeof(req->key) - 1);
-    req->key[sizeof(req->key) - 1] = '\0';
+    strncpy(req->key, key, key_len);
+    req->key[key_len] = '\0';
     
     return BUCKETS_OK;
+}
+
+/**
+ * URL decode a string in-place
+ * Converts %XX hex codes to characters
+ */
+static void url_decode(char *dst, const char *src)
+{
+    char a, b;
+    while (*src) {
+        if ((*src == '%') &&
+            ((a = src[1]) && (b = src[2])) &&
+            (isxdigit(a) && isxdigit(b))) {
+            if (a >= 'a') a -= 'a'-'A';
+            if (a >= 'A') a -= ('A' - 10);
+            else a -= '0';
+            if (b >= 'a') b -= 'a'-'A';
+            if (b >= 'A') b -= ('A' - 10);
+            else b -= '0';
+            *dst++ = 16*a+b;
+            src += 3;
+        } else if (*src == '+') {
+            *dst++ = ' ';
+            src++;
+        } else {
+            *dst++ = *src++;
+        }
+    }
+    *dst = '\0';
 }
 
 /**
@@ -116,9 +146,8 @@ int buckets_s3_parse_request(buckets_http_request_t *http_req,
     req->body_len = http_req->body_len;
     
     /* Parse query string (simple implementation) */
-    const char *query = strchr(http_req->uri, '?');
-    if (query) {
-        query++; /* Skip the '?' */
+    const char *query = http_req->query_string;
+    if (query && query[0] != '\0') {
         /* Count parameters */
         int count = 1;
         for (const char *p = query; *p; p++) {
@@ -140,8 +169,15 @@ int buckets_s3_parse_request(buckets_http_request_t *http_req,
                 char *equals = strchr(pair, '=');
                 if (equals) {
                     *equals = '\0';
-                    req->query_params_keys[req->query_count] = buckets_strdup(pair);
-                    req->query_params_values[req->query_count] = buckets_strdup(equals + 1);
+                    
+                    /* URL decode both key and value */
+                    char decoded_key[256];
+                    char decoded_value[1024];
+                    url_decode(decoded_key, pair);
+                    url_decode(decoded_value, equals + 1);
+                    
+                    req->query_params_keys[req->query_count] = buckets_strdup(decoded_key);
+                    req->query_params_values[req->query_count] = buckets_strdup(decoded_value);
                     req->query_count++;
                 }
                 pair = strtok_r(NULL, "&", &saveptr);
