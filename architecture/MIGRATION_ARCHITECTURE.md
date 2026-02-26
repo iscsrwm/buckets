@@ -1141,9 +1141,360 @@ __atomic_fetch_add(&counter, 1, __ATOMIC_SEQ_CST);
 
 ---
 
-## 12. Testing Strategy
+## 12. Throttling (Week 28)
 
-### 12.1 Unit Tests
+### 12.1 Overview
+
+Migration operations can saturate system resources (network bandwidth, disk I/O, CPU), impacting user-facing traffic. The throttling system implements bandwidth limiting to ensure migrations run in the background without degrading performance for normal object operations.
+
+### 12.2 Token Bucket Algorithm
+
+**Classic approach for rate limiting:**
+
+```c
+typedef struct {
+    u64 rate;              // Bytes per second
+    u64 burst;             // Maximum bucket capacity (bytes)
+    double tokens;         // Current token count
+    struct timeval last_refill;  // Last refill time
+    bool enabled;          // Throttling enabled flag
+    pthread_mutex_t lock;  // Thread safety
+    
+    // Statistics
+    u64 tokens_consumed;   // Total tokens used
+    u64 wait_count;        // Number of waits
+    u64 total_wait_time_us;// Total wait time (microseconds)
+} buckets_throttle_t;
+```
+
+**Token refill formula:**
+```
+elapsed_us = (now - last_refill) in microseconds
+new_tokens = (elapsed_us / 1000000.0) * rate
+tokens = min(tokens + new_tokens, burst)
+```
+
+**Wait operation:**
+```
+1. Refill tokens based on elapsed time
+2. If tokens >= bytes_needed:
+   - Consume bytes_needed tokens
+   - Return immediately
+3. Else:
+   - Sleep for 100ms (allow periodic checks)
+   - Go to step 1
+```
+
+### 12.3 Design Decisions
+
+**Public Structure**: `buckets_throttle_t` is public (not opaque) for zero-copy embedding
+- Can be stack-allocated
+- Can be embedded directly in job or worker structures
+- Only 56 bytes per instance
+
+**Microsecond Precision**: Uses `gettimeofday()` for timing
+- Sufficient precision for bandwidth control
+- Portable across POSIX systems
+- Lower overhead than `clock_gettime()`
+
+**Sleep Strategy**: Cap sleep at 100ms
+- Allows periodic refill checks
+- Responsive to rate changes
+- Prevents long waits if rate is adjusted
+
+**Enable vs Rate**: Separate enable flag from rate
+- `rate=0` disables throttling (instant return)
+- Can preserve configuration while disabled
+- Dynamic enable/disable without changing rate
+
+### 12.4 API Functions
+
+```c
+// Creation
+buckets_throttle_t *buckets_throttle_create(u64 rate, u64 burst);
+buckets_throttle_t *buckets_throttle_create_unlimited(void);
+void buckets_throttle_free(buckets_throttle_t *throttle);
+
+// Main operation
+buckets_error_t buckets_throttle_wait(buckets_throttle_t *throttle, 
+                                       size_t bytes);
+
+// Configuration
+void buckets_throttle_enable(buckets_throttle_t *throttle);
+void buckets_throttle_disable(buckets_throttle_t *throttle);
+buckets_error_t buckets_throttle_set_rate(buckets_throttle_t *throttle, 
+                                           u64 rate);
+
+// Query
+bool buckets_throttle_is_enabled(const buckets_throttle_t *throttle);
+u64 buckets_throttle_get_rate(const buckets_throttle_t *throttle);
+u64 buckets_throttle_get_burst(const buckets_throttle_t *throttle);
+void buckets_throttle_get_stats(const buckets_throttle_t *throttle,
+                                 buckets_throttle_stats_t *stats);
+```
+
+### 12.5 Performance Characteristics
+
+**When tokens available**: <1 μs overhead
+- Just arithmetic (refill calculation + consumption)
+- No syscalls
+
+**When tokens unavailable**: Sleep in 100ms chunks
+- Calls `nanosleep()` repeatedly
+- Rechecks token availability after each sleep
+- Total delay matches required time ± 100ms
+
+**Memory**: 56 bytes per throttle instance
+- Lightweight, can be allocated on stack
+- Zero-copy when embedded in structures
+
+### 12.6 Integration with Worker Pool (Week 30)
+
+**Approach 1**: Per-worker throttle
+- Each worker has own throttle instance
+- Total rate = worker_count × per_worker_rate
+
+**Approach 2**: Shared throttle (recommended)
+- All workers share single throttle instance
+- Mutex-protected for thread safety
+- Precise global rate limiting
+
+**Usage in worker**:
+```c
+// Before writing destination object
+buckets_throttle_wait(job->throttle, task->size);
+
+// Perform migration
+write_destination_object(...);
+```
+
+### 12.7 Configuration Examples
+
+**10 MB/s throttle with 1 MB burst**:
+```c
+buckets_throttle_t *throttle = 
+    buckets_throttle_create(10 * 1024 * 1024,  // 10 MB/s
+                             1 * 1024 * 1024);   // 1 MB burst
+```
+
+**100 MB/s throttle with 10 MB burst**:
+```c
+buckets_throttle_t *throttle = 
+    buckets_throttle_create(100 * 1024 * 1024,  // 100 MB/s
+                             10 * 1024 * 1024);   // 10 MB burst
+```
+
+**Unlimited (disabled)**:
+```c
+buckets_throttle_t *throttle = buckets_throttle_create_unlimited();
+```
+
+---
+
+## 13. Checkpointing (Week 29)
+
+### 13.1 Overview
+
+Checkpointing enables migration jobs to persist their state to disk, allowing recovery after crashes or restarts. This ensures long-running migrations (hours to days) can resume from the last checkpoint rather than starting over.
+
+### 13.2 Checkpoint Format
+
+**JSON structure** (human-readable for debugging):
+
+```json
+{
+  "job_id": "migration-gen-42-to-43",
+  "source_generation": 42,
+  "target_generation": 43,
+  "state": 2,
+  "checkpoint_time": 1708896000,
+  "start_time": 1708800000,
+  "total_objects": 2000000,
+  "migrated_objects": 500000,
+  "failed_objects": 123,
+  "bytes_total": 1073741824,
+  "bytes_migrated": 536870912
+}
+```
+
+**Field descriptions:**
+- `job_id`: Unique identifier (format: `"migration-gen-{source}-to-{target}"`)
+- `source_generation`: Source topology generation number
+- `target_generation`: Target topology generation number
+- `state`: Current job state (0=IDLE, 1=SCANNING, 2=MIGRATING, 3=PAUSED, 4=COMPLETED, 5=FAILED)
+- `checkpoint_time`: Unix timestamp when checkpoint was saved
+- `start_time`: Unix timestamp when job started
+- `total_objects`: Total number of objects to migrate
+- `migrated_objects`: Number of objects successfully migrated
+- `failed_objects`: Number of objects that failed migration
+- `bytes_total`: Total bytes to migrate
+- `bytes_migrated`: Bytes successfully migrated
+
+### 13.3 Atomic Write Pattern
+
+**Crash-safe persistence:**
+
+```c
+// 1. Serialize job to JSON
+cJSON *root = cJSON_CreateObject();
+cJSON_AddStringToObject(root, "job_id", job->job_id);
+cJSON_AddNumberToObject(root, "source_generation", job->source_generation);
+// ... add all fields ...
+char *json_str = cJSON_PrintUnformatted(root);
+
+// 2. Atomic write (temp + rename)
+buckets_error_t err = buckets_atomic_write(checkpoint_path, 
+                                            (u8 *)json_str, 
+                                            strlen(json_str));
+
+// 3. Cleanup
+free(json_str);
+cJSON_Delete(root);
+```
+
+**Why atomic writes?**
+- Prevents partial writes if crash during save
+- Checkpoint file is always valid or nonexistent
+- Leverages existing `buckets_atomic_write()` infrastructure
+
+### 13.4 API Functions
+
+```c
+// Save checkpoint
+buckets_error_t buckets_migration_job_save(
+    const buckets_migration_job_t *job,
+    const char *checkpoint_path);
+
+// Load checkpoint
+buckets_migration_job_t *buckets_migration_job_load(
+    const char *checkpoint_path);
+```
+
+### 13.5 Minimal Load Design
+
+**Load returns minimal job structure:**
+- Only checkpoint data is populated (job_id, generations, state, progress, timestamps)
+- Topologies and disk paths are NOT stored in checkpoint (too large, may change)
+- Caller must set topologies and disk paths after load
+
+**Rationale:**
+- Keeps checkpoint file small (~300-500 bytes)
+- Topologies can be large (hundreds of KB for large clusters)
+- Disk paths may change between restarts (mount points, etc.)
+- Allows operator to adjust configuration on resume
+
+**Usage pattern:**
+```c
+// Load checkpoint
+buckets_migration_job_t *job = buckets_migration_job_load("checkpoint.json");
+
+// Caller must set topologies and disk paths
+job->source_topology = load_topology_for_generation(job->source_generation);
+job->target_topology = load_topology_for_generation(job->target_generation);
+job->disk_paths = get_current_disk_paths(&job->disk_count);
+
+// Now resume migration
+buckets_migration_job_resume(job);
+```
+
+### 13.6 Checkpoint Frequency (Week 30)
+
+**Periodic checkpointing strategies:**
+
+**Option 1: Object count based**
+```c
+if (job->migrated_objects % 1000 == 0) {
+    buckets_migration_job_save(job, checkpoint_path);
+}
+```
+
+**Option 2: Time based**
+```c
+if (time(NULL) - job->last_checkpoint_time >= 300) {  // 5 minutes
+    buckets_migration_job_save(job, checkpoint_path);
+}
+```
+
+**Option 3: Combined (recommended)**
+```c
+bool should_checkpoint = 
+    (job->migrated_objects % 1000 == 0) ||
+    (time(NULL) - job->last_checkpoint_time >= 300);
+
+if (should_checkpoint) {
+    buckets_migration_job_save(job, checkpoint_path);
+}
+```
+
+### 13.7 Recovery Workflow
+
+**On startup after crash:**
+
+```c
+// 1. Check for checkpoint file
+if (file_exists("migration-gen-42-to-43.checkpoint")) {
+    // 2. Load checkpoint
+    buckets_migration_job_t *job = 
+        buckets_migration_job_load("migration-gen-42-to-43.checkpoint");
+    
+    // 3. Restore topologies
+    job->source_topology = load_topology(job->source_generation);
+    job->target_topology = load_topology(job->target_generation);
+    job->disk_paths = get_disk_paths(&job->disk_count);
+    
+    // 4. Resume migration
+    if (job->state == MIGRATION_STATE_PAUSED) {
+        buckets_migration_job_resume(job);
+    } else if (job->state == MIGRATION_STATE_MIGRATING) {
+        // Crash during migration, resume from checkpoint
+        buckets_migration_job_resume(job);
+    }
+}
+```
+
+### 13.8 Performance Characteristics
+
+**Save operation**: 1-5 ms
+- JSON serialization: ~500 μs
+- Atomic write: ~1-4 ms (depends on disk)
+- Total: Negligible overhead
+
+**Load operation**: 1-5 ms
+- File read: ~1-3 ms
+- JSON parsing: ~500 μs
+- Total: Fast recovery
+
+**Checkpoint size**: 300-500 bytes
+- JSON format (human-readable)
+- Small enough for frequent saves
+- No compression needed
+
+### 13.9 Design Decisions
+
+**JSON Format**: Human-readable for debugging
+- Easy to inspect with text editor
+- Portable across platforms
+- cJSON library is already integrated
+
+**Atomic Writes**: Reuse existing infrastructure
+- `buckets_atomic_write()` already implements temp+rename pattern
+- Crash-safe by design
+- No additional code needed
+
+**Minimal Data**: Only essential state
+- Job ID, generations, state, progress
+- Topologies loaded separately (avoid storing large data)
+- Allows configuration changes on resume
+
+**String Copy**: Use `memcpy()` instead of `strncpy()`
+- Avoids GCC `-Werror=stringop-truncation` warnings
+- More explicit for known-length strings
+
+---
+
+## 14. Testing Strategy
+
+### 14.1 Unit Tests
 
 **Scanner** (10 tests):
 - Empty cluster
@@ -1160,16 +1511,46 @@ __atomic_fetch_add(&counter, 1, __ATOMIC_SEQ_CST);
 - Error handling
 - Large batches
 
-### 12.2 Integration Tests (Week 30)
+**Orchestrator** (14 tests):
+- Job lifecycle (create/start/pause/resume/stop/wait)
+- State machine validation
+- Progress tracking
+- Event callbacks
+- Empty migrations
+- Multiple generations
+
+**Throttle** (15 tests):
+- Create with default/custom/unlimited settings
+- Enable/disable dynamically
+- Set rate dynamically
+- Wait with small/large bytes
+- Token refill over time
+- Statistics tracking
+- NULL validation
+- Edge cases (zero bytes, burst behavior)
+
+**Checkpoint** (10 tests):
+- Save checkpoint successfully
+- Load checkpoint and verify fields
+- Save/load roundtrip for all states
+- NULL parameter validation
+- Nonexistent file handling
+- Zero progress edge case
+- Large numbers (1B objects, 100GB)
+- Multiple save/load cycles
+- Thread safety
+
+### 14.2 Integration Tests (Week 30)
 
 **Scenarios:**
-- Full migration workflow
-- Crash and resume
-- Concurrent user traffic
-- Multiple topology changes
-- Resource limits
+- Full migration workflow (scanner → workers → completion)
+- Crash and resume (checkpoint save/load)
+- Concurrent user traffic (user ops + migration)
+- Multiple topology changes (sequential migrations)
+- Resource limits (throttling with bandwidth limits)
+- Graceful shutdown (signal handlers)
 
-### 12.3 Performance Tests (Week 30)
+### 14.3 Performance Tests (Week 30)
 
 **Benchmarks:**
 - Scanner throughput (objects/sec)
@@ -1182,15 +1563,21 @@ __atomic_fetch_add(&counter, 1, __ATOMIC_SEQ_CST);
 
 ## References
 
-- `include/buckets_migration.h` - Public API
+- `include/buckets_migration.h` - Public API (585 lines)
 - `src/migration/scanner.c` - Scanner implementation (544 lines)
 - `src/migration/worker.c` - Worker pool implementation (692 lines)
+- `src/migration/orchestrator.c` - Orchestrator implementation (656 lines)
+- `src/migration/throttle.c` - Throttling implementation (330 lines)
 - `tests/migration/test_scanner.c` - Scanner tests (10 tests)
 - `tests/migration/test_worker.c` - Worker tests (12 tests)
+- `tests/migration/test_orchestrator.c` - Orchestrator tests (14 tests)
+- `tests/migration/test_throttle.c` - Throttle tests (15 tests)
+- `tests/migration/test_checkpoint.c` - Checkpoint tests (10 tests)
 - `architecture/SCALE_AND_DATA_PLACEMENT.md` - Hash ring design
 - `ROADMAP.md` - Implementation timeline
 
 ---
 
 **Document Status**: Living document, updated as implementation progresses  
-**Next Update**: After Week 27 (Orchestrator implementation)
+**Last Updated**: Week 29 (Checkpointing complete)  
+**Next Update**: After Week 30 (Integration and production readiness)

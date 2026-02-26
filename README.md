@@ -99,8 +99,8 @@ buckets-admin cluster migration-status
 
 ## Project Status
 
-**Current Phase**: Phase 7 - Background Migration (Week 27 complete)  
-**Progress**: 6 phases complete, Week 27 of 52 (52%)
+**Current Phase**: Phase 7 - Background Migration (Week 29 complete)  
+**Progress**: 6 phases complete, Week 29 of 52 (56%)
 
 ### Completed
 
@@ -169,7 +169,7 @@ buckets-admin cluster migration-status
     - Critical bug fixes (pool count tracking)
     - 10 integration tests passing
 
-- 🔄 **Phase 7: Background Migration (Weeks 25-30)** - 50% Complete (Week 27/30)
+- 🔄 **Phase 7: Background Migration (Weeks 25-30)** - 83% Complete (Week 29/30)
   - ✅ Migration scanner (Week 25)
     - Parallel per-disk scanning
     - Hash ring integration for location computation
@@ -186,13 +186,28 @@ buckets-admin cluster migration-status
     - Real-time progress tracking with ETA calculation
     - Event callback system
     - 14 tests passing (100%)
-  - ⏳ Throttling (Week 28)
-  - ⏳ Checkpointing (Week 29)
-  - ⏳ Integration (Week 30)
+  - ✅ Throttling (Week 28)
+    - Token bucket algorithm with microsecond precision
+    - Configurable bandwidth limiting (bytes/sec + burst size)
+    - Dynamic enable/disable and rate adjustment
+    - Thread-safe with mutex protection
+    - 15 tests passing (100%)
+  - ✅ Checkpointing (Week 29)
+    - JSON-based checkpoint format (human-readable)
+    - Atomic writes (temp + rename pattern)
+    - Save/load operations for crash recovery
+    - Thread-safe checkpoint operations
+    - 10 tests passing (100%)
+  - ⏳ Integration (Week 30) - IN PROGRESS
+    - Periodic checkpointing (every 1000 objects or 5 minutes)
+    - Throttle integration into worker pool
+    - Recovery function (resume from checkpoint)
+    - Signal handlers for graceful shutdown
+    - End-to-end integration tests
 
 ### Current Stats
 
-- **Production Code**: ~13,128 lines
+- **Production Code**: ~13,588 lines
   - Core: 255 lines
   - Cluster: 3,050 lines (+420 manager)
   - Hash: 920 lines
@@ -200,20 +215,20 @@ buckets-admin cluster migration-status
   - Erasure: 546 lines
   - Storage: 4,171 lines
   - Registry: 1,266 lines
-  - Migration: 1,775 lines (scanner, worker pool, orchestrator)
+  - Migration: 2,222 lines (scanner 544, worker 692, orchestrator 656, throttle 330)
   - Benchmarks: 618 lines
-- **Test Code**: ~7,135 lines
-- **Test Coverage**: 267/267 tests passing (100%)
+- **Test Code**: ~7,854 lines
+- **Test Coverage**: 292/292 tests passing (100%)
   - Foundation: 62 tests
   - Hashing: 49 tests
   - Crypto & Erasure: 36 tests
   - Storage: 33 tests
   - Registry: 15 tests
   - Topology: 31 tests
-  - Migration: 36 tests (scanner 10, worker 12, orchestrator 14)
+  - Migration: 61 tests (scanner 10, worker 12, orchestrator 14, throttle 15, checkpoint 10)
   - Storage Integration: 5 tests
 - **Build**: Clean with `-Wall -Wextra -Werror -pedantic`
-- **Library Size**: ~260KB (includes ISA-L)
+- **Library Size**: ~270KB (includes ISA-L)
 
 ### Performance Highlights
 
@@ -224,7 +239,12 @@ buckets-admin cluster migration-status
 
 ### Next Up
 
-- Week 24: Production readiness, integration tests, benchmarks
+- Week 30: Migration integration and production readiness
+  - Periodic checkpointing (every 1000 objects or 5 minutes)
+  - Throttle integration into worker pool
+  - Recovery function (resume from checkpoint after crash)
+  - Signal handlers for graceful shutdown (SIGTERM/SIGINT)
+  - End-to-end integration tests
 
 See [ROADMAP.md](ROADMAP.md) for detailed development timeline and [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) for comprehensive progress tracking.
 
