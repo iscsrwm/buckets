@@ -39,8 +39,9 @@ void buckets_compute_object_path(const char *bucket, const char *object,
     prefix[1] = object_hash[1];
     prefix[2] = '\0';
 
-    /* Construct path: .buckets/data/<prefix>/<hash>/ */
-    snprintf(path, path_len, ".buckets/data/%s/%s/", prefix, object_hash);
+    /* Construct relative path: <prefix>/<hash>/ */
+    /* The caller will prepend the disk path */
+    snprintf(path, path_len, "%s/%s/", prefix, object_hash);
 }
 
 /* Compute hash prefix (00-ff) */

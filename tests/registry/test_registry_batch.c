@@ -10,32 +10,43 @@
 #include <string.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "buckets.h"
 #include "buckets_registry.h"
 #include "buckets_storage.h"
 
-#define TEST_DATA_DIR "/tmp/buckets-batch-test"
+#define TEST_DATA_DIR_BASE "/tmp/buckets-batch-test"
 
 /* Test fixtures */
+
+static char test_data_dir[256];
+
+static void setup_test_dir(void)
+{
+    /* Create unique directory for this test using PID and timestamp */
+    snprintf(test_data_dir, sizeof(test_data_dir), "%s-%d-%ld",
+             TEST_DATA_DIR_BASE, getpid(), (long)time(NULL));
+    
+    mkdir(test_data_dir, 0755);
+}
 
 static void cleanup_test_dir(void)
 {
     char cmd[512];
-    snprintf(cmd, sizeof(cmd), "rm -rf %s", TEST_DATA_DIR);
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", test_data_dir);
     int ret = system(cmd);
     (void)ret;
 }
 
 void setup_registry(void)
 {
-    cleanup_test_dir();
-    mkdir(TEST_DATA_DIR, 0755);
+    setup_test_dir();
     
     buckets_init();
     
     buckets_storage_config_t storage_config = {
-        .data_dir = TEST_DATA_DIR,
+        .data_dir = test_data_dir,
         .inline_threshold = 128 * 1024,
         .default_ec_k = 8,
         .default_ec_m = 4,
