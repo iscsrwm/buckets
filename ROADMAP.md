@@ -324,14 +324,14 @@ This roadmap tracks the development of Buckets from initial C foundation through
 - [x] 12 comprehensive tests (100% passing)
 - [x] **Files**: `worker.c` (692 lines), tests (522 lines), API updates (85 lines)
 
-### Week 27: Orchestration (NEXT)
-- [ ] Migration state machine (IDLE → SCANNING → MIGRATING → COMPLETE/FAILED)
-- [ ] Job management (create, start, stop, query)
-- [ ] Progress tracking (percentage, ETA)
-- [ ] Pause/resume capability
-- [ ] Event callbacks
+### Week 27: Orchestration ✅
+- [x] Migration state machine (IDLE → SCANNING → MIGRATING → COMPLETE/FAILED)
+- [x] Job management (create, start, stop, query)
+- [x] Progress tracking (percentage, ETA)
+- [x] Pause/resume capability
+- [x] Event callbacks
 
-### Week 28: Throttling
+### Week 28: Throttling (NEXT)
 - [ ] Bandwidth limiting
 - [ ] I/O prioritization (user > migration)
 - [ ] CPU throttling
@@ -349,7 +349,8 @@ This roadmap tracks the development of Buckets from initial C foundation through
 **Deliverables**:
 - [x] Week 25: Scanner (1,243 lines, 10 tests) ✅
 - [x] Week 26: Workers (1,299 lines, 12 tests) ✅
-- [ ] Week 27-30: Orchestration, throttling, checkpointing, integration
+- [x] Week 27: Orchestrator (1,254 lines, 14 tests) ✅
+- [ ] Week 28-30: Throttling, checkpointing, integration
 - [ ] >500 MB/s migration throughput (to be validated in Week 30)
 - [ ] Resumable after crash (Week 29)
 

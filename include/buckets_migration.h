@@ -107,10 +107,27 @@ typedef struct {
  * Migration Job
  * ===================================================================*/
 
+/* Forward declarations */
+typedef struct buckets_migration_job buckets_migration_job_t;
+typedef struct buckets_worker_pool buckets_worker_pool_t;
+
+/**
+ * Event callback function type
+ * 
+ * Called when job state changes or progress updates occur.
+ * 
+ * @param job Job handle
+ * @param event_type Event type (e.g., "state_change", "progress")
+ * @param user_data User-provided data
+ */
+typedef void (*buckets_migration_event_callback_t)(buckets_migration_job_t *job,
+                                                     const char *event_type,
+                                                     void *user_data);
+
 /**
  * Top-level migration job
  */
-typedef struct {
+struct buckets_migration_job {
     char job_id[64];                        /* "migration-gen-42-to-43" */
     i64 source_generation;                  /* Old topology generation */
     i64 target_generation;                  /* New topology generation */
@@ -131,8 +148,20 @@ typedef struct {
     buckets_cluster_topology_t *old_topology;  /* Source topology */
     buckets_cluster_topology_t *new_topology;  /* Target topology */
     
+    /* Disk paths */
+    char **disk_paths;
+    int disk_count;
+    
+    /* Components */
+    buckets_scanner_state_t *scanner;       /* Scanner (SCANNING state) */
+    buckets_worker_pool_t *worker_pool;     /* Worker pool (MIGRATING state) */
+    
+    /* Event callback */
+    buckets_migration_event_callback_t callback;
+    void *callback_user_data;
+    
     pthread_mutex_t lock;                   /* Thread safety */
-} buckets_migration_job_t;
+};
 
 /* ===================================================================
  * Scanner API
@@ -188,11 +217,6 @@ void buckets_scanner_cleanup(buckets_scanner_state_t *scanner);
 /* ===================================================================
  * Worker Pool
  * ===================================================================*/
-
-/**
- * Worker pool state (opaque)
- */
-typedef struct buckets_worker_pool buckets_worker_pool_t;
 
 /**
  * Worker statistics
@@ -280,25 +304,131 @@ int buckets_worker_pool_get_stats(buckets_worker_pool_t *pool,
 void buckets_worker_pool_free(buckets_worker_pool_t *pool);
 
 /* ===================================================================
- * Migration Job API (Preview - will implement in Week 27)
+ * Migration Job API
  * ===================================================================*/
 
 /**
  * Create migration job
  * 
  * @param source_gen Source topology generation
- * @param target_gen Target topology generation
+ * @param target_gen Target topology generation  
+ * @param old_topology Source topology
+ * @param new_topology Target topology
+ * @param disk_paths Array of disk paths
+ * @param disk_count Number of disks
  * @return Job handle or NULL on error
  */
-buckets_migration_job_t* buckets_migration_job_create(i64 source_gen, i64 target_gen);
+buckets_migration_job_t* buckets_migration_job_create(i64 source_gen, 
+                                                       i64 target_gen,
+                                                       buckets_cluster_topology_t *old_topology,
+                                                       buckets_cluster_topology_t *new_topology,
+                                                       char **disk_paths,
+                                                       int disk_count);
 
 /**
- * Get job status
+ * Start migration job
+ * 
+ * Transitions from IDLE to SCANNING state.
+ * 
+ * @param job Job handle
+ * @return BUCKETS_OK on success
+ */
+int buckets_migration_job_start(buckets_migration_job_t *job);
+
+/**
+ * Pause migration job
+ * 
+ * Transitions from MIGRATING to PAUSED state.
+ * 
+ * @param job Job handle
+ * @return BUCKETS_OK on success
+ */
+int buckets_migration_job_pause(buckets_migration_job_t *job);
+
+/**
+ * Resume migration job
+ * 
+ * Transitions from PAUSED to MIGRATING state.
+ * 
+ * @param job Job handle
+ * @return BUCKETS_OK on success
+ */
+int buckets_migration_job_resume(buckets_migration_job_t *job);
+
+/**
+ * Stop migration job
+ * 
+ * Gracefully stops the job and transitions to FAILED state.
+ * 
+ * @param job Job handle
+ * @return BUCKETS_OK on success
+ */
+int buckets_migration_job_stop(buckets_migration_job_t *job);
+
+/**
+ * Wait for job completion
+ * 
+ * Blocks until job reaches COMPLETED or FAILED state.
+ * 
+ * @param job Job handle
+ * @return BUCKETS_OK on success
+ */
+int buckets_migration_job_wait(buckets_migration_job_t *job);
+
+/**
+ * Get job state
  * 
  * @param job Job handle
  * @return Current state
  */
 buckets_migration_state_t buckets_migration_job_get_state(buckets_migration_job_t *job);
+
+/**
+ * Get job progress
+ * 
+ * @param job Job handle
+ * @param total Output: total objects
+ * @param completed Output: completed objects
+ * @param failed Output: failed objects
+ * @param percent Output: percentage complete (0-100)
+ * @param eta Output: estimated time to completion (seconds)
+ * @return BUCKETS_OK on success
+ */
+int buckets_migration_job_get_progress(buckets_migration_job_t *job,
+                                         i64 *total,
+                                         i64 *completed,
+                                         i64 *failed,
+                                         double *percent,
+                                         i64 *eta);
+
+/**
+ * Set event callback
+ * 
+ * @param job Job handle
+ * @param callback Callback function
+ * @param user_data User data passed to callback
+ * @return BUCKETS_OK on success
+ */
+int buckets_migration_job_set_callback(buckets_migration_job_t *job,
+                                         buckets_migration_event_callback_t callback,
+                                         void *user_data);
+
+/**
+ * Save job state to disk
+ * 
+ * @param job Job handle
+ * @param path File path for checkpoint
+ * @return BUCKETS_OK on success
+ */
+int buckets_migration_job_save(buckets_migration_job_t *job, const char *path);
+
+/**
+ * Load job state from disk
+ * 
+ * @param path File path for checkpoint
+ * @return Job handle or NULL on error
+ */
+buckets_migration_job_t* buckets_migration_job_load(const char *path);
 
 /**
  * Cleanup job

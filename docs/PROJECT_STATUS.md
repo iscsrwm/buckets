@@ -1,7 +1,7 @@
 # Buckets Project Status
 
 **Last Updated**: February 25, 2026  
-**Current Phase**: Phase 7 - Week 26 (Background Migration) - ✅ COMPLETE  
+**Current Phase**: Phase 7 - Week 28 (Migration Throttling) - 🔄 NEXT  
 **Status**: 🟢 Active Development  
 **Phase 1 Status**: ✅ COMPLETE (Foundation - Weeks 1-4)  
 **Phase 2 Status**: ✅ COMPLETE (Hashing - Weeks 5-7)  
@@ -9,7 +9,7 @@
 **Phase 4 Status**: ✅ COMPLETE (Storage Layer - Weeks 12-16)  
 **Phase 5 Status**: ✅ COMPLETE (Location Registry - Weeks 17-20, 100% complete)  
 **Phase 6 Status**: ✅ COMPLETE (Topology Management - Weeks 21-24, 100% complete)  
-**Phase 7 Status**: 🔄 IN PROGRESS (Background Migration - Weeks 25-30, Weeks 25-26 complete)
+**Phase 7 Status**: 🔄 IN PROGRESS (Background Migration - Weeks 25-30, Weeks 25-27 complete ✅)
 
 ---
 
@@ -2185,11 +2185,120 @@ Phase 7 implements background data migration for rebalancing objects after topol
 - Week 27+ will integrate with actual storage layer (`buckets_object_read/write/delete`)
 - Registry updates will use `buckets_registry_record()` when integrated
 
-**Next Steps** (Week 27):
-- Migration orchestration (job management)
-- State machine (IDLE → SCANNING → MIGRATING → COMPLETE/FAILED)
-- Pause/resume capability
-- Job persistence and recovery
+**Next Steps** (Week 27): COMPLETE ✅
+
+### Week 27: Migration Orchestrator ✅ **COMPLETE**
+
+**Goal**: Coordinate scanner and worker pool with state management
+
+**Implemented Features**:
+- [x] Migration job lifecycle (create, start, pause, resume, stop, wait, cleanup)
+- [x] State machine with validation (6 states, 10 valid transitions)
+- [x] Scanner and worker pool integration
+- [x] Progress tracking with ETA calculation
+- [x] Event callbacks for state changes
+- [x] Job persistence API (placeholders for Week 29)
+- [x] Comprehensive test suite (14 tests, 100% passing)
+
+**Architecture**:
+- **State Machine**: IDLE → SCANNING → MIGRATING → COMPLETED/FAILED (with PAUSED)
+- **Job Structure**: Holds scanner, worker pool, topologies, statistics, and callback
+- **Progress Tracking**: Real-time updates from worker pool stats with ETA calculation
+- **Event System**: Callback on state transitions (START, PAUSE, RESUME, COMPLETE, FAIL)
+- **Validation**: State transition validation prevents invalid operations
+
+**State Machine Transitions**:
+1. IDLE → SCANNING (start)
+2. IDLE → FAILED (error during init)
+3. SCANNING → MIGRATING (scan complete, objects found)
+4. SCANNING → COMPLETED (scan complete, no objects) ← **Added for empty migrations**
+5. SCANNING → FAILED (scan error)
+6. MIGRATING → PAUSED (pause request)
+7. MIGRATING → COMPLETED (all tasks done)
+8. MIGRATING → FAILED (worker error)
+9. PAUSED → MIGRATING (resume)
+10. PAUSED → FAILED (stop while paused)
+
+**Functions Implemented**:
+1. `buckets_migration_job_create()` - Initialize job with topologies and disks
+2. `buckets_migration_job_start()` - Start migration (IDLE → SCANNING → MIGRATING)
+3. `buckets_migration_job_pause()` - Pause migration (MIGRATING → PAUSED)
+4. `buckets_migration_job_resume()` - Resume migration (PAUSED → MIGRATING)
+5. `buckets_migration_job_stop()` - Stop and transition to FAILED (if not terminal)
+6. `buckets_migration_job_wait()` - Block until terminal state (100ms poll)
+7. `buckets_migration_job_get_state()` - Query current state
+8. `buckets_migration_job_get_progress()` - Get total/completed/failed/percent/ETA
+9. `buckets_migration_job_set_callback()` - Register event handler
+10. `buckets_migration_job_save()` - Persist to disk (placeholder)
+11. `buckets_migration_job_load()` - Restore from disk (placeholder)
+12. `buckets_migration_job_cleanup()` - Free resources
+
+**Internal Implementation**:
+- `is_valid_transition()` - State machine validation (prevents invalid transitions)
+- `transition_state()` - State change with callback notification
+- `update_progress()` - Pull stats from worker pool and calculate ETA
+- Job ID format: `"migration-gen-{source}-to-{target}"`
+
+**Files Created/Modified**:
+- `include/buckets_migration.h` - Added orchestrator API (+150 lines, now 464 lines total)
+  - Forward declarations for job and worker pool
+  - Event callback typedef
+  - Expanded job structure with scanner, worker_pool, callback fields
+  - 12 new public API functions
+- `src/migration/orchestrator.c` - NEW (526 lines)
+  - State machine implementation
+  - Job lifecycle management
+  - Scanner and worker pool coordination
+  - Progress tracking with ETA
+  - Event callback system
+- `tests/migration/test_orchestrator.c` - NEW (470 lines, 14 tests)
+
+**Test Coverage** (14 tests, 100% passing):
+1. Job creation with valid args ✅
+2. Job creation with NULL args (validation) ✅
+3. Get job state ✅
+4. Start empty job (no objects to migrate) ✅
+5. Get progress (total, completed, failed, percent, ETA) ✅
+6. Set event callback ✅
+7. Stop job (accepts terminal states) ✅
+8. Wait for completion ✅
+9. Job cleanup ✅
+10. Invalid state transitions (pause from IDLE, resume from IDLE) ✅
+11. Job ID format validation ✅
+12. Progress percentage calculation ✅
+13. Multiple topology generations ✅
+14. Job persistence (save/load placeholders) ✅
+
+**Code Statistics**:
+- **Header additions**: 150 lines (orchestrator API)
+- **Implementation**: 526 lines (orchestrator.c)
+- **Tests**: 470 lines (14 comprehensive tests)
+- **Total Week 27**: **1,146 lines**
+
+**Performance Characteristics**:
+- **Wait polling**: 100ms sleep between state checks
+- **ETA calculation**: Linear projection based on (remaining / throughput)
+- **Event callbacks**: Synchronous, fired during state transitions
+- **Memory**: Job structure ~200 bytes + scanner + worker pool
+
+**Design Decisions**:
+1. **Empty Migration Handling**: Allow SCANNING → COMPLETED for zero-object migrations
+2. **Terminal State Protection**: stop() is idempotent for COMPLETED/FAILED jobs
+3. **Opaque Worker Pool**: Forward declaration prevents circular dependency
+4. **Event Callbacks**: Typedef'd before struct for forward reference
+5. **Job ID Format**: Auto-generated as `"migration-gen-{source}-to-{target}"`
+6. **Placeholder Persistence**: save/load APIs return OK/NULL (implementation in Week 29)
+
+**Integration Notes**:
+- Orchestrator fully integrates scanner (Week 25) and worker pool (Week 26)
+- Persistence operations are placeholders (Week 29 will implement checkpointing)
+- State machine enforces valid transitions to prevent corruption
+
+**Next Steps** (Week 28):
+- Throttling and rate limiting (bandwidth, IOPS, CPU)
+- Token bucket algorithm for bandwidth control
+- I/O prioritization (user traffic > migration traffic)
+- Configurable limits (MB/s, IOPS)
 
 ---
 
