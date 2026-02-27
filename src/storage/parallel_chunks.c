@@ -391,3 +391,163 @@ int buckets_parallel_read_chunks(const char *bucket,
     buckets_info("Parallel read: %d/%u chunks read successfully", success_count, num_chunks);
     return success_count;
 }
+
+/* ===================================================================
+ * Parallel Metadata Write Operations
+ * ===================================================================*/
+
+/**
+ * Metadata write task for thread pool
+ */
+typedef struct {
+    u32 disk_index;                /* Disk index (1-based) */
+    char bucket[256];              /* Bucket name */
+    char object[1024];             /* Object key */
+    char object_path[1536];        /* Full object path */
+    char disk_path[512];           /* Disk path */
+    char node_endpoint[256];       /* Node endpoint for RPC */
+    bool is_local;                 /* True if local write */
+    
+    buckets_xl_meta_t meta;        /* Metadata to write (copied) */
+    
+    int result;                    /* Operation result */
+    pthread_t thread;              /* Thread handle */
+} metadata_task_t;
+
+/**
+ * Worker thread for metadata write
+ */
+static void* metadata_write_worker(void *arg)
+{
+    metadata_task_t *task = (metadata_task_t*)arg;
+    
+    if (task->is_local) {
+        /* Local write */
+        extern int buckets_write_xl_meta(const char *disk_path, const char *object_path,
+                                         const buckets_xl_meta_t *meta);
+        
+        task->result = buckets_write_xl_meta(task->disk_path, task->object_path, &task->meta);
+        
+        if (task->result == 0) {
+            buckets_debug("Parallel metadata: Wrote to local disk %s", task->disk_path);
+        }
+    } else {
+        /* Remote RPC write */
+        extern int buckets_distributed_write_xlmeta(const char *peer_endpoint,
+                                                    const char *bucket, const char *object,
+                                                    const char *disk_path,
+                                                    const buckets_xl_meta_t *meta);
+        
+        task->result = buckets_distributed_write_xlmeta(task->node_endpoint,
+                                                       task->bucket,
+                                                       task->object,
+                                                       task->disk_path,
+                                                       &task->meta);
+        
+        if (task->result == 0) {
+            buckets_debug("Parallel metadata: Wrote via RPC to %s:%s",
+                         task->node_endpoint, task->disk_path);
+        }
+    }
+    
+    return NULL;
+}
+
+/**
+ * Write xl.meta to multiple disks in parallel
+ */
+int buckets_parallel_write_metadata(const char *bucket,
+                                     const char *object,
+                                     const char *object_path,
+                                     buckets_placement_result_t *placement,
+                                     char **disk_paths,
+                                     const buckets_xl_meta_t *base_meta,
+                                     u32 num_disks,
+                                     bool has_endpoints)
+{
+    if (!bucket || !object || !object_path || !disk_paths || !base_meta) {
+        buckets_error("Invalid parameters for parallel metadata write");
+        return -1;
+    }
+    
+    if (num_disks > MAX_PARALLEL_CHUNKS) {
+        buckets_error("Too many disks: %u (max %d)", num_disks, MAX_PARALLEL_CHUNKS);
+        return -1;
+    }
+    
+    /* Allocate task array */
+    metadata_task_t *tasks = buckets_calloc(num_disks, sizeof(metadata_task_t));
+    if (!tasks) {
+        return -1;
+    }
+    
+    /* Initialize tasks */
+    for (u32 i = 0; i < num_disks; i++) {
+        metadata_task_t *task = &tasks[i];
+        
+        task->disk_index = i + 1;
+        strncpy(task->bucket, bucket, sizeof(task->bucket) - 1);
+        strncpy(task->object, object, sizeof(task->object) - 1);
+        strncpy(task->object_path, object_path, sizeof(task->object_path) - 1);
+        strncpy(task->disk_path, disk_paths[i], sizeof(task->disk_path) - 1);
+        
+        /* Deep copy metadata and update disk index */
+        memcpy(&task->meta, base_meta, sizeof(buckets_xl_meta_t));
+        task->meta.erasure.index = i + 1;
+        
+        /* Determine if local or remote */
+        if (has_endpoints && placement && placement->disk_endpoints) {
+            extern bool buckets_distributed_is_local_disk(const char *disk_endpoint);
+            task->is_local = buckets_distributed_is_local_disk(placement->disk_endpoints[i]);
+            
+            if (!task->is_local) {
+                extern int buckets_distributed_extract_node_endpoint(const char *disk_endpoint,
+                                                                    char *node_endpoint, size_t size);
+                if (buckets_distributed_extract_node_endpoint(placement->disk_endpoints[i],
+                                                             task->node_endpoint,
+                                                             sizeof(task->node_endpoint)) != 0) {
+                    buckets_error("Failed to extract node endpoint from: %s",
+                                 placement->disk_endpoints[i]);
+                    task->is_local = true;  /* Fall back to local */
+                }
+            }
+        } else {
+            task->is_local = true;
+        }
+        
+        task->result = -1;  /* Initialize as failed */
+    }
+    
+    /* Launch threads */
+    for (u32 i = 0; i < num_disks; i++) {
+        int ret = pthread_create(&tasks[i].thread, NULL, metadata_write_worker, &tasks[i]);
+        if (ret != 0) {
+            buckets_error("Failed to create thread for metadata write to disk %u: %d", 
+                         i + 1, ret);
+            tasks[i].result = -1;
+        }
+    }
+    
+    /* Wait for all threads to complete */
+    int failed_count = 0;
+    for (u32 i = 0; i < num_disks; i++) {
+        if (tasks[i].thread != 0) {
+            pthread_join(tasks[i].thread, NULL);
+        }
+        
+        if (tasks[i].result != 0) {
+            buckets_error("Metadata write to disk %s failed", disk_paths[i]);
+            failed_count++;
+        }
+    }
+    
+    buckets_free(tasks);
+    
+    if (failed_count > 0) {
+        buckets_error("Parallel metadata write: %d/%u disks failed", failed_count, num_disks);
+        return -1;
+    }
+    
+    buckets_info("Parallel metadata write: All %u disks succeeded", num_disks);
+    return 0;
+}

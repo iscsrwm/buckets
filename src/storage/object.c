@@ -206,6 +206,9 @@ int buckets_put_object(const char *bucket, const char *object,
                        const void *data, size_t size,
                        const char *content_type)
 {
+    struct timespec start_total, end_total;
+    clock_gettime(CLOCK_MONOTONIC, &start_total);
+    
     int result = -1;  /* Initialize to error by default */
     
     if (!bucket || !object || !data) {
@@ -318,6 +321,9 @@ int buckets_put_object(const char *bucket, const char *object,
     }
 
     /* Encode with erasure coding */
+    struct timespec start_encode, end_encode;
+    clock_gettime(CLOCK_MONOTONIC, &start_encode);
+    
     buckets_ec_ctx_t ec_ctx;
     if (buckets_ec_init(&ec_ctx, k, m) != 0) {
         buckets_error("Failed to initialize erasure context");
@@ -330,6 +336,12 @@ int buckets_put_object(const char *bucket, const char *object,
         buckets_ec_free(&ec_ctx);
         goto cleanup_chunks;
     }
+    
+    clock_gettime(CLOCK_MONOTONIC, &end_encode);
+    double encode_time = (end_encode.tv_sec - start_encode.tv_sec) + 
+                        (end_encode.tv_nsec - start_encode.tv_nsec) / 1e9;
+    buckets_info("⏱️  Erasure encoding: %.3f ms (%.2f MB/s)", 
+                 encode_time * 1000, (size / 1024.0 / 1024.0) / encode_time);
 
     /* Compute checksums */
     meta.erasure.data = k;
@@ -424,6 +436,9 @@ int buckets_put_object(const char *bucket, const char *object,
         }
         
         /* Write all chunks in parallel */
+        struct timespec start_write, end_write;
+        clock_gettime(CLOCK_MONOTONIC, &start_write);
+        
         extern int buckets_parallel_write_chunks(const char *bucket, const char *object,
                                                  buckets_placement_result_t *placement,
                                                  const void **chunk_data_array,
@@ -431,6 +446,10 @@ int buckets_put_object(const char *bucket, const char *object,
         
         int write_result = buckets_parallel_write_chunks(bucket, object, placement,
                                                          chunk_array, chunk_size, k + m);
+        
+        clock_gettime(CLOCK_MONOTONIC, &end_write);
+        double write_time = (end_write.tv_sec - start_write.tv_sec) + 
+                           (end_write.tv_nsec - start_write.tv_nsec) / 1e9;
         
         buckets_free(chunk_array);
         
@@ -440,51 +459,31 @@ int buckets_put_object(const char *bucket, const char *object,
             goto cleanup_chunks;
         }
         
+        buckets_info("⏱️  Parallel chunk writes: %.3f ms (%.2f MB/s)", 
+                     write_time * 1000, (size / 1024.0 / 1024.0) / write_time);
         buckets_info("Parallel write complete: %u chunks written", k + m);
         
-        /* Write xl.meta to all disks (local and remote) */
-        result = 0;
-        for (u32 i = 0; i < k + m; i++) {
-            meta.erasure.index = i + 1;  /* Update disk index for each disk */
-            
-            int meta_result = -1;
-            
-            if (has_endpoints && !buckets_distributed_is_local_disk(placement->disk_endpoints[i])) {
-                /* Remote disk - use RPC to write xl.meta */
-                char node_endpoint[256];
-                extern int buckets_distributed_extract_node_endpoint(const char *disk_endpoint, 
-                                                                     char *node_endpoint, size_t size);
-                
-                if (buckets_distributed_extract_node_endpoint(placement->disk_endpoints[i], 
-                                                              node_endpoint, sizeof(node_endpoint)) == 0) {
-                    extern int buckets_distributed_write_xlmeta(const char *peer_endpoint,
-                                                               const char *bucket, const char *object,
-                                                               const char *disk_path,
-                                                               const buckets_xl_meta_t *meta);
-                    
-                    meta_result = buckets_distributed_write_xlmeta(node_endpoint, bucket, object,
-                                                                   set_disk_paths[i], &meta);
-                    
-                    if (meta_result == 0) {
-                        buckets_info("Wrote xl.meta via RPC to %s:%s", 
-                                    node_endpoint, set_disk_paths[i]);
-                    }
-                } else {
-                    buckets_error("Failed to extract node endpoint from: %s", 
-                                 placement->disk_endpoints[i]);
-                    meta_result = -1;
-                }
-            } else {
-                /* Local disk - direct write */
-                meta_result = buckets_write_xl_meta(set_disk_paths[i], object_path, &meta);
-            }
-            
-            if (meta_result != 0) {
-                buckets_error("Failed to write xl.meta to disk %s", set_disk_paths[i]);
-                result = -1;
-                break;
-            }
-        }
+        /* Write xl.meta to all disks (local and remote) in PARALLEL */
+        struct timespec start_meta, end_meta;
+        clock_gettime(CLOCK_MONOTONIC, &start_meta);
+        
+        extern int buckets_parallel_write_metadata(const char *bucket,
+                                                   const char *object,
+                                                   const char *object_path,
+                                                   buckets_placement_result_t *placement,
+                                                   char **disk_paths,
+                                                   const buckets_xl_meta_t *base_meta,
+                                                   u32 num_disks,
+                                                   bool has_endpoints);
+        
+        result = buckets_parallel_write_metadata(bucket, object, object_path,
+                                                 placement, set_disk_paths, &meta,
+                                                 k + m, has_endpoints);
+        
+        clock_gettime(CLOCK_MONOTONIC, &end_meta);
+        double meta_time = (end_meta.tv_sec - start_meta.tv_sec) + 
+                          (end_meta.tv_nsec - start_meta.tv_nsec) / 1e9;
+        buckets_info("⏱️  Metadata writes (PARALLEL): %.3f ms (%u disks)", meta_time * 1000, k + m);
     }
 
     /* Record in registry if write succeeded */
@@ -505,6 +504,11 @@ cleanup_chunks:
     buckets_xl_meta_free(&meta);
     buckets_placement_free_result(placement);
 
+    clock_gettime(CLOCK_MONOTONIC, &end_total);
+    double total_time = (end_total.tv_sec - start_total.tv_sec) + 
+                       (end_total.tv_nsec - start_total.tv_nsec) / 1e9;
+    buckets_info("⏱️  TOTAL upload time: %.3f ms (%.2f MB/s) for %s/%s", 
+                 total_time * 1000, (size / 1024.0 / 1024.0) / total_time, bucket, object);
     buckets_info("Object written: %s/%s (size=%zu)", bucket, object, size);
     return result;
 }

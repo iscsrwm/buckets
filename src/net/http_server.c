@@ -390,6 +390,10 @@ static void mg_event_handler(struct mg_connection *c, int ev, void *ev_data)
                 
                 /* Send binary body */
                 mg_send(c, res.body, res.body_len);
+                
+                /* Mark response as complete and close connection */
+                c->is_resp = 0;
+                c->is_draining = 1;
             } else {
                 /* No body - use regular reply */
                 mg_http_reply(c, res.status_code, res.headers ? res.headers : "", "");

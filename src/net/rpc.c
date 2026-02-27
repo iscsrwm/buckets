@@ -383,6 +383,9 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
                      buckets_rpc_response_t **response,
                      int timeout_ms)
 {
+    struct timespec start_rpc, end_conn, end_send, end_parse;
+    clock_gettime(CLOCK_MONOTONIC, &start_rpc);
+    
     if (!ctx || !peer_endpoint || !method || !response) {
         return BUCKETS_ERR_INVALID_ARG;
     }
@@ -439,6 +442,8 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
     /* Get connection from pool */
     buckets_connection_t *conn = NULL;
     ret = buckets_conn_pool_get(ctx->pool, host, port, &conn);
+    clock_gettime(CLOCK_MONOTONIC, &end_conn);
+    
     if (ret != BUCKETS_OK) {
         buckets_free(request_json);
         buckets_error("RPC call: failed to get connection to %s", peer_endpoint);
@@ -453,16 +458,12 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
                                      &response_body, &status_code);
     
     buckets_free(request_json);
+    clock_gettime(CLOCK_MONOTONIC, &end_send);
     
-    /* Release connection back to pool */
-    if (ret == BUCKETS_OK && status_code == 200) {
-        buckets_conn_pool_release(ctx->pool, conn);
-    } else {
-        /* Close connection on error */
-        buckets_conn_pool_close(ctx->pool, conn);
-    }
-    
+    /* Handle connection based on RPC success/failure */
     if (ret != BUCKETS_OK) {
+        /* RPC failed - close connection */
+        buckets_conn_pool_close(ctx->pool, conn);
         buckets_error("RPC call: failed to send request to %s", peer_endpoint);
         return ret;
     }
@@ -470,6 +471,7 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
     if (status_code != 200) {
         buckets_error("RPC call: HTTP %d from %s", status_code, peer_endpoint);
         buckets_free(response_body);
+        buckets_conn_pool_close(ctx->pool, conn);
         return BUCKETS_ERR_NETWORK;
     }
     
@@ -477,11 +479,30 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
     buckets_rpc_response_t *res = NULL;
     ret = buckets_rpc_response_parse(response_body, &res);
     buckets_free(response_body);
+    clock_gettime(CLOCK_MONOTONIC, &end_parse);
     
     if (ret != BUCKETS_OK) {
         buckets_error("RPC call: failed to parse response from %s", peer_endpoint);
+        buckets_conn_pool_close(ctx->pool, conn);
         return ret;
     }
+    
+    /* Log timing breakdown */
+    double conn_time = (end_conn.tv_sec - start_rpc.tv_sec) + 
+                      (end_conn.tv_nsec - start_rpc.tv_nsec) / 1e9;
+    double send_time = (end_send.tv_sec - end_conn.tv_sec) + 
+                      (end_send.tv_nsec - end_conn.tv_nsec) / 1e9;
+    double parse_time = (end_parse.tv_sec - end_send.tv_sec) + 
+                       (end_parse.tv_nsec - end_send.tv_nsec) / 1e9;
+    double total_rpc_time = (end_parse.tv_sec - start_rpc.tv_sec) + 
+                           (end_parse.tv_nsec - start_rpc.tv_nsec) / 1e9;
+    
+    buckets_debug("⏱️  RPC %s: total=%.3fms (conn=%.3fms, send=%.3fms, parse=%.3fms)",
+                  method, total_rpc_time * 1000, conn_time * 1000, 
+                  send_time * 1000, parse_time * 1000);
+    
+    /* Success - release connection back to pool for reuse */
+    buckets_conn_pool_release(ctx->pool, conn);
     
     *response = res;
     return BUCKETS_OK;
@@ -549,4 +570,126 @@ int buckets_rpc_dispatch(buckets_rpc_context_t *ctx,
     
     *response = res;
     return BUCKETS_OK;
+}
+
+/**
+ * HTTP Handler for RPC requests
+ * 
+ * Handles JSON-RPC 2.0 requests over HTTP POST
+ */
+void buckets_rpc_http_handler(buckets_http_request_t *req,
+                               buckets_http_response_t *res)
+{
+    /* Only accept POST requests */
+    if (!req->method || strcmp(req->method, "POST") != 0) {
+        buckets_http_response_error(res, 405, "Method not allowed");
+        return;
+    }
+    
+    /* Get RPC context from distributed storage */
+    extern buckets_rpc_context_t* buckets_distributed_storage_get_rpc_context(void);
+    buckets_rpc_context_t *ctx = buckets_distributed_storage_get_rpc_context();
+    if (!ctx) {
+        buckets_http_response_error(res, 500, "RPC not initialized");
+        return;
+    }
+    
+    /* Parse JSON-RPC request */
+    if (!req->body || req->body_len == 0) {
+        buckets_http_response_error(res, 400, "Empty request");
+        return;
+    }
+    
+    cJSON *json = cJSON_ParseWithLength(req->body, req->body_len);
+    if (!json) {
+        buckets_http_response_error(res, 400, "Invalid JSON");
+        return;
+    }
+    
+    /* Extract method */
+    cJSON *method_obj = cJSON_GetObjectItem(json, "method");
+    if (!method_obj || !cJSON_IsString(method_obj)) {
+        cJSON_Delete(json);
+        buckets_http_response_error(res, 400, "Missing 'method'");
+        return;
+    }
+    
+    const char *method = method_obj->valuestring;
+    cJSON *params = cJSON_GetObjectItem(json, "params");
+    cJSON *id_obj = cJSON_GetObjectItem(json, "id");
+    
+    if (!params) {
+        cJSON_Delete(json);
+        buckets_http_response_error(res, 400, "Missing 'params'");
+        return;
+    }
+    
+    /* Find handler */
+    pthread_mutex_lock(&ctx->lock);
+    rpc_handler_entry_t *entry = ctx->handlers;
+    while (entry) {
+        if (strcmp(entry->method, method) == 0) {
+            break;
+        }
+        entry = entry->next;
+    }
+    pthread_mutex_unlock(&ctx->lock);
+    
+    if (!entry) {
+        cJSON_Delete(json);
+        buckets_http_response_error(res, 404, "Method not found");
+        return;
+    }
+    
+    /* Call handler */
+    cJSON *result_obj = NULL;
+    int error_code = 0;
+    char error_message[256] = {0};
+    
+    int ret = entry->handler(method, params, &result_obj, &error_code, 
+                            error_message, entry->user_data);
+    
+    /* Build RPC response in internal format */
+    cJSON *response = cJSON_CreateObject();
+    
+    /* Add ID - convert to string if needed */
+    if (id_obj) {
+        if (cJSON_IsString(id_obj)) {
+            cJSON_AddStringToObject(response, "id", id_obj->valuestring);
+        } else if (cJSON_IsNumber(id_obj)) {
+            char id_str[32];
+            snprintf(id_str, sizeof(id_str), "%d", id_obj->valueint);
+            cJSON_AddStringToObject(response, "id", id_str);
+        } else {
+            cJSON_AddStringToObject(response, "id", "unknown");
+        }
+    } else {
+        cJSON_AddStringToObject(response, "id", "unknown");
+    }
+    
+    /* Add timestamp */
+    cJSON_AddNumberToObject(response, "timestamp", (double)time(NULL));
+    
+    /* Add result */
+    if (ret == BUCKETS_OK && result_obj) {
+        cJSON_AddItemToObject(response, "result", result_obj);
+    } else {
+        cJSON_AddNullToObject(response, "result");
+        if (result_obj) {
+            cJSON_Delete(result_obj);
+        }
+    }
+    
+    /* Add error fields */
+    cJSON_AddNumberToObject(response, "error_code", error_code ? error_code : ret);
+    cJSON_AddStringToObject(response, "error_message", 
+                           error_message[0] ? error_message : (ret == BUCKETS_OK ? "" : "RPC call failed"));
+    
+    /* Convert to JSON string and send */
+    char *response_str = cJSON_PrintUnformatted(response);
+    buckets_http_response_json(res, 200, response_str);
+    
+    buckets_free(response_str);
+    cJSON_Delete(response);
+    cJSON_Delete(json);
 }

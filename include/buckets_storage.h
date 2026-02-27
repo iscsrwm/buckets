@@ -24,7 +24,7 @@ extern "C" {
 /* Storage constants */
 #define BUCKETS_INLINE_THRESHOLD  (128 * 1024)  /* 128 KB */
 #define BUCKETS_MIN_CHUNK_SIZE    (64 * 1024)   /* 64 KB */
-#define BUCKETS_MAX_CHUNK_SIZE    (10 * 1024 * 1024)  /* 10 MB */
+#define BUCKETS_MAX_CHUNK_SIZE    (512 * 1024 * 1024)  /* 512 MB - support large files */
 #define BUCKETS_HASH_PREFIX_LEN   2             /* 00-ff */
 #define BUCKETS_OBJECT_HASH_LEN   16            /* 16 hex chars */
 #define BUCKETS_MAX_CHUNKS        32            /* K+M max */
@@ -883,6 +883,31 @@ int buckets_parallel_read_chunks(const char *bucket,
                                   void **chunk_data_array,
                                   size_t *chunk_sizes_array,
                                   u32 num_chunks);
+
+/**
+ * Write xl.meta to multiple disks in parallel (local + RPC)
+ * 
+ * Executes metadata writes concurrently using thread pool for maximum performance.
+ * Each metadata write is sent to its target disk (local or remote via RPC) in parallel.
+ * 
+ * @param bucket Bucket name
+ * @param object Object key
+ * @param object_path Full object path (bucket/object)
+ * @param placement Placement result with disk endpoints
+ * @param disk_paths Array of disk paths
+ * @param base_meta Base metadata (will be copied and index updated for each disk)
+ * @param num_disks Number of disks to write to
+ * @param has_endpoints True if placement has endpoint information
+ * @return 0 on success, -1 on error
+ */
+int buckets_parallel_write_metadata(const char *bucket,
+                                     const char *object,
+                                     const char *object_path,
+                                     buckets_placement_result_t *placement,
+                                     char **disk_paths,
+                                     const buckets_xl_meta_t *base_meta,
+                                     u32 num_disks,
+                                     bool has_endpoints);
 
 #ifdef __cplusplus
 }
