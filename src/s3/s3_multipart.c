@@ -502,8 +502,13 @@ int buckets_s3_complete_multipart_upload(buckets_s3_request_t *req, buckets_s3_r
     
     /* Open parts directory */
     char parts_dir[2048];
-    snprintf(parts_dir, sizeof(parts_dir), "/tmp/buckets-data/%s/.multipart/%s/parts",
-             req->bucket, upload_id);
+    extern int buckets_get_data_dir(char *data_dir, size_t size);
+    char data_dir[512];
+    if (buckets_get_data_dir(data_dir, sizeof(data_dir)) != 0) {
+        snprintf(data_dir, sizeof(data_dir), "/tmp/buckets-data");
+    }
+    snprintf(parts_dir, sizeof(parts_dir), "%s/%s/.multipart/%s/parts",
+             data_dir, req->bucket, upload_id);
     
     buckets_info("⏱️  CompleteMultipart: Opening parts directory: %s", parts_dir);
     
