@@ -38,7 +38,14 @@
  */
 static void get_multipart_dir(const char *bucket, const char *upload_id, char *path, size_t path_size)
 {
-    snprintf(path, path_size, "/tmp/buckets-data/%s/.multipart/%s", bucket, upload_id);
+    /* Get data directory from storage config */
+    extern int buckets_get_data_dir(char *data_dir, size_t size);
+    char data_dir[512];
+    if (buckets_get_data_dir(data_dir, sizeof(data_dir)) != 0) {
+        /* Fallback to default */
+        snprintf(data_dir, sizeof(data_dir), "/tmp/buckets-data");
+    }
+    snprintf(path, path_size, "%s/%s/.multipart/%s", data_dir, bucket, upload_id);
 }
 
 /**
@@ -47,18 +54,32 @@ static void get_multipart_dir(const char *bucket, const char *upload_id, char *p
 static void get_part_path(const char *bucket, const char *upload_id, int part_number, 
                           char *path, size_t path_size)
 {
-    snprintf(path, path_size, "/tmp/buckets-data/%s/.multipart/%s/parts/part.%d",
-             bucket, upload_id, part_number);
+    /* Get data directory from storage config */
+    extern int buckets_get_data_dir(char *data_dir, size_t size);
+    char data_dir[512];
+    if (buckets_get_data_dir(data_dir, sizeof(data_dir)) != 0) {
+        /* Fallback to default */
+        snprintf(data_dir, sizeof(data_dir), "/tmp/buckets-data");
+    }
+    snprintf(path, path_size, "%s/%s/.multipart/%s/parts/part.%d",
+             data_dir, bucket, upload_id, part_number);
 }
 
 /**
  * Get metadata file path
  */
 static void get_metadata_path(const char *bucket, const char *upload_id, 
-                             char *path, size_t path_size)
+                              char *path, size_t path_size)
 {
-    snprintf(path, path_size, "/tmp/buckets-data/%s/.multipart/%s/metadata.json",
-             bucket, upload_id);
+    /* Get data directory from storage config */
+    extern int buckets_get_data_dir(char *data_dir, size_t size);
+    char data_dir[512];
+    if (buckets_get_data_dir(data_dir, sizeof(data_dir)) != 0) {
+        /* Fallback to default */
+        snprintf(data_dir, sizeof(data_dir), "/tmp/buckets-data");
+    }
+    snprintf(path, path_size, "%s/%s/.multipart/%s/metadata.json",
+             data_dir, bucket, upload_id);
 }
 
 /**
@@ -89,9 +110,20 @@ static void generate_upload_id(char *upload_id, size_t size)
 static int create_upload_dirs(const char *bucket, const char *upload_id)
 {
     char path[2048];
+    char data_dir[512];
+    
+    /* Get data directory */
+    extern int buckets_get_data_dir(char *data_dir, size_t size);
+    if (buckets_get_data_dir(data_dir, sizeof(data_dir)) != 0) {
+        snprintf(data_dir, sizeof(data_dir), "/tmp/buckets-data");
+    }
+    
+    /* Create bucket directory if needed */
+    snprintf(path, sizeof(path), "%s/%s", data_dir, bucket);
+    mkdir(path, 0755);  /* Ignore error if exists */
     
     /* Create .multipart directory */
-    snprintf(path, sizeof(path), "/tmp/buckets-data/%s/.multipart", bucket);
+    snprintf(path, sizeof(path), "%s/%s/.multipart", data_dir, bucket);
     if (mkdir(path, 0755) != 0 && errno != EEXIST) {
         buckets_error("Failed to create .multipart directory: %s", path);
         return BUCKETS_ERR_IO;
@@ -105,8 +137,8 @@ static int create_upload_dirs(const char *bucket, const char *upload_id)
     }
     
     /* Create parts subdirectory */
-    snprintf(path, sizeof(path), "/tmp/buckets-data/%s/.multipart/%s/parts",
-             bucket, upload_id);
+    snprintf(path, sizeof(path), "%s/%s/.multipart/%s/parts",
+             data_dir, bucket, upload_id);
     if (mkdir(path, 0755) != 0) {
         buckets_error("Failed to create parts directory: %s", path);
         return BUCKETS_ERR_IO;
@@ -238,15 +270,25 @@ int buckets_s3_initiate_multipart_upload(buckets_s3_request_t *req, buckets_s3_r
                                      "/");
     }
     
-    /* Validate bucket exists */
+    /* Validate bucket exists (check any disk) */
+    extern int buckets_get_data_dir(char *data_dir, size_t size);
+    char data_dir[512];
+    if (buckets_get_data_dir(data_dir, sizeof(data_dir)) != 0) {
+        snprintf(data_dir, sizeof(data_dir), "/tmp/buckets-data");
+    }
+    
     char bucket_path[2048];
-    snprintf(bucket_path, sizeof(bucket_path), "/tmp/buckets-data/%s", req->bucket);
+    snprintf(bucket_path, sizeof(bucket_path), "%s/disk1/%s", data_dir, req->bucket);
     
     struct stat st;
     if (stat(bucket_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
-        return buckets_s3_xml_error(res, "NoSuchBucket",
-                                     "The specified bucket does not exist",
-                                     req->bucket);
+        /* Try without disk subdirectory (single-disk mode) */
+        snprintf(bucket_path, sizeof(bucket_path), "%s/%s", data_dir, req->bucket);
+        if (stat(bucket_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            return buckets_s3_xml_error(res, "NoSuchBucket",
+                                         "The specified bucket does not exist",
+                                         req->bucket);
+        }
     }
     
     /* Generate upload ID */
@@ -437,7 +479,7 @@ int buckets_s3_complete_multipart_upload(buckets_s3_request_t *req, buckets_s3_r
     }
     cJSON_Delete(metadata);
     
-    buckets_debug("Completing multipart upload: bucket=%s, key=%s, uploadId=%s",
+    buckets_info("⏱️  CompleteMultipart START: bucket=%s, key=%s, uploadId=%s",
                   req->bucket, req->key, upload_id);
     
     /* Parse request body (XML with part list) */
@@ -463,9 +505,12 @@ int buckets_s3_complete_multipart_upload(buckets_s3_request_t *req, buckets_s3_r
     snprintf(parts_dir, sizeof(parts_dir), "/tmp/buckets-data/%s/.multipart/%s/parts",
              req->bucket, upload_id);
     
+    buckets_info("⏱️  CompleteMultipart: Opening parts directory: %s", parts_dir);
+    
     DIR *dir = opendir(parts_dir);
     if (!dir) {
-        buckets_error("Failed to open parts directory: %s", parts_dir);
+        buckets_error("⏱️  CompleteMultipart FAILED: Cannot open parts directory: %s (errno=%d: %s)", 
+                     parts_dir, errno, strerror(errno));
         return buckets_s3_xml_error(res, "InternalError",
                                      "Failed to read parts",
                                      req->key);
@@ -499,7 +544,10 @@ int buckets_s3_complete_multipart_upload(buckets_s3_request_t *req, buckets_s3_r
     }
     closedir(dir);
     
+    buckets_info("⏱️  CompleteMultipart: Found %d parts", part_count);
+    
     if (part_count == 0) {
+        buckets_error("⏱️  CompleteMultipart FAILED: No parts found");
         buckets_free(part_numbers);
         return buckets_s3_xml_error(res, "InvalidPart",
                                      "No parts found for upload",
@@ -519,6 +567,7 @@ int buckets_s3_complete_multipart_upload(buckets_s3_request_t *req, buckets_s3_r
     
     /* Concatenate parts into a single buffer */
     /* First, calculate total size by reading all parts */
+    buckets_info("⏱️  CompleteMultipart: Calculating total size from %d parts", part_count);
     size_t total_size = 0;
     for (int i = 0; i < part_count; i++) {
         char part_path[2048];
@@ -549,12 +598,18 @@ int buckets_s3_complete_multipart_upload(buckets_s3_request_t *req, buckets_s3_r
         total_size += (size_t)part_size;
     }
     
+    buckets_info("⏱️  CompleteMultipart: Total size = %zu bytes (%.2f MB)", 
+                 total_size, total_size / 1024.0 / 1024.0);
+    
     /* Allocate buffer for complete object */
     char *final_data = buckets_malloc(total_size);
     if (!final_data) {
+        buckets_error("⏱️  CompleteMultipart FAILED: Cannot allocate %zu bytes", total_size);
         buckets_free(part_numbers);
         return BUCKETS_ERR_NOMEM;
     }
+    
+    buckets_info("⏱️  CompleteMultipart: Allocated %zu bytes, reading parts...", total_size);
     
     /* Read all parts into buffer */
     size_t offset = 0;
@@ -591,25 +646,33 @@ int buckets_s3_complete_multipart_upload(buckets_s3_request_t *req, buckets_s3_r
     
     buckets_free(part_numbers);
     
+    buckets_info("⏱️  CompleteMultipart: All parts read successfully (%zu bytes total)", total_size);
+    
     /* Calculate ETag before writing */
     char etag[33];
     buckets_s3_calculate_etag(final_data, total_size, etag);
+    
+    buckets_info("⏱️  CompleteMultipart: ETag calculated: %s", etag);
     
     /* Write object using storage layer (creates xl.meta and registers in registry) */
     extern int buckets_put_object(const char *bucket, const char *object,
                                    const void *data, size_t size,
                                    const char *content_type);
     
+    buckets_info("⏱️  CompleteMultipart: Calling buckets_put_object for %zu bytes...", total_size);
+    
     int ret = buckets_put_object(req->bucket, req->key, final_data, total_size, NULL);
     buckets_free(final_data);
     
     if (ret != 0) {
-        buckets_error("Failed to write completed multipart object: %s/%s", 
-                     req->bucket, req->key);
+        buckets_error("⏱️  CompleteMultipart FAILED: buckets_put_object returned %d for %s/%s", 
+                     ret, req->bucket, req->key);
         return buckets_s3_xml_error(res, "InternalError",
                                      "Failed to write completed object",
                                      req->key);
     }
+    
+    buckets_info("⏱️  CompleteMultipart: buckets_put_object succeeded");
     
     /* For multipart uploads, append "-{part_count}" to indicate it's a multipart object */
     char multipart_etag[48];  /* 32 (MD5) + 1 (dash) + 5 (digits) + 1 (null) = 39, round to 48 */
@@ -620,7 +683,7 @@ int buckets_s3_complete_multipart_upload(buckets_s3_request_t *req, buckets_s3_r
     get_multipart_dir(req->bucket, upload_id, upload_dir, sizeof(upload_dir));
     remove_directory(upload_dir);
     
-    buckets_info("Multipart upload completed: %s/%s (etag=%s, parts=%d, size=%zu)",
+    buckets_info("⏱️  CompleteMultipart SUCCESS: %s/%s (etag=%s, parts=%d, size=%zu)",
                  req->bucket, req->key, multipart_etag, part_count, total_size);
     
     /* Generate XML response */

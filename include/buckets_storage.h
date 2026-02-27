@@ -280,6 +280,15 @@ int buckets_get_object(const char *bucket, const char *object,
                        void **data, size_t *size);
 
 /**
+ * Get storage data directory
+ * 
+ * @param data_dir Output buffer for data directory path
+ * @param size Size of output buffer
+ * @return 0 on success, -1 on error
+ */
+int buckets_get_data_dir(char *data_dir, size_t size);
+
+/**
  * Delete object
  * 
  * @param bucket Bucket name

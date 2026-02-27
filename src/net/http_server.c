@@ -391,9 +391,11 @@ static void mg_event_handler(struct mg_connection *c, int ev, void *ev_data)
                 /* Send binary body */
                 mg_send(c, res.body, res.body_len);
                 
-                /* Mark response as complete and close connection */
+                /* Mark response as complete */
                 c->is_resp = 0;
-                c->is_draining = 1;
+                
+                /* Note: Do NOT set c->is_draining for keep-alive support
+                 * Let Mongoose handle connection lifecycle based on Connection header */
             } else {
                 /* No body - use regular reply */
                 mg_http_reply(c, res.status_code, res.headers ? res.headers : "", "");

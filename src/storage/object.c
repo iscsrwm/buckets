@@ -24,10 +24,29 @@
 static buckets_storage_config_t g_storage_config = {
     .data_dir = NULL,
     .inline_threshold = BUCKETS_INLINE_THRESHOLD,
-    .default_ec_k = 8,
-    .default_ec_m = 4,
+    .default_ec_k = 0,
+    .default_ec_m = 0,
     .verify_checksums = true
 };
+
+/**
+ * Get storage data directory
+ */
+int buckets_get_data_dir(char *data_dir, size_t size)
+{
+    if (!data_dir || size == 0) {
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    if (!g_storage_config.data_dir || g_storage_config.data_dir[0] == '\0') {
+        /* No data directory configured, use default */
+        snprintf(data_dir, size, "/tmp/buckets-data");
+    } else {
+        snprintf(data_dir, size, "%s", g_storage_config.data_dir);
+    }
+    
+    return BUCKETS_OK;
+}
 
 /* Helper: Record object location in registry */
 static void record_object_location(const char *bucket, const char *object, size_t size,
