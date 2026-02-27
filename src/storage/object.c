@@ -18,6 +18,7 @@
 #include "buckets_crypto.h"
 #include "buckets_hash.h"
 #include "buckets_registry.h"
+#include "buckets_placement.h"
 
 /* Global storage configuration */
 static buckets_storage_config_t g_storage_config = {
@@ -29,7 +30,8 @@ static buckets_storage_config_t g_storage_config = {
 };
 
 /* Helper: Record object location in registry */
-static void record_object_location(const char *bucket, const char *object, size_t size)
+static void record_object_location(const char *bucket, const char *object, size_t size,
+                                   buckets_placement_result_t *placement)
 {
     /* Don't record registry's own objects to prevent infinite recursion */
     if (strcmp(bucket, ".buckets-registry") == 0) {
@@ -44,16 +46,31 @@ static void record_object_location(const char *bucket, const char *object, size_
         return;
     }
     
-    /* Create location record for registry */
+    /* Create location record for registry using actual placement */
     buckets_object_location_t loc = {0};
     loc.bucket = (char*)bucket;  /* Cast away const for struct assignment */
     loc.object = (char*)object;
     loc.version_id = "latest";   /* TODO: Use actual version_id when versioning is integrated */
-    loc.pool_idx = 0;            /* TODO: Get from topology */
-    loc.set_idx = 0;             /* TODO: Get from topology */
-    loc.disk_count = 1;          /* TODO: Get from topology */
-    loc.disk_idxs[0] = 0;        /* TODO: Get from topology */
-    loc.generation = 1;          /* TODO: Get from topology */
+    
+    if (placement) {
+        /* Use actual topology information from placement */
+        loc.pool_idx = placement->pool_idx;
+        loc.set_idx = placement->set_idx;
+        loc.disk_count = placement->disk_count < BUCKETS_REGISTRY_MAX_DISKS ? 
+                         placement->disk_count : BUCKETS_REGISTRY_MAX_DISKS;
+        for (u32 i = 0; i < loc.disk_count; i++) {
+            loc.disk_idxs[i] = i;  /* Sequential disk indices within set */
+        }
+        loc.generation = placement->generation;
+    } else {
+        /* Fallback to defaults if no placement */
+        loc.pool_idx = 0;
+        loc.set_idx = 0;
+        loc.disk_count = 1;
+        loc.disk_idxs[0] = 0;
+        loc.generation = 1;
+    }
+    
     loc.mod_time = time(NULL);
     loc.size = size;
     
@@ -184,7 +201,7 @@ static u8* base64_decode(const char *encoded, size_t *decoded_size)
     return decoded;
 }
 
-/* Put object (write) - simplified single-disk version */
+/* Put object (write) - with SIPMOD placement and distributed erasure coding */
 int buckets_put_object(const char *bucket, const char *object,
                        const void *data, size_t size,
                        const char *content_type)
@@ -200,12 +217,33 @@ int buckets_put_object(const char *bucket, const char *object,
     char object_path[PATH_MAX];
     buckets_compute_object_path(bucket, object, object_path, sizeof(object_path));
 
-    /* For now, use single disk (will integrate topology later) */
-    const char *disk_path = g_storage_config.data_dir;
+    /* Compute placement using consistent hashing */
+    buckets_placement_result_t *placement = NULL;
+    if (buckets_placement_compute(bucket, object, &placement) == 0) {
+        buckets_info("Placement computed: pool=%u, set=%u, disks=%u, hash=%016llx, vnode=%u",
+                     placement->pool_idx, placement->set_idx, placement->disk_count,
+                     (unsigned long long)placement->object_hash, placement->vnode_index);
+        if (placement->disk_count > 0) {
+            buckets_info("Placement disk_paths[0]: %s", placement->disk_paths[0]);
+        }
+    } else {
+        buckets_warn("Failed to compute placement, using fallback");
+    }
+
+    /* Determine disk path (use placement if available, otherwise fallback) */
+    const char *disk_path = NULL;
+    if (placement && placement->disk_count > 0) {
+        disk_path = placement->disk_paths[0];
+        buckets_info("Using placement disk path: %s", disk_path);
+    } else {
+        disk_path = g_storage_config.data_dir;
+        buckets_info("Using config data_dir: %s", disk_path ? disk_path : "(null)");
+    }
     
     /* Fallback to /tmp/buckets-data if storage not initialized (for tests) */
     if (!disk_path || disk_path[0] == '\0') {
         disk_path = "/tmp/buckets-data";
+        buckets_info("Fallback to default: %s", disk_path);
     }
 
     /* Create object directory */
@@ -241,10 +279,11 @@ int buckets_put_object(const char *bucket, const char *object,
         
         /* Record in registry if write succeeded */
         if (result == 0) {
-            record_object_location(bucket, object, size);
+            record_object_location(bucket, object, size, placement);
         }
         
         buckets_xl_meta_free(&meta);
+        buckets_placement_free_result(placement);
         return result;
     }
 
@@ -321,12 +360,23 @@ int buckets_put_object(const char *bucket, const char *object,
                                        &meta.erasure.checksums[k + i]);
     }
 
-    /* Get disk paths for set 0 (we'll use topology later for set selection) */
-    char *set_disk_paths[BUCKETS_EC_MAX_TOTAL];
-    memset(set_disk_paths, 0, sizeof(set_disk_paths));
+    /* Get disk paths from placement (SIPMOD-based set selection) */
+    char **set_disk_paths = NULL;
+    int disk_count = 0;
     
-    extern int buckets_multidisk_get_set_disks(int set_index, char **disk_paths, int max_disks);
-    int disk_count = buckets_multidisk_get_set_disks(0, set_disk_paths, k + m);
+    if (placement && placement->disk_count >= k + m) {
+        /* Use placement disk paths */
+        set_disk_paths = placement->disk_paths;
+        disk_count = placement->disk_count;
+        buckets_debug("Using placement disks: %d disks in set %u", disk_count, placement->set_idx);
+    } else {
+        /* Fallback: try to get disks from multi-disk layer */
+        extern int buckets_multidisk_get_set_disks(int set_index, char **disk_paths, int max_disks);
+        static char *fallback_disk_paths[BUCKETS_EC_MAX_TOTAL];
+        disk_count = buckets_multidisk_get_set_disks(0, fallback_disk_paths, k + m);
+        set_disk_paths = fallback_disk_paths;
+        buckets_debug("Using fallback disks: %d disks", disk_count);
+    }
     
     if (disk_count < (int)(k + m)) {
         buckets_warn("Not enough disks (%d) for erasure coding (%u+%u), using single disk",
@@ -353,38 +403,83 @@ int buckets_put_object(const char *bucket, const char *object,
         /* Write xl.meta to single disk */
         result = buckets_write_xl_meta(disk_path, object_path, &meta);
     } else {
-        /* Distributed write: each chunk to a different disk */
-        buckets_info("Writing %u data + %u parity chunks across %d disks", k, m, disk_count);
+        /* Distributed write: each chunk to a different disk (local or remote via RPC) */
+        buckets_info("Writing %u data + %u parity chunks across %d disks (PARALLEL)", k, m, disk_count);
         
-        /* Write data chunks */
-        for (u32 i = 0; i < k; i++) {
-            const char *target_disk = set_disk_paths[i];
-            if (buckets_write_chunk(target_disk, object_path, i + 1, 
-                                   data_chunks[i], chunk_size) != 0) {
-                buckets_error("Failed to write data chunk %u to disk %s", i, target_disk);
-                buckets_ec_free(&ec_ctx);
-                goto cleanup_chunks;
-            }
-            buckets_debug("Wrote data chunk %u to disk: %s", i, target_disk);
+        /* Check if we have disk endpoints for distributed RPC */
+        bool has_endpoints = (placement && placement->disk_endpoints && 
+                             placement->disk_endpoints[0] && 
+                             placement->disk_endpoints[0][0] != '\0');
+        
+        /* Prepare chunk data array (data + parity) */
+        const void **chunk_array = buckets_malloc((k + m) * sizeof(void*));
+        if (!chunk_array) {
+            buckets_error("Failed to allocate chunk array");
+            buckets_ec_free(&ec_ctx);
+            goto cleanup_chunks;
         }
         
-        /* Write parity chunks */
-        for (u32 i = 0; i < m; i++) {
-            const char *target_disk = set_disk_paths[k + i];
-            if (buckets_write_chunk(target_disk, object_path, k + i + 1,
-                                   parity_chunks[i], chunk_size) != 0) {
-                buckets_error("Failed to write parity chunk %u to disk %s", i, target_disk);
-                buckets_ec_free(&ec_ctx);
-                goto cleanup_chunks;
-            }
-            buckets_debug("Wrote parity chunk %u to disk: %s", i, target_disk);
+        for (u32 i = 0; i < k + m; i++) {
+            chunk_array[i] = (i < k) ? data_chunks[i] : parity_chunks[i - k];
         }
         
-        /* Write xl.meta to all disks */
+        /* Write all chunks in parallel */
+        extern int buckets_parallel_write_chunks(const char *bucket, const char *object,
+                                                 buckets_placement_result_t *placement,
+                                                 const void **chunk_data_array,
+                                                 size_t chunk_size, u32 num_chunks);
+        
+        int write_result = buckets_parallel_write_chunks(bucket, object, placement,
+                                                         chunk_array, chunk_size, k + m);
+        
+        buckets_free(chunk_array);
+        
+        if (write_result != 0) {
+            buckets_error("Parallel chunk write failed");
+            buckets_ec_free(&ec_ctx);
+            goto cleanup_chunks;
+        }
+        
+        buckets_info("Parallel write complete: %u chunks written", k + m);
+        
+        /* Write xl.meta to all disks (local and remote) */
         result = 0;
         for (u32 i = 0; i < k + m; i++) {
             meta.erasure.index = i + 1;  /* Update disk index for each disk */
-            if (buckets_write_xl_meta(set_disk_paths[i], object_path, &meta) != 0) {
+            
+            int meta_result = -1;
+            
+            if (has_endpoints && !buckets_distributed_is_local_disk(placement->disk_endpoints[i])) {
+                /* Remote disk - use RPC to write xl.meta */
+                char node_endpoint[256];
+                extern int buckets_distributed_extract_node_endpoint(const char *disk_endpoint, 
+                                                                     char *node_endpoint, size_t size);
+                
+                if (buckets_distributed_extract_node_endpoint(placement->disk_endpoints[i], 
+                                                              node_endpoint, sizeof(node_endpoint)) == 0) {
+                    extern int buckets_distributed_write_xlmeta(const char *peer_endpoint,
+                                                               const char *bucket, const char *object,
+                                                               const char *disk_path,
+                                                               const buckets_xl_meta_t *meta);
+                    
+                    meta_result = buckets_distributed_write_xlmeta(node_endpoint, bucket, object,
+                                                                   set_disk_paths[i], &meta);
+                    
+                    if (meta_result == 0) {
+                        buckets_info("Wrote xl.meta via RPC to %s:%s", 
+                                    node_endpoint, set_disk_paths[i]);
+                    }
+                } else {
+                    buckets_error("Failed to extract node endpoint from: %s", 
+                                 placement->disk_endpoints[i]);
+                    meta_result = -1;
+                }
+            } else {
+                /* Local disk - direct write */
+                meta_result = buckets_write_xl_meta(set_disk_paths[i], object_path, &meta);
+            }
+            
+            if (meta_result != 0) {
                 buckets_error("Failed to write xl.meta to disk %s", set_disk_paths[i]);
                 result = -1;
                 break;
@@ -394,7 +489,7 @@ int buckets_put_object(const char *bucket, const char *object,
 
     /* Record in registry if write succeeded */
     if (result == 0) {
-        record_object_location(bucket, object, size);
+        record_object_location(bucket, object, size, placement);
     }
 
     /* Cleanup */
@@ -408,12 +503,13 @@ cleanup_chunks:
         buckets_free(parity_chunks[i]);
     }
     buckets_xl_meta_free(&meta);
+    buckets_placement_free_result(placement);
 
     buckets_info("Object written: %s/%s (size=%zu)", bucket, object, size);
     return result;
 }
 
-/* Get object (read) - multi-disk with erasure decoding */
+/* Get object (read) - with registry lookup and multi-disk erasure decoding */
 int buckets_get_object(const char *bucket, const char *object,
                        void **data, size_t *size)
 {
@@ -426,33 +522,117 @@ int buckets_get_object(const char *bucket, const char *object,
     char object_path[PATH_MAX];
     buckets_compute_object_path(bucket, object, object_path, sizeof(object_path));
 
-    /* Get disk paths for erasure set 0 (SIPMOD placement) */
-    char *set_disk_paths[64]; /* Max 64 disks per set */
-    int set_disk_count = buckets_multidisk_get_set_disks(0, set_disk_paths, 64);
+    /* Try registry lookup first to find object location */
+    buckets_object_location_t *location = NULL;
+    buckets_placement_result_t *placement = NULL;
+    char **set_disk_paths = NULL;
+    int set_disk_count = 0;
+    bool registry_hit = false;
     
-    if (set_disk_count > 0) {
-        buckets_debug("Reading from %d disks in set 0", set_disk_count);
-    } else {
-        /* Fallback to single disk */
-        set_disk_paths[0] = (char*)g_storage_config.data_dir;
-        set_disk_count = 1;
-        buckets_debug("Fallback: reading from single disk");
+    if (buckets_registry_lookup(bucket, object, NULL, &location) == 0) {
+        buckets_debug("Registry hit: pool=%u, set=%u, disks=%u",
+                     location->pool_idx, location->set_idx, location->disk_count);
+        registry_hit = true;
+        
+        /* Get disk paths from topology using location info */
+        if (buckets_placement_compute(bucket, object, &placement) == 0) {
+            if (placement->set_idx == location->set_idx) {
+                set_disk_paths = placement->disk_paths;
+                set_disk_count = placement->disk_count;
+                buckets_debug("Using placement disks for set %u: %d disks",
+                             placement->set_idx, set_disk_count);
+            }
+            /* Don't free placement yet - we're using its disk_paths */
+        }
+    }
+    
+    /* Fallback: compute placement if registry missed or failed */
+    if (!registry_hit || set_disk_count == 0) {
+        buckets_debug("Registry miss, computing placement");
+        
+        if (buckets_placement_compute(bucket, object, &placement) == 0) {
+            set_disk_paths = placement->disk_paths;
+            set_disk_count = placement->disk_count;
+            buckets_debug("Using computed placement: set=%u, %d disks",
+                         placement->set_idx, set_disk_count);
+            /* Don't free placement yet */
+        }
+    }
+    
+    /* Final fallback: try multi-disk layer or single disk */
+    if (set_disk_count == 0) {
+        extern int buckets_multidisk_get_set_disks(int set_index, char **disk_paths, int max_disks);
+        static char *fallback_paths[64];
+        set_disk_count = buckets_multidisk_get_set_disks(0, fallback_paths, 64);
+        
+        if (set_disk_count > 0) {
+            set_disk_paths = fallback_paths;
+            buckets_debug("Fallback: using multi-disk layer, %d disks", set_disk_count);
+        } else {
+            /* Last resort: single disk */
+            static char *single_disk_path;
+            single_disk_path = (char*)g_storage_config.data_dir;
+            if (!single_disk_path || single_disk_path[0] == '\0') {
+                single_disk_path = "/tmp/buckets-data";
+            }
+            set_disk_paths = &single_disk_path;
+            set_disk_count = 1;
+            buckets_debug("Fallback: using single disk");
+        }
+    }
+    
+    if (location) {
+        buckets_registry_location_free(location);
     }
 
-    /* Try to read xl.meta from first available disk */
+    /* Try to read xl.meta from first available disk (local or remote) */
     buckets_xl_meta_t meta;
     int meta_found = 0;
     
+    /* Check if we have disk endpoints for distributed reads */
+    bool has_endpoints = (placement && placement->disk_endpoints && 
+                         placement->disk_endpoints[0] && 
+                         placement->disk_endpoints[0][0] != '\0');
+    
     for (int i = 0; i < set_disk_count && !meta_found; i++) {
+        /* Try local read first */
         if (buckets_read_xl_meta(set_disk_paths[i], object_path, &meta) == 0) {
-            buckets_debug("Read xl.meta from disk %d: %s", i + 1, set_disk_paths[i]);
+            buckets_debug("Read xl.meta from local disk %d: %s", i + 1, set_disk_paths[i]);
             meta_found = 1;
             break;
+        }
+        
+        /* If local read failed and we have remote endpoints, try RPC read */
+        if (!meta_found && has_endpoints && 
+            !buckets_distributed_is_local_disk(placement->disk_endpoints[i])) {
+            
+            char node_endpoint[256];
+            extern int buckets_distributed_extract_node_endpoint(const char *disk_endpoint, 
+                                                                 char *node_endpoint, size_t size);
+            
+            if (buckets_distributed_extract_node_endpoint(placement->disk_endpoints[i], 
+                                                          node_endpoint, sizeof(node_endpoint)) == 0) {
+                /* Call RPC method to read xl.meta from remote disk */
+                extern int buckets_distributed_read_xlmeta(const char *peer_endpoint,
+                                                          const char *bucket, const char *object,
+                                                          const char *disk_path,
+                                                          buckets_xl_meta_t *meta);
+                
+                int ret = buckets_distributed_read_xlmeta(node_endpoint, bucket, object,
+                                                         set_disk_paths[i], &meta);
+                if (ret == 0) {
+                    buckets_debug("Read xl.meta from remote disk %d via RPC: %s:%s", 
+                                 i + 1, node_endpoint, set_disk_paths[i]);
+                    meta_found = 1;
+                    break;
+                }
+            }
         }
     }
     
     if (!meta_found) {
-        buckets_error("Failed to read xl.meta for %s/%s from any disk", bucket, object);
+        buckets_error("Failed to read xl.meta for %s/%s from any disk (local or remote)", 
+                     bucket, object);
         return -1;
     }
 
@@ -461,6 +641,9 @@ int buckets_get_object(const char *bucket, const char *object,
         buckets_debug("Reading inline object");
         *data = base64_decode(meta.inline_data, size);
         buckets_xl_meta_free(&meta);
+        if (placement) {
+            buckets_placement_free_result(placement);
+        }
         return 0;
     }
 
@@ -470,61 +653,37 @@ int buckets_get_object(const char *bucket, const char *object,
     size_t chunk_size = meta.erasure.blockSize;
     u32 total_chunks = k + m;
 
-    buckets_debug("Reading erasure-coded object: k=%u, m=%u, chunk_size=%zu, total_chunks=%u",
+    buckets_debug("Reading erasure-coded object: k=%u, m=%u, chunk_size=%zu, total_chunks=%u (PARALLEL)",
                   k, m, chunk_size, total_chunks);
 
-    /* Allocate chunk pointers */
+    /* Allocate chunk arrays */
     u8 *chunks[total_chunks];
-    u32 available_chunks = 0;
+    size_t chunk_sizes[total_chunks];
     
-    /* Read each chunk from its corresponding disk */
-    for (u32 i = 0; i < total_chunks; i++) {
-        chunks[i] = NULL;
-        
-        /* Get disk index from erasure distribution (or use i if not present) */
-        int disk_idx = (int)i;
-        if (meta.erasure.distribution && i < 16 && meta.erasure.distribution[i] > 0) {
-            disk_idx = (int)(meta.erasure.distribution[i] - 1); /* distribution is 1-indexed */
-        }
-        
-        /* Ensure disk_idx is within bounds */
-        if (disk_idx >= set_disk_count || disk_idx < 0) {
-            buckets_warn("Chunk %u: disk_idx %d out of bounds (max %d)", 
-                        i + 1, disk_idx, set_disk_count);
-            continue;
-        }
-        
-        const char *chunk_disk_path = set_disk_paths[disk_idx];
-        size_t read_size;
-        
-        if (buckets_read_chunk(chunk_disk_path, object_path, i + 1,
-                              (void**)&chunks[i], &read_size) != 0) {
-            buckets_warn("Chunk %u missing from disk %u (%s)", 
-                        i + 1, disk_idx + 1, chunk_disk_path);
-            continue;
-        }
-        
-        buckets_debug("Read chunk %u from disk %u (%s): %zu bytes",
-                     i + 1, disk_idx + 1, chunk_disk_path, read_size);
-        
-        /* Verify checksum if enabled */
-        if (g_storage_config.verify_checksums && meta.erasure.checksums) {
-            if (!buckets_verify_chunk(chunks[i], chunk_size,
-                                     &meta.erasure.checksums[i])) {
-                buckets_warn("Chunk %u checksum mismatch", i + 1);
-                buckets_free(chunks[i]);
-                chunks[i] = NULL;
-                continue;
-            }
-        }
-        
-        available_chunks++;
+    /* Read all chunks in parallel */
+    extern int buckets_parallel_read_chunks(const char *bucket, const char *object,
+                                            buckets_placement_result_t *placement,
+                                            void **chunk_data_array,
+                                            size_t *chunk_sizes_array,
+                                            u32 num_chunks);
+    
+    int available_chunks = buckets_parallel_read_chunks(bucket, object, placement,
+                                                        (void**)chunks, chunk_sizes, total_chunks);
+    
+    if (available_chunks < 0) {
+        buckets_error("Parallel chunk read failed");
+        buckets_xl_meta_free(&meta);
+        buckets_placement_free_result(placement);
+        return -1;
     }
     
+    u32 available_chunks_u32 = (u32)available_chunks;
+    buckets_info("Parallel read: %u/%u chunks available", available_chunks_u32, total_chunks);
+    
     /* Check if we have enough chunks to reconstruct (need at least K) */
-    if (available_chunks < k) {
+    if (available_chunks_u32 < k) {
         buckets_error("Not enough chunks available: %u/%u (need at least %u)", 
-                     available_chunks, total_chunks, k);
+                     available_chunks_u32, total_chunks, k);
         goto cleanup_read;
     }
     
@@ -576,6 +735,9 @@ int buckets_get_object(const char *bucket, const char *object,
         }
     }
     buckets_xl_meta_free(&meta);
+    if (placement) {
+        buckets_placement_free_result(placement);
+    }
     return 0;
 
 cleanup_read:
@@ -586,6 +748,9 @@ cleanup_read:
         }
     }
     buckets_xl_meta_free(&meta);
+    if (placement) {
+        buckets_placement_free_result(placement);
+    }
 
     return -1;
 }

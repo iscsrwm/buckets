@@ -19,6 +19,7 @@ extern "C" {
 #include <limits.h>
 
 #include "buckets.h"
+#include "buckets_placement.h"
 
 /* Storage constants */
 #define BUCKETS_INLINE_THRESHOLD  (128 * 1024)  /* 128 KB */
@@ -132,6 +133,111 @@ void buckets_storage_cleanup(void);
  * Get current storage configuration
  */
 const buckets_storage_config_t* buckets_storage_get_config(void);
+
+/**
+ * Initialize distributed storage RPC handlers
+ * 
+ * Registers RPC methods for cross-node chunk distribution:
+ * - storage.writeChunk: Write chunk to remote node
+ * - storage.readChunk: Read chunk from remote node
+ * 
+ * @param rpc_ctx RPC context
+ * @return 0 on success, error code otherwise
+ */
+struct buckets_rpc_context;  /* Forward declaration */
+int buckets_distributed_rpc_init(struct buckets_rpc_context *rpc_ctx);
+
+/**
+ * Initialize distributed storage system
+ * 
+ * Creates RPC context and connection pool for distributed operations.
+ * Must be called before using distributed chunk operations.
+ * 
+ * @return 0 on success, error code otherwise
+ */
+int buckets_distributed_storage_init(void);
+
+/**
+ * Cleanup distributed storage system
+ */
+void buckets_distributed_storage_cleanup(void);
+
+/**
+ * Get RPC context for distributed operations
+ * 
+ * @return RPC context or NULL if not initialized
+ */
+struct buckets_rpc_context* buckets_distributed_storage_get_rpc_context(void);
+
+/**
+ * Set current node's endpoint
+ * 
+ * Used to determine if a disk is local or remote.
+ * 
+ * @param node_endpoint Current node's endpoint (e.g., "http://localhost:9001")
+ * @return 0 on success, error code otherwise
+ */
+int buckets_distributed_set_local_endpoint(const char *node_endpoint);
+
+/**
+ * Extract node endpoint from full disk endpoint
+ * 
+ * Converts "http://node1:9001/mnt/disk1" to "http://node1:9001"
+ * 
+ * @param disk_endpoint Full disk endpoint
+ * @param node_endpoint Output buffer for node endpoint (min 256 bytes)
+ * @param size Buffer size
+ * @return 0 on success, error code otherwise
+ */
+int buckets_distributed_extract_node_endpoint(const char *disk_endpoint, char *node_endpoint, size_t size);
+
+/**
+ * Check if a disk endpoint is local to this node
+ * 
+ * @param disk_endpoint Full disk endpoint
+ * @return true if local, false if remote
+ */
+bool buckets_distributed_is_local_disk(const char *disk_endpoint);
+
+/**
+ * Write chunk to remote node via RPC
+ * 
+ * @param peer_endpoint Remote node endpoint (e.g., "http://localhost:9002")
+ * @param bucket Bucket name
+ * @param object Object key
+ * @param chunk_index Chunk index (1-based)
+ * @param chunk_data Chunk data
+ * @param chunk_size Chunk size
+ * @param disk_path Disk path on remote node
+ * @return 0 on success, error code otherwise
+ */
+int buckets_distributed_write_chunk(const char *peer_endpoint,
+                                     const char *bucket,
+                                     const char *object,
+                                     u32 chunk_index,
+                                     const void *chunk_data,
+                                     size_t chunk_size,
+                                     const char *disk_path);
+
+/**
+ * Read chunk from remote node via RPC
+ * 
+ * @param peer_endpoint Remote node endpoint
+ * @param bucket Bucket name
+ * @param object Object key
+ * @param chunk_index Chunk index (1-based)
+ * @param chunk_data Output: chunk data (caller must free)
+ * @param chunk_size Output: chunk size
+ * @param disk_path Disk path on remote node
+ * @return 0 on success, error code otherwise
+ */
+int buckets_distributed_read_chunk(const char *peer_endpoint,
+                                    const char *bucket,
+                                    const char *object,
+                                    u32 chunk_index,
+                                    void **chunk_data,
+                                    size_t *chunk_size,
+                                    const char *disk_path);
 
 /* ===== Object Operations ===== */
 
@@ -730,6 +836,53 @@ int buckets_multidisk_heal_xl_meta(int set_index, const char *object_path);
  * @return Number of inconsistencies found, -1 on error
  */
 int buckets_multidisk_scrub_set(int set_index, bool auto_heal);
+
+/* ===================================================================
+ * Parallel Chunk Operations
+ * ===================================================================*/
+
+/**
+ * Write multiple chunks in parallel (local + RPC)
+ * 
+ * Executes chunk writes concurrently using thread pool for maximum performance.
+ * Each chunk is written to its target disk (local or remote via RPC) in parallel.
+ * 
+ * @param bucket Bucket name
+ * @param object Object key
+ * @param placement Placement result with disk endpoints
+ * @param chunk_data_array Array of chunk data pointers (K+M chunks)
+ * @param chunk_size Chunk size (same for all chunks)
+ * @param num_chunks Total number of chunks (K+M)
+ * @return 0 on success, -1 if any chunk failed
+ */
+int buckets_parallel_write_chunks(const char *bucket,
+                                   const char *object,
+                                   buckets_placement_result_t *placement,
+                                   const void **chunk_data_array,
+                                   size_t chunk_size,
+                                   u32 num_chunks);
+
+/**
+ * Read multiple chunks in parallel (local + RPC)
+ * 
+ * Executes chunk reads concurrently using thread pool for maximum performance.
+ * Each chunk is read from its target disk (local or remote via RPC) in parallel.
+ * Tolerates failures - returns number of successful reads (need >= K for reconstruction).
+ * 
+ * @param bucket Bucket name
+ * @param object Object key
+ * @param placement Placement result with disk endpoints
+ * @param chunk_data_array Output: Array of chunk data pointers (caller must free each)
+ * @param chunk_sizes_array Output: Array of chunk sizes
+ * @param num_chunks Total number of chunks to read (K+M)
+ * @return Number of successfully read chunks (need >= K for reconstruction), -1 on error
+ */
+int buckets_parallel_read_chunks(const char *bucket,
+                                  const char *object,
+                                  buckets_placement_result_t *placement,
+                                  void **chunk_data_array,
+                                  size_t *chunk_sizes_array,
+                                  u32 num_chunks);
 
 #ifdef __cplusplus
 }

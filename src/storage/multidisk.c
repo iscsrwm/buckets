@@ -137,6 +137,16 @@ int buckets_multidisk_init(const char **disk_paths, int disk_count)
     if (!g_multidisk_ctx->topology) {
         buckets_warn("No topology found, creating from format");
         g_multidisk_ctx->topology = buckets_topology_from_format(format);
+        
+        /* Save topology to all disks */
+        if (g_multidisk_ctx->topology) {
+            buckets_info("Saving newly created topology to %d disks", disk_count);
+            for (int i = 0; i < disk_count; i++) {
+                if (buckets_topology_save(disk_paths[i], g_multidisk_ctx->topology) != BUCKETS_OK) {
+                    buckets_warn("Failed to save topology to disk: %s", disk_paths[i]);
+                }
+            }
+        }
     }
     
     /* Initialize rwlock */

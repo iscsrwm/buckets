@@ -129,6 +129,11 @@ buckets_config_t* buckets_config_load(const char *filepath)
             config->node.port = port->valueint;
         }
         
+        cJSON *endpoint = cJSON_GetObjectItem(node, "endpoint");
+        if (endpoint && cJSON_IsString(endpoint)) {
+            config->node.endpoint = buckets_strdup(endpoint->valuestring);
+        }
+        
         cJSON *data_dir = cJSON_GetObjectItem(node, "data_dir");
         if (data_dir && cJSON_IsString(data_dir)) {
             config->node.data_dir = buckets_strdup(data_dir->valuestring);
@@ -166,6 +171,46 @@ buckets_config_t* buckets_config_load(const char *filepath)
                 cJSON_Delete(root);
                 buckets_config_free(config);
                 return NULL;
+            }
+        }
+        
+        /* Parse cluster.nodes array */
+        cJSON *nodes = cJSON_GetObjectItem(cluster, "nodes");
+        if (nodes && cJSON_IsArray(nodes)) {
+            config->cluster.node_count = cJSON_GetArraySize(nodes);
+            config->cluster.nodes = buckets_calloc(config->cluster.node_count, 
+                                                   sizeof(buckets_cluster_node_t));
+            
+            int node_idx = 0;
+            cJSON *node_item = NULL;
+            cJSON_ArrayForEach(node_item, nodes) {
+                buckets_cluster_node_t *node = &config->cluster.nodes[node_idx];
+                
+                /* Parse node id */
+                cJSON *id = cJSON_GetObjectItem(node_item, "id");
+                if (id && cJSON_IsString(id)) {
+                    node->id = buckets_strdup(id->valuestring);
+                }
+                
+                /* Parse node endpoint */
+                cJSON *endpoint = cJSON_GetObjectItem(node_item, "endpoint");
+                if (endpoint && cJSON_IsString(endpoint)) {
+                    node->endpoint = buckets_strdup(endpoint->valuestring);
+                }
+                
+                /* Parse node disks array */
+                cJSON *disks = cJSON_GetObjectItem(node_item, "disks");
+                if (disks && cJSON_IsArray(disks)) {
+                    if (parse_string_array(disks, &node->disks, &node->disk_count) != 0) {
+                        buckets_error("Failed to parse disks array for node %s", 
+                                     node->id ? node->id : "unknown");
+                        cJSON_Delete(root);
+                        buckets_config_free(config);
+                        return NULL;
+                    }
+                }
+                
+                node_idx++;
             }
         }
         
@@ -249,6 +294,7 @@ void buckets_config_free(buckets_config_t *config)
     /* Free node section */
     buckets_free(config->node.id);
     buckets_free(config->node.address);
+    buckets_free(config->node.endpoint);
     buckets_free(config->node.data_dir);
     
     /* Free storage section */
@@ -257,9 +303,27 @@ void buckets_config_free(buckets_config_t *config)
     }
     buckets_free(config->storage.disks);
     
-    /* Free cluster section */
-    for (int i = 0; i < config->cluster.peer_count; i++) {
-        buckets_free(config->cluster.peers[i]);
+    /* Free cluster */
+    if (config->cluster.peers) {
+        for (int i = 0; i < config->cluster.peer_count; i++) {
+            buckets_free(config->cluster.peers[i]);
+        }
+        buckets_free(config->cluster.peers);
+    }
+    
+    if (config->cluster.nodes) {
+        for (int i = 0; i < config->cluster.node_count; i++) {
+            buckets_cluster_node_t *node = &config->cluster.nodes[i];
+            if (node->id) buckets_free(node->id);
+            if (node->endpoint) buckets_free(node->endpoint);
+            if (node->disks) {
+                for (int j = 0; j < node->disk_count; j++) {
+                    buckets_free(node->disks[j]);
+                }
+                buckets_free(node->disks);
+            }
+        }
+        buckets_free(config->cluster.nodes);
     }
     buckets_free(config->cluster.peers);
     
@@ -331,9 +395,14 @@ buckets_error_t buckets_config_validate(const buckets_config_t *config)
         }
         
         int total_shards = config->erasure.data_shards + config->erasure.parity_shards;
-        if (config->storage.disk_count < total_shards) {
-            buckets_error("storage.disks count (%d) must be >= K+M (%d)",
-                         config->storage.disk_count, total_shards);
+        
+        /* In cluster mode, use cluster.disks_per_set instead of storage.disk_count */
+        int available_disks = config->cluster.enabled ? config->cluster.disks_per_set : config->storage.disk_count;
+        
+        if (available_disks < total_shards) {
+            buckets_error("%s count (%d) must be >= K+M (%d)",
+                         config->cluster.enabled ? "cluster.disks_per_set" : "storage.disks",
+                         available_disks, total_shards);
             return BUCKETS_ERR_INVALID_ARG;
         }
     }

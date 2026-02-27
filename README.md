@@ -10,32 +10,93 @@ A high-performance, S3-compatible object storage system written in C with suppor
 
 Buckets is a complete rewrite of object storage architecture that implements:
 
-- **Fine-Grained Scalability**: Add/remove individual nodes (1-2 at a time) without cluster downtime
+- **Erasure Set Scaling**: Scale by adding complete erasure sets (not individual nodes)
+- **Parallel RPC**: Concurrent chunk operations across multiple nodes for high throughput
 - **Location Registry**: Self-hosted metadata tracking for optimal read performance
-- **Consistent Hashing**: Virtual node ring for minimal data migration during topology changes
+- **Consistent Hashing**: Virtual node ring for minimal data migration (~33% per set addition)
 - **S3 Compatibility**: Full Amazon S3 API compatibility
-- **Erasure Coding**: Data protection with configurable redundancy
-- **High Performance**: Written in C for maximum efficiency
+- **Erasure Coding**: Data protection with configurable redundancy (K+M chunks)
+- **High Performance**: Written in C with zero-copy I/O and connection pooling
+
+## Scaling Methodology
+
+**Important**: Buckets scales by adding **complete erasure sets**, not individual nodes.
+
+### Erasure Set Architecture
+
+An **erasure set** is a group of disks that work together for erasure coding:
+- **Configuration**: K data shards + M parity shards = total disks per set
+- **Example**: K=8, M=4 requires 12 disks per erasure set
+- **Distribution**: Disks can span multiple physical nodes
+
+### Scaling Examples
+
+#### Small Cluster (3 nodes, 1 set)
+```
+Configuration: K=2, M=2 (4 disks total)
+- Node 1: 2 disks → Set 0 (disks 0-1)
+- Node 2: 1 disk  → Set 0 (disk 2)
+- Node 3: 1 disk  → Set 0 (disk 3)
+
+Fault tolerance: Survives any 2 disk failures
+```
+
+#### Medium Cluster (6 nodes, 2 sets)
+```
+Configuration: K=8, M=4 (12 disks per set, 24 total)
+- Nodes 1-3: 12 disks → Set 0 (disks 0-11)
+- Nodes 4-6: 12 disks → Set 1 (disks 12-23)
+
+Capacity: 2× the small cluster
+Fault tolerance: Each set survives any 4 disk failures
+```
+
+#### Large Cluster (9 nodes, 3 sets)
+```
+Configuration: K=8, M=4 (12 disks per set, 36 total)
+- Nodes 1-3: 12 disks → Set 0
+- Nodes 4-6: 12 disks → Set 1
+- Nodes 7-9: 12 disks → Set 2
+
+Capacity: 3× the small cluster
+Data migration when adding Set 2: ~33% of objects rebalanced
+```
+
+### Why Erasure Sets?
+
+1. **Consistent Performance**: All sets have the same K+M configuration
+2. **Predictable Fault Tolerance**: Each set independently survives M disk failures
+3. **Minimal Migration**: Adding a set migrates ~1/N objects (N = number of sets)
+4. **Simplified Operations**: No partial sets or complex rebalancing logic
+
+### Consistent Hashing for Placement
+
+- Each erasure set gets 150 virtual nodes on the hash ring
+- Objects are placed deterministically based on object name hash
+- Adding a new set: ~33% migration (from 2 sets to 3 sets = 1/3 of objects move)
+- Removing a set: Objects redistributed evenly across remaining sets
 
 ## Architecture
 
-Buckets implements a hybrid architecture combining:
+Buckets implements a distributed architecture with:
 
-1. **Location Registry** - Explicit object location tracking for <5ms reads
-2. **Consistent Hashing** - Deterministic placement with ~20% migration on topology changes
-3. **Topology Management** - Dynamic cluster membership with generation tracking
-4. **Background Migration** - Automatic rebalancing when nodes are added/removed
+1. **Parallel RPC Layer** - Concurrent chunk writes/reads across nodes for high throughput
+2. **Topology Management** - Disk endpoint mapping for cross-node distribution
+3. **Consistent Hashing** - Virtual node ring for deterministic object→set mapping
+4. **Location Registry** - Explicit object location tracking for <5ms reads
+5. **Background Migration** - Automatic rebalancing when erasure sets are added/removed
 
 See [architecture/SCALE_AND_DATA_PLACEMENT.md](architecture/SCALE_AND_DATA_PLACEMENT.md) for detailed design documentation.
 
 ## Key Features
 
-- ✅ **Dynamic Node Management**: Add/remove nodes individually
-- ✅ **Zero Downtime Operations**: Topology changes don't require restarts
-- ✅ **Optimized Reads**: Direct lookup via registry (5-50× faster than multi-pool fan-out)
-- ✅ **Controlled Migration**: ~20-30% data movement per node change
-- ✅ **Fault Tolerant**: Graceful degradation, automatic recovery
-- ✅ **Self-Contained**: No external dependencies (etcd, ZooKeeper, etc.)
+- ✅ **Erasure Set Scaling**: Add complete sets (K+M disks) for predictable capacity growth
+- ✅ **Parallel RPC Operations**: Concurrent chunk I/O across nodes for maximum throughput
+- ✅ **Optimized Reads**: Direct lookup via registry (<5ms) + parallel chunk retrieval
+- ✅ **Controlled Migration**: ~33% data movement per erasure set addition (1/N where N = sets)
+- ✅ **Fault Tolerant**: Each set survives M disk failures independently
+- ✅ **Self-Contained**: No external dependencies (etcd, ZooKeeper, Cassandra, etc.)
+- ✅ **High Performance**: C implementation with connection pooling and zero-copy I/O
 
 ## Building from Source
 
@@ -67,34 +128,75 @@ sudo make install
 
 ## Quick Start
 
-### Single Node
+### Single Node (Development)
 
 ```bash
-# Start server
-buckets server /data
+# Start server on default port 9000
+./bin/buckets server --port 9000
 
-# Create a bucket
-buckets-client mb local/mybucket
+# Upload using curl
+curl -X PUT -T myfile.txt http://localhost:9000/mybucket/myfile.txt
 
-# Upload object
-buckets-client cp myfile.txt local/mybucket/
+# Download
+curl http://localhost:9000/mybucket/myfile.txt
 ```
 
-### Distributed Cluster
+### Distributed Cluster (Production)
+
+#### 1. Format Disks (Run Once)
 
 ```bash
-# Start 4-node cluster
-buckets server http://node{1...4}:9000/data{1...4}
+# Format node1 (4 disks)
+./bin/buckets format --config config/cluster-node1.json
+
+# Format node2 (4 disks)
+./bin/buckets format --config config/cluster-node2.json
+
+# Format node3 (4 disks)  
+./bin/buckets format --config config/cluster-node3.json
 ```
 
-### Add Node Dynamically
+#### 2. Start Cluster Nodes
 
 ```bash
-# Add individual node to existing cluster
-buckets-admin cluster add-node http://node5:9000/data{1...4} --pool 0
+# Start node1
+./bin/buckets server --config config/cluster-node1.json &
 
-# Check migration status
-buckets-admin cluster migration-status
+# Start node2
+./bin/buckets server --config config/cluster-node2.json &
+
+# Start node3
+./bin/buckets server --config config/cluster-node3.json &
+```
+
+#### 3. Use S3 API
+
+```bash
+# Upload to any node (automatically distributed)
+curl -X PUT -T file.bin http://localhost:9001/bucket/file.bin
+
+# Download from any node (chunks retrieved in parallel)
+curl http://localhost:9002/bucket/file.bin -o downloaded.bin
+
+# Verify integrity
+md5sum file.bin downloaded.bin
+```
+
+### Scaling the Cluster
+
+To add capacity, add a complete erasure set (3 more nodes with 12 disks):
+
+```bash
+# Create new configuration with 2 erasure sets
+# Edit config files to include nodes 1-6, sets=2, disks_per_set=12
+
+# Format new nodes (4-6)
+./bin/buckets format --config config/cluster-node4.json
+./bin/buckets format --config config/cluster-node5.json
+./bin/buckets format --config config/cluster-node6.json
+
+# Restart all nodes with updated config
+# Automatic migration will redistribute ~33% of objects to new set
 ```
 
 ## Project Status

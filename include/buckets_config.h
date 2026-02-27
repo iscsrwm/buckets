@@ -21,6 +21,7 @@ typedef struct {
     char *id;               /* Node ID (e.g., "node1") */
     char *address;          /* Node address (e.g., "localhost") */
     int port;               /* Node port (e.g., 9001) */
+    char *endpoint;         /* Node endpoint (e.g., "http://localhost:9001") */
     char *data_dir;         /* Data directory (e.g., "/tmp/buckets-node1") */
 } buckets_node_config_t;
 
@@ -33,12 +34,24 @@ typedef struct {
 } buckets_disk_config_t;
 
 /**
+ * Cluster node definition (from cluster.nodes array)
+ */
+typedef struct {
+    char *id;               /* Node ID (e.g., "node1") */
+    char *endpoint;         /* Node endpoint (e.g., "http://localhost:9001") */
+    char **disks;           /* Array of disk paths for this node */
+    int disk_count;         /* Number of disks */
+} buckets_cluster_node_t;
+
+/**
  * Cluster configuration
  */
 typedef struct {
     bool enabled;           /* Enable clustering */
-    char **peers;           /* Array of peer addresses */
+    char **peers;           /* Array of peer addresses (deprecated, use nodes) */
     int peer_count;         /* Number of peers */
+    buckets_cluster_node_t *nodes;  /* Array of cluster nodes with disk info */
+    int node_count;         /* Number of nodes */
     int sets;               /* Number of erasure sets */
     int disks_per_set;      /* Disks per erasure set */
 } buckets_cluster_config_t;

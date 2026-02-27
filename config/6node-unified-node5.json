@@ -1,0 +1,95 @@
+{
+  "deployment_id": "6node-unified-cluster",
+  "node": {
+    "id": "node5",
+    "address": "localhost",
+    "port": 9005,
+    "endpoint": "http://localhost:9005",
+    "data_dir": "/tmp/buckets-6node-unified/node5"
+  },
+  "storage": {
+    "disks": [
+      "/tmp/buckets-6node-unified/node5/disk1",
+      "/tmp/buckets-6node-unified/node5/disk2",
+      "/tmp/buckets-6node-unified/node5/disk3",
+      "/tmp/buckets-6node-unified/node5/disk4"
+    ]
+  },
+  "cluster": {
+    "enabled": true,
+    "deployment_id": "6node-unified-cluster",
+    "nodes": [
+      {
+        "id": "node5",
+        "endpoint": "http://localhost:9005",
+        "disks": [
+          "/tmp/buckets-6node-unified/node5/disk1",
+          "/tmp/buckets-6node-unified/node5/disk2",
+          "/tmp/buckets-6node-unified/node5/disk3",
+          "/tmp/buckets-6node-unified/node5/disk4"
+        ]
+      },
+      {
+        "id": "node2",
+        "endpoint": "http://localhost:9002",
+        "disks": [
+          "/tmp/buckets-6node-unified/node2/disk1",
+          "/tmp/buckets-6node-unified/node2/disk2",
+          "/tmp/buckets-6node-unified/node2/disk3",
+          "/tmp/buckets-6node-unified/node2/disk4"
+        ]
+      },
+      {
+        "id": "node3",
+        "endpoint": "http://localhost:9003",
+        "disks": [
+          "/tmp/buckets-6node-unified/node3/disk1",
+          "/tmp/buckets-6node-unified/node3/disk2",
+          "/tmp/buckets-6node-unified/node3/disk3",
+          "/tmp/buckets-6node-unified/node3/disk4"
+        ]
+      },
+      {
+        "id": "node4",
+        "endpoint": "http://localhost:9004",
+        "disks": [
+          "/tmp/buckets-6node-unified/node4/disk1",
+          "/tmp/buckets-6node-unified/node4/disk2",
+          "/tmp/buckets-6node-unified/node4/disk3",
+          "/tmp/buckets-6node-unified/node4/disk4"
+        ]
+      },
+      {
+        "id": "node5",
+        "endpoint": "http://localhost:9005",
+        "disks": [
+          "/tmp/buckets-6node-unified/node5/disk1",
+          "/tmp/buckets-6node-unified/node5/disk2",
+          "/tmp/buckets-6node-unified/node5/disk3",
+          "/tmp/buckets-6node-unified/node5/disk4"
+        ]
+      },
+      {
+        "id": "node6",
+        "endpoint": "http://localhost:9006",
+        "disks": [
+          "/tmp/buckets-6node-unified/node6/disk1",
+          "/tmp/buckets-6node-unified/node6/disk2",
+          "/tmp/buckets-6node-unified/node6/disk3",
+          "/tmp/buckets-6node-unified/node6/disk4"
+        ]
+      }
+    ],
+    "sets": 2,
+    "disks_per_set": 12
+  },
+  "erasure": {
+    "enabled": true,
+    "data_shards": 8,
+    "parity_shards": 4
+  },
+  "server": {
+    "bind_address": "0.0.0.0",
+    "bind_port": 9005
+  }
+}

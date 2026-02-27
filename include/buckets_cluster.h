@@ -9,6 +9,7 @@
 
 #include <pthread.h>
 #include "buckets.h"
+#include "buckets_config.h"  /* For buckets_config_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -92,6 +93,8 @@ void buckets_topology_free(buckets_cluster_topology_t *topology);
 buckets_cluster_topology_t* buckets_topology_load(const char *disk_path);
 int buckets_topology_save(const char *disk_path, buckets_cluster_topology_t *topology);
 buckets_cluster_topology_t* buckets_topology_from_format(buckets_format_t *format);
+int buckets_topology_populate_endpoints_from_config(buckets_cluster_topology_t *topology,
+                                                     buckets_config_t *config);
 
 /* Topology modification operations */
 int buckets_topology_add_pool(buckets_cluster_topology_t *topology);

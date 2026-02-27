@@ -16,6 +16,7 @@
 
 #include "buckets.h"
 #include "buckets_cluster.h"
+#include "buckets_config.h"
 #include "buckets_hash.h"
 #include "buckets_io.h"
 #include "buckets_json.h"
@@ -701,4 +702,145 @@ buckets_cluster_topology_t* buckets_topology_load_quorum(char **disk_paths,
     buckets_free(votes);
     
     return NULL;
+}
+
+/* ========================================================================
+ * Topology Endpoint Population
+ * ======================================================================== */
+
+/**
+ * Populate topology disk endpoints from cluster configuration
+ * 
+ * Maps disk UUIDs in topology to node endpoints from config.
+ * This enables distributed storage by providing the HTTP endpoint for each disk.
+ * 
+ * Algorithm:
+ * 1. Load format.json from each disk in config to get its UUID
+ * 2. For each disk in topology, find matching UUID in config nodes
+ * 3. Set endpoint as: node_endpoint + "/" + disk_path
+ * 
+ * @param topology Topology to populate (must have valid disk UUIDs)
+ * @param config Cluster configuration with nodes array
+ * @return BUCKETS_OK on success, error code on failure
+ */
+int buckets_topology_populate_endpoints_from_config(buckets_cluster_topology_t *topology,
+                                                     buckets_config_t *config)
+{
+    if (!topology || !config) {
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    if (!config->cluster.enabled || config->cluster.node_count == 0) {
+        buckets_debug("Cluster not enabled or no nodes defined, skipping endpoint population");
+        return BUCKETS_OK;
+    }
+    
+    buckets_info("Populating topology endpoints from %d cluster nodes", config->cluster.node_count);
+    
+    /* Build UUID -> endpoint mapping from config.cluster.nodes
+     * 
+     * Strategy: Match disks by position in topology vs config.
+     * The format.json defines sets with UUIDs in a specific order.
+     * The config.cluster.nodes defines disks in the same order.
+     * So we can map: topology disk index -> config node/disk -> endpoint
+     */
+    
+    typedef struct {
+        char uuid[37];
+        char endpoint[512];  /* node_endpoint + "/" + disk_path */
+    } uuid_endpoint_map_t;
+    
+    /* Calculate total disk count */
+    int total_disks = config->cluster.sets * config->cluster.disks_per_set;
+    uuid_endpoint_map_t *uuid_map = buckets_calloc(total_disks, sizeof(uuid_endpoint_map_t));
+    int map_count = 0;
+    
+    /* Iterate through topology to get all UUIDs */
+    int global_disk_idx = 0;
+    for (int pool_idx = 0; pool_idx < topology->pool_count; pool_idx++) {
+        buckets_pool_topology_t *pool = &topology->pools[pool_idx];
+        
+        for (int set_idx = 0; set_idx < pool->set_count; set_idx++) {
+            buckets_set_topology_t *set = &pool->sets[set_idx];
+            
+            for (int disk_idx = 0; disk_idx < set->disk_count; disk_idx++) {
+                buckets_disk_info_t *disk = &set->disks[disk_idx];
+                
+                /* Find which node this disk belongs to based on position */
+                /* Assume disks are distributed evenly: node0 has disks 0-3, node1 has 4-7, etc */
+                int disks_per_node = config->storage.disk_count;  /* Each node has same number of disks */
+                int owner_node_idx = global_disk_idx / disks_per_node;
+                int disk_in_node = global_disk_idx % disks_per_node;
+                
+                if (owner_node_idx < config->cluster.node_count) {
+                    buckets_cluster_node_t *node = &config->cluster.nodes[owner_node_idx];
+                    
+                    if (disk_in_node < node->disk_count) {
+                        /* Create mapping entry */
+                        uuid_endpoint_map_t *entry = &uuid_map[map_count++];
+                        strncpy(entry->uuid, disk->uuid, sizeof(entry->uuid) - 1);
+                        entry->uuid[sizeof(entry->uuid) - 1] = '\0';
+                        
+                        /* Build endpoint: http://host:port/disk_path */
+                        snprintf(entry->endpoint, sizeof(entry->endpoint), 
+                                "%s%s", node->endpoint, node->disks[disk_in_node]);
+                        
+                        buckets_debug("Mapped UUID %s (global_idx=%d, node=%d, disk=%d) -> %s", 
+                                    disk->uuid, global_disk_idx, owner_node_idx, disk_in_node, entry->endpoint);
+                    }
+                }
+                
+                global_disk_idx++;
+            }
+        }
+    }
+    
+    buckets_info("Built UUID->endpoint map with %d entries from topology", map_count);
+    
+    /* Now populate topology endpoints using the map */
+    int populated_count = 0;
+    int missing_count = 0;
+    
+    for (int pool_idx = 0; pool_idx < topology->pool_count; pool_idx++) {
+        buckets_pool_topology_t *pool = &topology->pools[pool_idx];
+        
+        for (int set_idx = 0; set_idx < pool->set_count; set_idx++) {
+            buckets_set_topology_t *set = &pool->sets[set_idx];
+            
+            for (int disk_idx = 0; disk_idx < set->disk_count; disk_idx++) {
+                buckets_disk_info_t *disk = &set->disks[disk_idx];
+                
+                /* Find this UUID in the map */
+                bool found = false;
+                for (int map_idx = 0; map_idx < map_count; map_idx++) {
+                    if (strcmp(disk->uuid, uuid_map[map_idx].uuid) == 0) {
+                        /* Match! Set the endpoint */
+                        strncpy(disk->endpoint, uuid_map[map_idx].endpoint, 
+                               sizeof(disk->endpoint) - 1);
+                        disk->endpoint[sizeof(disk->endpoint) - 1] = '\0';
+                        populated_count++;
+                        found = true;
+                        break;
+                    }
+                }
+                
+                if (!found) {
+                    buckets_warn("Could not find endpoint for disk UUID %s (pool=%d, set=%d, disk=%d)",
+                                disk->uuid, pool_idx, set_idx, disk_idx);
+                    missing_count++;
+                }
+            }
+        }
+    }
+    
+    buckets_free(uuid_map);
+    
+    if (missing_count > 0) {
+        buckets_warn("Populated %d endpoints, %d missing (disks may be offline or not in config)",
+                    populated_count, missing_count);
+    } else {
+        buckets_info("Successfully populated all %d disk endpoints", populated_count);
+    }
+    
+    return BUCKETS_OK;
 }

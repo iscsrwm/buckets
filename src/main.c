@@ -16,6 +16,7 @@
 #include "buckets_storage.h"
 #include "buckets_cluster.h"
 #include "buckets_registry.h"
+#include "buckets_placement.h"
 
 static void print_banner(void) {
     printf("\n");
@@ -311,6 +312,25 @@ int main(int argc, char *argv[]) {
                         buckets_info("Topology loaded: generation=%ld, pools=%d", 
                                     topology->generation, topology->pool_count);
                         buckets_info("Deployment ID: %s", topology->deployment_id);
+                        
+                        /* Populate endpoints from cluster config */
+                        if (config->cluster.enabled && config->cluster.node_count > 0) {
+                            buckets_info("Populating topology endpoints from cluster configuration...");
+                            if (buckets_topology_populate_endpoints_from_config(topology, config) == BUCKETS_OK) {
+                                buckets_info("Topology endpoints populated successfully");
+                                
+                                /* Save updated topology with endpoints to all disks */
+                                buckets_info("Saving topology with populated endpoints...");
+                                for (int i = 0; i < config->storage.disk_count; i++) {
+                                    if (buckets_topology_save(config->storage.disks[i], topology) != BUCKETS_OK) {
+                                        buckets_warn("Failed to save topology to disk: %s", config->storage.disks[i]);
+                                    }
+                                }
+                                buckets_info("Topology saved to %d disks", config->storage.disk_count);
+                            } else {
+                                buckets_warn("Failed to populate topology endpoints");
+                            }
+                        }
                     }
                     
                     /* Initialize location registry */
@@ -324,6 +344,25 @@ int main(int argc, char *argv[]) {
                         goto cleanup;
                     }
                     buckets_info("Location registry initialized");
+                    
+                    /* Initialize placement system (consistent hashing) */
+                    buckets_info("Initializing placement system...");
+                    if (buckets_placement_init() != BUCKETS_OK) {
+                        buckets_error("Failed to initialize placement system");
+                        buckets_registry_cleanup();
+                        buckets_topology_manager_cleanup();
+                        buckets_multidisk_cleanup();
+                        buckets_config_free(config);
+                        ret = 1;
+                        goto cleanup;
+                    }
+                    
+                    /* Log placement stats */
+                    u32 total_sets, total_disks;
+                    double avg_disks;
+                    buckets_placement_get_stats(&total_sets, &total_disks, &avg_disks);
+                    buckets_info("Placement system initialized: %u active sets, %u total disks, %.1f avg disks/set",
+                                total_sets, total_disks, avg_disks);
                     
                     /* Initialize storage layer */
                     buckets_info("Initializing storage layer...");
@@ -344,6 +383,29 @@ int main(int argc, char *argv[]) {
                         goto cleanup;
                     }
                     buckets_info("Storage layer initialized");
+                    
+                    /* Initialize distributed storage (RPC for remote chunks) */
+                    buckets_info("Initializing distributed storage...");
+                    if (buckets_distributed_storage_init() != BUCKETS_OK) {
+                        buckets_error("Failed to initialize distributed storage");
+                        buckets_registry_cleanup();
+                        buckets_topology_manager_cleanup();
+                        buckets_multidisk_cleanup();
+                        buckets_config_free(config);
+                        ret = 1;
+                        goto cleanup;
+                    }
+                    
+                    /* Set local node endpoint for distributed operations */
+                    if (config->node.endpoint && config->node.endpoint[0] != '\0') {
+                        if (buckets_distributed_set_local_endpoint(config->node.endpoint) != BUCKETS_OK) {
+                            buckets_warn("Failed to set local node endpoint: %s", config->node.endpoint);
+                        } else {
+                            buckets_info("Local node endpoint: %s", config->node.endpoint);
+                        }
+                    }
+                    
+                    buckets_info("Distributed storage initialized");
                 }
             }
         }
