@@ -745,11 +745,12 @@ int buckets_registry_delete(const char *bucket, const char *object,
         return -1;
     }
     
-    /* Delete from storage */
+    /* Delete from storage - use distributed delete to handle multi-disk layout */
     char object_key[1024];
     snprintf(object_key, sizeof(object_key), "%s/%s/%s.json", bucket, object, vid);
     
-    int result = buckets_delete_object(BUCKETS_REGISTRY_BUCKET, object_key);
+    extern int buckets_distributed_delete_object(const char *bucket, const char *object);
+    int result = buckets_distributed_delete_object(BUCKETS_REGISTRY_BUCKET, object_key);
     if (result != 0) {
         buckets_warn("Failed to delete registry entry from storage (may not exist)");
     }
@@ -900,10 +901,143 @@ int buckets_registry_update(const char *bucket, const char *object,
 
 /* ===== Range Query Support ===== */
 
+#include <dirent.h>
+#include <sys/stat.h>
+
+/* Helper to decode base64 inline data */
+static char* decode_base64_inline(const char *encoded, size_t *out_len)
+{
+    if (!encoded) return NULL;
+    
+    size_t in_len = strlen(encoded);
+    if (in_len == 0) return NULL;
+    
+    /* Base64 decode table */
+    static const unsigned char decode_table[256] = {
+        64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
+        64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
+        64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 62, 64, 64, 64, 63,
+        52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 64, 64, 64, 64, 64, 64,
+        64,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14,
+        15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 64, 64, 64, 64, 64,
+        64, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+        41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 64, 64, 64, 64, 64,
+        64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
+        64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
+        64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
+        64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
+        64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
+        64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
+        64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
+        64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64
+    };
+    
+    /* Calculate output length */
+    size_t padding = 0;
+    if (in_len > 0 && encoded[in_len - 1] == '=') padding++;
+    if (in_len > 1 && encoded[in_len - 2] == '=') padding++;
+    
+    size_t decoded_len = (in_len * 3) / 4 - padding;
+    char *decoded = buckets_malloc(decoded_len + 1);
+    if (!decoded) return NULL;
+    
+    size_t j = 0;
+    unsigned int accum = 0;
+    int bits = 0;
+    
+    for (size_t i = 0; i < in_len; i++) {
+        unsigned char c = (unsigned char)encoded[i];
+        if (c == '=') break;
+        
+        unsigned char val = decode_table[c];
+        if (val == 64) continue;  /* Skip invalid chars */
+        
+        accum = (accum << 6) | val;
+        bits += 6;
+        
+        if (bits >= 8) {
+            bits -= 8;
+            decoded[j++] = (char)((accum >> bits) & 0xFF);
+        }
+    }
+    
+    decoded[j] = '\0';
+    if (out_len) *out_len = j;
+    return decoded;
+}
+
+/* Parse registry JSON into location struct */
+static buckets_object_location_t* parse_registry_json(const char *json_str)
+{
+    cJSON *json = cJSON_Parse(json_str);
+    if (!json) return NULL;
+    
+    buckets_object_location_t *loc = buckets_registry_location_new();
+    if (!loc) {
+        cJSON_Delete(json);
+        return NULL;
+    }
+    
+    /* Parse fields */
+    cJSON *bucket = cJSON_GetObjectItem(json, "bucket");
+    cJSON *object = cJSON_GetObjectItem(json, "object");
+    cJSON *version_id = cJSON_GetObjectItem(json, "version_id");
+    cJSON *pool_idx = cJSON_GetObjectItem(json, "pool_idx");
+    cJSON *set_idx = cJSON_GetObjectItem(json, "set_idx");
+    cJSON *disk_count = cJSON_GetObjectItem(json, "disk_count");
+    cJSON *disk_idxs = cJSON_GetObjectItem(json, "disk_idxs");
+    cJSON *generation = cJSON_GetObjectItem(json, "generation");
+    cJSON *mod_time = cJSON_GetObjectItem(json, "mod_time");
+    cJSON *size = cJSON_GetObjectItem(json, "size");
+    
+    if (bucket && cJSON_IsString(bucket)) {
+        loc->bucket = buckets_strdup(bucket->valuestring);
+    }
+    if (object && cJSON_IsString(object)) {
+        loc->object = buckets_strdup(object->valuestring);
+    }
+    if (version_id && cJSON_IsString(version_id)) {
+        loc->version_id = buckets_strdup(version_id->valuestring);
+    }
+    if (pool_idx && cJSON_IsNumber(pool_idx)) {
+        loc->pool_idx = (u32)pool_idx->valueint;
+    }
+    if (set_idx && cJSON_IsNumber(set_idx)) {
+        loc->set_idx = (u32)set_idx->valueint;
+    }
+    if (disk_count && cJSON_IsNumber(disk_count)) {
+        loc->disk_count = (u32)disk_count->valueint;
+    }
+    if (disk_idxs && cJSON_IsArray(disk_idxs)) {
+        int arr_size = cJSON_GetArraySize(disk_idxs);
+        for (int i = 0; i < arr_size && i < BUCKETS_REGISTRY_MAX_DISKS; i++) {
+            cJSON *item = cJSON_GetArrayItem(disk_idxs, i);
+            if (item && cJSON_IsNumber(item)) {
+                loc->disk_idxs[i] = (u32)item->valueint;
+            }
+        }
+    }
+    if (generation && cJSON_IsNumber(generation)) {
+        loc->generation = (u64)generation->valuedouble;
+    }
+    if (mod_time && cJSON_IsNumber(mod_time)) {
+        loc->mod_time = (time_t)mod_time->valuedouble;
+    }
+    if (size && cJSON_IsNumber(size)) {
+        loc->size = (size_t)size->valuedouble;
+    }
+    
+    cJSON_Delete(json);
+    return loc;
+}
+
 /**
  * List all objects in a bucket with optional prefix
  * 
- * @param bucket Bucket name
+ * Scans registry storage (all xl.meta files) to find registry entries
+ * for the specified bucket.
+ * 
+ * @param bucket Bucket name to list
  * @param prefix Object key prefix (NULL for all objects)
  * @param max_keys Maximum number of keys to return (0 for unlimited)
  * @param locations Output array (caller must free)
@@ -915,22 +1049,204 @@ int buckets_registry_list(const char *bucket, const char *prefix,
                           buckets_object_location_t ***locations,
                           size_t *count)
 {
-    (void)prefix;    /* TODO: Use for filtering */
-    (void)max_keys;  /* TODO: Use for limiting results */
-    
     if (!g_registry.initialized || !bucket || !locations || !count) {
         return -1;
     }
     
-    /* This operation requires scanning registry storage */
-    /* We'll build a list by iterating through stored objects */
-    
-    /* For now, return a placeholder implementation */
-    /* Full implementation requires storage layer integration */
-    buckets_warn("Registry range query not fully implemented yet");
-    
     *locations = NULL;
     *count = 0;
     
-    return -1;  /* TODO: Implement after storage integration */
+    /* Get storage data directory */
+    const buckets_storage_config_t *storage_config = buckets_storage_get_config();
+    if (!storage_config || !storage_config->data_dir) {
+        buckets_error("No storage data directory configured");
+        return -1;
+    }
+    const char *base_dir = storage_config->data_dir;
+    
+    /* Allocate results array (will grow as needed) */
+    size_t capacity = 64;
+    size_t found = 0;
+    buckets_object_location_t **results = buckets_calloc(capacity, sizeof(buckets_object_location_t*));
+    if (!results) {
+        return -1;
+    }
+    
+    /* In multi-disk mode, scan disk1, disk2, etc. Otherwise scan base_dir directly */
+    /* Try disk1 first to detect multi-disk mode */
+    char data_dir[PATH_MAX];
+    snprintf(data_dir, sizeof(data_dir), "%s/disk1", base_dir);
+    
+    DIR *test_dir = opendir(data_dir);
+    if (!test_dir) {
+        /* Not multi-disk mode, use base_dir directly */
+        snprintf(data_dir, sizeof(data_dir), "%s", base_dir);
+    } else {
+        closedir(test_dir);
+        /* Multi-disk mode - we'll scan disk1 only for now (registry entries are replicated) */
+    }
+    
+    /* Scan all hash prefix directories (00-ff) */
+    DIR *prefix_dir = opendir(data_dir);
+    if (!prefix_dir) {
+        buckets_free(results);
+        return -1;
+    }
+    
+    struct dirent *prefix_entry;
+    while ((prefix_entry = readdir(prefix_dir)) != NULL) {
+        /* Skip . and .. and hidden dirs except hash prefixes */
+        if (prefix_entry->d_name[0] == '.') continue;
+        
+        /* Hash prefixes are 2 hex chars */
+        if (strlen(prefix_entry->d_name) != 2) continue;
+        
+        /* Check if it's a hex prefix */
+        char c1 = prefix_entry->d_name[0];
+        char c2 = prefix_entry->d_name[1];
+        bool is_hex = ((c1 >= '0' && c1 <= '9') || (c1 >= 'a' && c1 <= 'f')) &&
+                      ((c2 >= '0' && c2 <= '9') || (c2 >= 'a' && c2 <= 'f'));
+        if (!is_hex) continue;
+        
+        /* Open hash prefix directory */
+        char prefix_path[PATH_MAX * 2];
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+        snprintf(prefix_path, sizeof(prefix_path), "%s/%s", data_dir, prefix_entry->d_name);
+#pragma GCC diagnostic pop
+        
+        DIR *hash_dir = opendir(prefix_path);
+        if (!hash_dir) continue;
+        
+        struct dirent *hash_entry;
+        while ((hash_entry = readdir(hash_dir)) != NULL) {
+            if (hash_entry->d_name[0] == '.') continue;
+            
+            /* Check for max_keys limit */
+            if (max_keys > 0 && found >= max_keys) {
+                closedir(hash_dir);
+                closedir(prefix_dir);
+                goto done;
+            }
+            
+            /* Read xl.meta */
+            char meta_path[PATH_MAX * 2];
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+            snprintf(meta_path, sizeof(meta_path), "%s/%s/xl.meta", 
+                     prefix_path, hash_entry->d_name);
+#pragma GCC diagnostic pop
+            
+            /* Read the file */
+            FILE *f = fopen(meta_path, "r");
+            if (!f) continue;
+            
+            fseek(f, 0, SEEK_END);
+            long file_size = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            
+            if (file_size <= 0 || file_size > 1024 * 1024) {  /* Max 1MB */
+                fclose(f);
+                continue;
+            }
+            
+            char *meta_content = buckets_malloc(file_size + 1);
+            if (!meta_content) {
+                fclose(f);
+                continue;
+            }
+            
+            size_t read_size = fread(meta_content, 1, file_size, f);
+            fclose(f);
+            meta_content[read_size] = '\0';
+            
+            /* Parse xl.meta JSON */
+            cJSON *meta_json = cJSON_Parse(meta_content);
+            buckets_free(meta_content);
+            if (!meta_json) continue;
+            
+            /* Check if this is a registry entry (content-type: application/json) */
+            cJSON *meta_obj = cJSON_GetObjectItem(meta_json, "meta");
+            if (!meta_obj) {
+                cJSON_Delete(meta_json);
+                continue;
+            }
+            
+            cJSON *content_type = cJSON_GetObjectItem(meta_obj, "content-type");
+            if (!content_type || !cJSON_IsString(content_type) ||
+                strcmp(content_type->valuestring, "application/json") != 0) {
+                cJSON_Delete(meta_json);
+                continue;
+            }
+            
+            /* Get inline data (base64 encoded registry JSON) */
+            cJSON *inline_data = cJSON_GetObjectItem(meta_json, "inline");
+            if (!inline_data || !cJSON_IsString(inline_data)) {
+                cJSON_Delete(meta_json);
+                continue;
+            }
+            
+            /* Decode and parse registry entry */
+            size_t decoded_len = 0;
+            char *decoded = decode_base64_inline(inline_data->valuestring, &decoded_len);
+            cJSON_Delete(meta_json);
+            
+            if (!decoded) continue;
+            
+            buckets_object_location_t *loc = parse_registry_json(decoded);
+            buckets_free(decoded);
+            
+            if (!loc || !loc->bucket) {
+                if (loc) buckets_registry_location_free(loc);
+                continue;
+            }
+            
+            /* Check if this entry matches our bucket */
+            if (strcmp(loc->bucket, bucket) != 0) {
+                buckets_registry_location_free(loc);
+                continue;
+            }
+            
+            /* Check prefix filter if specified */
+            if (prefix && loc->object) {
+                if (strncmp(loc->object, prefix, strlen(prefix)) != 0) {
+                    buckets_registry_location_free(loc);
+                    continue;
+                }
+            }
+            
+            /* Skip delete markers (version_id starts with "delete-") */
+            if (loc->version_id && strncmp(loc->version_id, "delete-", 7) == 0) {
+                buckets_registry_location_free(loc);
+                continue;
+            }
+            
+            /* Add to results (grow array if needed) */
+            if (found >= capacity) {
+                capacity *= 2;
+                buckets_object_location_t **new_results = buckets_realloc(
+                    results, capacity * sizeof(buckets_object_location_t*));
+                if (!new_results) {
+                    buckets_registry_location_free(loc);
+                    continue;
+                }
+                results = new_results;
+            }
+            
+            results[found++] = loc;
+        }
+        
+        closedir(hash_dir);
+    }
+    
+    closedir(prefix_dir);
+    
+done:
+    *locations = results;
+    *count = found;
+    
+    buckets_debug("Registry list: bucket=%s, prefix=%s, found=%zu", 
+                  bucket, prefix ? prefix : "(none)", found);
+    
+    return 0;
 }

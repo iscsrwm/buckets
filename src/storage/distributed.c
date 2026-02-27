@@ -7,11 +7,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "buckets.h"
 #include "buckets_net.h"
 #include "buckets_storage.h"
 #include "buckets_cluster.h"
+#include "buckets_registry.h"
+#include "buckets_placement.h"
 #include "cJSON.h"
 
 /* Global RPC context for distributed operations */
@@ -20,6 +23,13 @@ static buckets_conn_pool_t *g_conn_pool = NULL;
 
 /* Current node's endpoint (for determining local vs remote) */
 static char g_local_node_endpoint[256] = {0};
+
+/* Forward declarations */
+static int buckets_distributed_rpc_delete_chunk(const char *peer_endpoint,
+                                                 const char *bucket,
+                                                 const char *object,
+                                                 u32 chunk_index,
+                                                 const char *disk_path);
 
 /* ===================================================================
  * Initialization
@@ -307,10 +317,10 @@ int buckets_distributed_write_chunk(const char *peer_endpoint,
     
     buckets_free(chunk_data_b64);
     
-    /* Call RPC */
+    /* Call RPC - use longer timeout for large chunk transfers */
     buckets_rpc_response_t *response = NULL;
     int ret = buckets_rpc_call(g_rpc_ctx, peer_endpoint, "storage.writeChunk",
-                               params, &response, 30000);  /* 30 second timeout */
+                               params, &response, 300000);  /* 300 second (5 min) timeout for large chunks */
     
     cJSON_Delete(params);
     
@@ -586,4 +596,170 @@ int buckets_distributed_read_xlmeta(const char *peer_endpoint,
                   bucket, object, peer_endpoint, disk_path);
     
     return BUCKETS_OK;
+}
+
+/* ===================================================================
+ * Distributed Delete Operations
+ * ===================================================================*/
+
+/**
+ * Delete object from all distributed disks
+ * 
+ * Looks up placement to find all disks where the object is stored,
+ * then deletes chunks and metadata from each disk (local and remote).
+ */
+int buckets_distributed_delete_object(const char *bucket, const char *object)
+{
+    if (!bucket || !object) {
+        buckets_error("NULL parameter in distributed_delete_object");
+        return -1;
+    }
+    
+    /* Compute placement to find all disks */
+    buckets_placement_result_t *placement = NULL;
+    int ret = buckets_placement_compute(bucket, object, &placement);
+    
+    if (ret != 0 || !placement) {
+        buckets_warn("Could not compute placement for delete: %s/%s", bucket, object);
+        /* Try local-only delete as fallback */
+        return buckets_delete_object(bucket, object);
+    }
+    
+    /* Compute object path (hash-based) */
+    char object_path[PATH_MAX];
+    buckets_compute_object_path(bucket, object, object_path, sizeof(object_path));
+    
+    int deleted_count = 0;
+    int error_count = 0;
+    
+    /* Delete from each disk */
+    for (u32 i = 0; i < placement->disk_count; i++) {
+        const char *disk_endpoint = placement->disk_endpoints[i];
+        const char *disk_path = placement->disk_paths[i];
+        
+        if (!disk_endpoint || !disk_path) {
+            buckets_warn("Distributed delete: NULL endpoint/path for disk %u", i);
+            error_count++;
+            continue;
+        }
+        
+        bool is_local = buckets_distributed_is_local_disk(disk_endpoint);
+        
+        if (is_local) {
+            /* Local delete - delete chunks and xl.meta directly */
+            
+            /* First, try to read xl.meta to get chunk count */
+            buckets_xl_meta_t meta;
+            char meta_path_full[PATH_MAX * 2];
+            snprintf(meta_path_full, sizeof(meta_path_full), "%s/%sxl.meta", disk_path, object_path);
+            
+            if (buckets_read_xl_meta(disk_path, object_path, &meta) == 0) {
+                /* Delete chunks if not inline */
+                if (!meta.inline_data) {
+                    u32 chunk_index = i + 1;  /* This disk's chunk index */
+                    char chunk_path[PATH_MAX * 2];
+                    snprintf(chunk_path, sizeof(chunk_path), "%s/%spart.%u", 
+                             disk_path, object_path, chunk_index);
+                    
+                    if (unlink(chunk_path) == 0) {
+                        buckets_debug("Deleted chunk: %s", chunk_path);
+                    }
+                }
+                buckets_xl_meta_free(&meta);
+            }
+            
+            /* Delete xl.meta */
+            if (unlink(meta_path_full) == 0) {
+                buckets_debug("Deleted xl.meta: %s", meta_path_full);
+                deleted_count++;
+            }
+            
+            /* Try to remove object directory */
+            char dir_path[PATH_MAX * 2];
+            snprintf(dir_path, sizeof(dir_path), "%s/%s", disk_path, object_path);
+            size_t len = strlen(dir_path);
+            if (len > 0 && dir_path[len-1] == '/') {
+                dir_path[len-1] = '\0';
+            }
+            rmdir(dir_path);
+            
+        } else {
+            /* Remote delete via RPC */
+            char node_endpoint[256];
+            buckets_distributed_extract_node_endpoint(disk_endpoint, node_endpoint, sizeof(node_endpoint));
+            
+            /* RPC call to delete chunk */
+            if (buckets_distributed_rpc_delete_chunk(node_endpoint, bucket, object, 
+                                                      i + 1, disk_path) == 0) {
+                deleted_count++;
+            } else {
+                error_count++;
+            }
+        }
+    }
+    
+    /* Delete from registry (only once, not per-disk)
+     * Skip registry delete if this IS a registry entry (to avoid recursion) */
+    if (strcmp(bucket, ".buckets-registry") != 0) {
+        const buckets_registry_config_t *reg_config = buckets_registry_get_config();
+        if (reg_config) {
+            if (buckets_registry_delete(bucket, object, "latest") != 0) {
+                buckets_warn("Failed to delete from registry: %s/%s", bucket, object);
+            }
+        }
+    }
+    
+    buckets_placement_free_result(placement);
+    
+    buckets_info("Distributed delete: %s/%s - deleted from %d disks (%d errors)",
+                 bucket, object, deleted_count, error_count);
+    
+    return (deleted_count > 0) ? 0 : -1;
+}
+
+/**
+ * RPC call to delete chunk from remote peer
+ */
+static int buckets_distributed_rpc_delete_chunk(const char *peer_endpoint,
+                                                 const char *bucket,
+                                                 const char *object,
+                                                 u32 chunk_index,
+                                                 const char *disk_path)
+{
+    if (!g_rpc_ctx || !peer_endpoint || !bucket || !object || !disk_path) {
+        return -1;
+    }
+    
+    /* Build RPC params */
+    cJSON *params = cJSON_CreateObject();
+    cJSON_AddStringToObject(params, "bucket", bucket);
+    cJSON_AddStringToObject(params, "object", object);
+    cJSON_AddNumberToObject(params, "chunk_index", chunk_index);
+    cJSON_AddStringToObject(params, "disk_path", disk_path);
+    
+    /* Make RPC call (5 second timeout) */
+    buckets_rpc_response_t *response = NULL;
+    int ret = buckets_rpc_call(g_rpc_ctx, peer_endpoint, 
+                               "storage.deleteChunk", params, &response, 5000);
+    
+    cJSON_Delete(params);
+    
+    if (ret != 0 || !response) {
+        buckets_error("RPC storage.deleteChunk failed to %s", peer_endpoint);
+        return -1;
+    }
+    
+    if (response->error_code != 0) {
+        buckets_error("Remote deleteChunk failed: %s",
+                     response->error_message ? response->error_message : "unknown");
+        buckets_rpc_response_free(response);
+        return -1;
+    }
+    
+    buckets_rpc_response_free(response);
+    
+    buckets_debug("Distributed delete chunk %u: %s/%s from %s",
+                  chunk_index, bucket, object, peer_endpoint);
+    
+    return 0;
 }
