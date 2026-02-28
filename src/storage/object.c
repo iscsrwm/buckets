@@ -220,7 +220,7 @@ static u8* base64_decode(const char *encoded, size_t *decoded_size)
     return decoded;
 }
 
-/* Put object (write) - with SIPMOD placement and distributed erasure coding */
+/* Put object (write) - with consistent hash placement and distributed erasure coding */
 int buckets_put_object(const char *bucket, const char *object,
                        const void *data, size_t size,
                        const char *content_type)
@@ -391,7 +391,7 @@ int buckets_put_object(const char *bucket, const char *object,
                                        &meta.erasure.checksums[k + i]);
     }
 
-    /* Get disk paths from placement (SIPMOD-based set selection) */
+    /* Get disk paths from placement (consistent hash set selection) */
     char **set_disk_paths = NULL;
     int disk_count = 0;
     

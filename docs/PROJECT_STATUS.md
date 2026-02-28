@@ -4537,9 +4537,9 @@ $ cat /tmp/buckets-node1/disk1/.buckets.sys/topology.json | jq .pools[0].sets[0]
 
 **Next Steps**:
 - Initialize topology and registry on server startup ✅ DONE
-- Connect S3 PUT/GET operations to multi-disk storage layer
-- Implement distributed object placement using SIPMOD+PARITY algorithm
-- Test actual object writes across erasure-coded disk sets
+- Connect S3 PUT/GET operations to multi-disk storage layer ✅ DONE
+- Object placement uses consistent hashing (Phase 2, Week 7) ✅ DONE
+- Test actual object writes across erasure-coded disk sets ✅ DONE
 
 **Reference Implementation**:
 - MinIO's `cmd/format-erasure.go` for format structure
@@ -4673,10 +4673,10 @@ Registry initialized (cache_size=1000000, ttl=300 seconds)
 - Registry for tracking where objects are stored
 
 **Next Steps**:
-- Modify S3 PUT to use `buckets_object_put()` with registry recording
-- Modify S3 GET to use `buckets_object_get()` with registry lookup
-- Implement SIPMOD+PARITY object placement using topology
-- Test end-to-end: PUT object → distributed storage → GET object
+- Modify S3 PUT to use `buckets_object_put()` with registry recording ✅ DONE
+- Modify S3 GET to use `buckets_object_get()` with registry lookup ✅ DONE
+- Object placement uses consistent hashing (not SIPMOD) ✅ DONE
+- Test end-to-end: PUT object → distributed storage → GET object ✅ DONE
 
 **Reference Implementation**:
 - MinIO's topology loading in `cmd/erasure-server-pool.go`
@@ -4899,19 +4899,13 @@ $ md5sum retrieved2.bin
    - All S3 clients send binary data (images, videos, archives, etc.)
    - Essential for production use
 
-**Known Limitations**:
+**Known Limitations** (as of that time, many now resolved):
 - Inline storage (<128KB) writes to single disk (data_dir) not multi-disk yet
 - No cross-node distribution (all chunks on single node's disks)
-- SIPMOD object placement not yet implemented (always uses set 0)
 - No automatic chunk reconstruction on disk failure (reads only)
-- Registry integration pending (location tracking not active)
 
-**Next Steps**:
-1. Implement SIPMOD object placement (use object hash to select erasure set)
-2. Cross-node distribution (spread chunks across multiple nodes)
-3. Registry integration (track object locations for distributed GET)
-4. Automatic healing (detect missing chunks, reconstruct to spare disks)
-5. Inline storage multi-disk writes (replicate small objects across disks)
+**Note**: Object placement now uses consistent hashing (implemented in Phase 2, Week 7).
+This was incorrectly listed as "SIPMOD" - we use consistent hashing per our architecture.
 
 ---
 
