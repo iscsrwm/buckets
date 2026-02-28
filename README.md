@@ -202,170 +202,68 @@ To add capacity, add a complete erasure set (3 more nodes with 12 disks):
 ## Project Status
 
 **Current Phase**: Phase 9 - S3 API Layer (Weeks 35-42) 🔄 In Progress  
-**Progress**: 8 phases complete, Week 35 of 52 (67%)
+**Progress**: 8 phases complete, Week 40 of 52 (77%)
 
-### Completed
+### Completed Phases
 
-- ✅ **Phase 1: Foundation (Weeks 1-4)** - 100% Complete
-  - Core utilities (memory, logging, strings)
-  - Format management (format.json)
-  - Topology management with caching
-  - Endpoint parsing with ellipses expansion
-  - 62 tests passing
-
-- ✅ **Phase 2: Hashing (Weeks 5-7)** - 100% Complete
-  - SipHash-2-4 cryptographic hashing
-  - xxHash-64 fast non-cryptographic hashing
-  - Hash ring with consistent hashing (150 virtual nodes)
-  - Jump Consistent Hash
-  - 49 tests passing
-
-- ✅ **Phase 3: Cryptography & Erasure (Weeks 8-11)** - 100% Complete
-  - BLAKE2b cryptographic hashing (1.6x faster than SHA-256)
-  - SHA-256 (OpenSSL wrapper)
-  - Reed-Solomon erasure coding with Intel ISA-L
-  - 8+4, 12+4, 16+4 configurations tested
-  - Automatic chunk reconstruction
-  - 36 tests passing
-
-- ✅ **Phase 4: Storage Layer (Weeks 12-16)** - 100% Complete
-  - ✅ Object primitives & disk I/O (Week 12)
-  - ✅ Object metadata & versioning (Week 13)
-  - ✅ Multi-disk management & healing (Week 14-16)
-  - MinIO-compatible xl.meta format
-  - S3-compatible versioning with delete markers
-  - Quorum-based reads/writes (N/2+1)
-  - Automatic healing of inconsistent metadata
-  - LRU metadata cache (10K entries)
-  - Performance benchmarks: 5-10 GB/s encode, 27-51 GB/s decode
-  - 33 tests passing
-
-- ✅ **Phase 5: Location Registry (Weeks 17-20)** - 100% Complete
-  - ✅ Registry core implementation (Week 17)
-  - ✅ Batch operations & benchmarks (Week 18)
-  - ✅ Storage layer fixes (Week 19)
-  - ✅ Production integration (Week 20)
-  - Thread-safe LRU cache (1M entries, 5-min TTL)
-  - Write-through cache with persistent storage
-  - Self-hosted on Buckets (.buckets-registry bucket)
-  - Automatic tracking of PUT/GET/DELETE operations
-  - Cache hit latency: 0.323 μs
-  - 15 tests passing (100%)
-
-- ✅ **Phase 6: Topology Management (Weeks 21-24)** - 100% Complete
-  - ✅ Dynamic topology operations (Week 21)
-    - Add pool, add set, state transitions
-    - Generation tracking
-    - 8 tests passing
-  - ✅ Quorum persistence (Week 22)
-    - Write quorum (N/2+1 disks)
-    - Read quorum with consensus (N/2 matching)
-    - 12 tests passing
-  - ✅ Topology manager API (Week 23)
-    - Singleton coordination layer
-    - Automatic quorum persistence
-    - Event callbacks with user data
-    - 11 tests passing
-  - ✅ Integration testing (Week 24)
-    - End-to-end topology change workflows
-    - Critical bug fixes (pool count tracking)
-    - 10 integration tests passing
-
-- ✅ **Phase 7: Background Migration (Weeks 25-30)** - 100% Complete
-  - ✅ Migration scanner (Week 25) - 10 tests passing
-  - ✅ Worker pool (Week 26) - 12 tests passing
-  - ✅ Migration orchestrator (Week 27) - 14 tests passing
-  - ✅ Throttling (Week 28) - 15 tests passing
-  - ✅ Checkpointing (Week 29) - 10 tests passing
-  - ✅ Integration & Recovery (Week 30) - 10 tests passing
-  - **Total**: 71 tests, 100% passing
-
-- ✅ **Phase 8: Network Layer (Weeks 31-34)** - 100% Complete
-  - ✅ HTTP Server Foundation (Week 31)
-    - Mongoose library integration (HTTP/1.1 server)
-    - Thread-based event loop (100ms polling)
-    - Request router with pattern matching
-    - Response helpers (JSON, errors, headers)
-    - 21 tests passing (100%): 13 HTTP server + 11 router - 3 TLS
-  - ✅ TLS & Connection Pooling (Week 32)
-    - OpenSSL TLS support via mongoose
-    - Connection pool for peer communication
-    - Connection lifecycle management
-    - 13 tests passing (100%): 3 TLS + 10 connection pool
-  - ✅ Peer Discovery & Health (Week 33)
-    - Peer grid with UUID-based node IDs
-    - Health checker with periodic heartbeats
-    - Background thread for monitoring
-    - 10 tests passing (100%): peer grid
-  - ✅ RPC & Broadcast (Week 34)
-    - JSON-based RPC message format
-    - Handler registration and dispatch
-    - Broadcast to all peers in grid
-    - 18 tests passing (100%): 12 RPC + 6 broadcast
-  - **Total**: 62 tests, 100% passing
-
-- 🔄 **Phase 9: S3 API Layer (Weeks 35-42)** - 12.5% Complete (Week 35/42)
-  - ✅ S3 PUT/GET Operations (Week 35)
-    - XML response generation (success/error)
-    - AWS Signature V4 authentication framework
-    - PUT/GET/DELETE/HEAD object operations
-    - ETag calculation (MD5 hashing)
-    - Bucket/key validation
-    - File system storage backend (/tmp/buckets-data/)
-    - 12 tests passing (100%): 5 XML + 7 operations
-  - ⏳ Bucket Operations (Week 37) - Planned
-  - ⏳ LIST Objects (Week 38) - Planned
-  - ⏳ Multipart Upload (Weeks 39-40) - Planned
-  - ⏳ Versioning & Metadata (Week 41) - Planned
-  - ⏳ Integration Testing (Week 42) - Planned
+- ✅ **Phase 1-8**: Foundation, Hashing, Crypto/Erasure, Storage, Registry, Topology, Migration, Network
+- ✅ **Phase 9 (Weeks 35-40)**: S3 API with full distributed cluster support
+  - PUT/GET/DELETE/HEAD object operations
+  - Bucket operations (create, delete, list)
+  - LIST objects (v1/v2 with pagination)
+  - Multipart upload (initiate, upload part, complete, abort)
+  - Distributed erasure coding across 6 nodes
+  - libuv-based async HTTP server
+  - s3cmd client compatibility verified
 
 ### Current Stats
 
-- **Production Code**: ~19,597 lines
-  - Core: 255 lines
-  - Cluster: 3,050 lines (+420 manager)
-  - Hash: 920 lines
-  - Crypto: 527 lines
-  - Erasure: 546 lines
-  - Storage: 4,171 lines
-  - Registry: 1,266 lines
-  - Migration: 2,222 lines
-  - Network: 4,484 lines (server 361+58, router 179, pool 432, grid 326, health 305, rpc 552, broadcast 150, header 725, mongoose 991KB)
-  - S3 API: 1,252 lines (xml 195, auth 374, handler 293, ops 390)
-  - Benchmarks: 618 lines
-- **Test Code**: ~10,542 lines
+- **Production Code**: ~22,600 lines
+- **Test Code**: ~10,600 lines  
 - **Test Coverage**: 305/306 tests passing (99.7%)
-  - Foundation: 62 tests
-  - Hashing: 49 tests
-  - Crypto & Erasure: 36 tests
-  - Storage: 33 tests
-  - Registry: 15 tests
-  - Topology: 31 tests
-  - Migration: 61 tests (scanner 10, worker 12, orchestrator 14, throttle 15, checkpoint 10)
-  - Network: 62 tests (HTTP 13, router 11, pool 10, grid 10, RPC 12, broadcast 6)
-  - S3 API: 12 tests (xml 5, operations 7)
-  - Storage Integration: 5 tests
 - **Build**: Clean with `-Wall -Wextra -Werror -pedantic`
-- **Library Size**: ~340KB (includes ISA-L, mongoose)
 
-### Performance Highlights
+See [ROADMAP.md](ROADMAP.md) for detailed timeline and [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) for comprehensive progress.
+
+## Performance Benchmarks
+
+Benchmarks run on a **6-node cluster** with K=8, M=4 erasure coding (24 disks total).
+
+### Operations Per Second
+
+| Size | PUT | GET | HEAD | DELETE |
+|------|-----|-----|------|--------|
+| 1KB | 54.52 | 113.94 | 94.24 | 1.29 |
+| 4KB | 54.99 | 96.43 | 105.38 | 1.15 |
+| 16KB | 53.24 | 92.72 | 117.60 | 1.16 |
+| 64KB | 49.86 | 82.86 | 95.99 | 1.21 |
+| 256KB | 10.27 | 61.79 | 70.19 | 1.17 |
+| 1MB | 10.37 | 51.65 | 62.45 | 1.12 |
+| 4MB | 0.86 | 28.42 | 36.96 | 1.15 |
+
+### Throughput
+
+| Size | Upload | Download |
+|------|--------|----------|
+| 1MB | 10.37 MB/s | 51.65 MB/s |
+| 5MB | 4.25 MB/s | 121.95 MB/s |
+| 10MB | 8.23 MB/s | 166.66 MB/s |
+| 25MB | 18.68 MB/s | 179.85 MB/s |
+| 50MB | 32.65 MB/s | 193.79 MB/s |
+
+### Key Observations
+
+- **Small objects (≤64KB)**: Use inline storage, ~50 PUT ops/s, ~100 GET ops/s
+- **Large objects (≥256KB)**: Trigger erasure coding with 12-chunk distribution
+- **Downloads scale linearly**: Near 200 MB/s throughput for large files
+- **100% data integrity**: All MD5 checksums verified across tests
+
+### Internal Performance
 
 - **Erasure Coding**: 5-10 GB/s encode, 27-51 GB/s decode (Intel ISA-L)
 - **Hashing**: BLAKE2b 880 MB/s (1.6x faster than SHA-256)
-- **Reconstruction**: 31-52 GB/s with missing disks
-- **Registry Lookups**: 0.323 μs cache hit, ~1-5ms cache miss
+- **Registry Lookups**: 0.323 μs cache hit
 - **RPC Latency**: <10ms for local peers
-- **Broadcast**: <100ms to 10 peers
-
-### Next Up
-
-- Week 35: S3 API Layer (GET/PUT operations)
-  - Implement S3 bucket and object operations
-  - XML request/response parsing
-  - Authentication and authorization
-  - Integration with storage layer
-
-See [ROADMAP.md](ROADMAP.md) for detailed development timeline and [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) for comprehensive progress tracking.
 
 ## Comparison with MinIO
 

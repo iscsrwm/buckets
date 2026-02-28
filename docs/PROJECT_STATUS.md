@@ -1,9 +1,9 @@
 # Buckets Project Status
 
-**Last Updated**: February 27, 2026  
+**Last Updated**: February 27, 2026 (Night)  
 **Current Phase**: Phase 9 - S3 API Layer (Weeks 35-42) - 🔄 In Progress  
 **Current Week**: Week 40 ✅ COMPLETE + libuv HTTP Server Migration (All Phases Complete) ✅  
-**Status**: 🟢 Active Development - Full S3 API on libuv with streaming uploads!  
+**Status**: 🟢 Active Development - Performance Benchmark Complete!  
 **Overall Progress**: 40/52 weeks (77% complete)  
 **Phase 1 Status**: ✅ COMPLETE (Foundation - Weeks 1-4)  
 **Phase 2 Status**: ✅ COMPLETE (Hashing - Weeks 5-7)  
@@ -17,7 +17,155 @@
 
 ---
 
-## 🎉 Latest Achievement: 6-Node Cluster Regression Test - PASSED!
+## 🎉 Latest Achievement: Performance Benchmark Complete!
+
+**Date**: February 27, 2026 (Night)
+
+### Bug Fix: libuv Handle Close Race Condition
+
+Fixed a critical bug that caused cluster nodes to crash under concurrent RPC load:
+
+**Symptom**: Nodes crashed with assertion failure:
+```
+buckets: third_party/libuv/src/unix/core.c:302: uv__finish_close: Assertion `handle->flags & UV_HANDLE_CLOSING' failed.
+```
+
+**Root Cause**: In `uv_http_conn_close()`, both the TCP handle and timer handle were closed, but only the TCP handle had a close callback. When the TCP callback fired, it freed the connection structure - but the timer handle might still be in libuv's closing queue. When libuv later tried to finish closing the timer, the memory was already freed.
+
+**Fix** (`src/net/uv_server.c` and `src/net/uv_server_internal.h`):
+1. Added `pending_close_count` field to track how many handles are pending close
+2. Both handles now use the same `on_handle_close` callback
+3. Connection is only freed when ALL handles have finished closing
+
+### Performance Benchmark Results
+
+**Configuration**: 6-node cluster, K=8/M=4 erasure coding, 24 disks total
+
+| Size (MB) | Upload Time | Upload Speed | Download Time | Download Speed | Integrity |
+|-----------|-------------|--------------|---------------|----------------|-----------|
+| 1 | 0.113s | 8.84 MB/s | 0.023s | 43.47 MB/s | PASS |
+| 2 | 1.126s | 1.77 MB/s | 0.035s | 57.14 MB/s | PASS |
+| 5 | 1.176s | 4.25 MB/s | 0.041s | 121.95 MB/s | PASS |
+| 10 | 1.214s | 8.23 MB/s | 0.060s | 166.66 MB/s | PASS |
+| 25 | 1.338s | 18.68 MB/s | 0.139s | 179.85 MB/s | PASS |
+| 50 | 1.531s | 32.65 MB/s | 0.258s | 193.79 MB/s | PASS |
+
+**Concurrent Upload Tests**:
+- 5x 2MB: 6.47 MB/s aggregate
+- 10x 2MB: 9.89 MB/s aggregate  
+- 5x 5MB: 15.49 MB/s aggregate
+
+**Key Observations**:
+1. **Download performance excellent**: Scales linearly with file size, reaching ~194 MB/s for 50MB files
+2. **Upload has fixed overhead**: ~1 second base time regardless of file size (RPC/encoding overhead)
+3. **Large file uploads efficient**: 50MB at 32.65 MB/s, throughput improves with size
+4. **100% data integrity**: All MD5 checksums verified
+5. **Cluster stability**: All 6 nodes remained operational throughout testing
+
+### Operations Per Second Benchmark
+
+Detailed ops/sec measurements across different object sizes:
+
+**Operations Per Second**:
+| Size | PUT | GET | HEAD | DELETE |
+|------|-----|-----|------|--------|
+| 1KB | 54.52 | 113.94 | 94.24 | 1.29 |
+| 4KB | 54.99 | 96.43 | 105.38 | 1.15 |
+| 16KB | 53.24 | 92.72 | 117.60 | 1.16 |
+| 64KB | 49.86 | 82.86 | 95.99 | 1.21 |
+| 256KB | 10.27 | 61.79 | 70.19 | 1.17 |
+| 1MB | 10.37 | 51.65 | 62.45 | 1.12 |
+| 4MB | 0.86 | 28.42 | 36.96 | 1.15 |
+
+**Average Latency (ms)**:
+| Size | PUT | GET | HEAD | DELETE |
+|------|-----|-----|------|--------|
+| 1KB | 18.3 | 8.7 | 10.6 | 769.7 |
+| 4KB | 18.1 | 10.3 | 9.4 | 868.7 |
+| 16KB | 18.7 | 10.7 | 8.5 | 854.9 |
+| 64KB | 20.0 | 12.0 | 10.4 | 820.7 |
+| 256KB | 97.2 | 16.1 | 14.2 | 852.8 |
+| 1MB | 96.4 | 19.3 | 16.0 | 885.7 |
+| 4MB | 1157.7 | 35.1 | 27.0 | 869.3 |
+
+**Throughput (MB/s)**:
+| Size | PUT | GET |
+|------|-----|-----|
+| 1KB | 0.05 | 0.11 |
+| 4KB | 0.21 | 0.37 |
+| 16KB | 0.83 | 1.44 |
+| 64KB | 3.11 | 5.17 |
+| 256KB | 2.56 | 15.44 |
+| 1MB | 10.37 | 51.65 |
+| 4MB | 3.45 | 113.68 |
+
+**Analysis**:
+1. **Small objects (≤64KB)**: Use inline storage path, achieving ~50 PUT ops/s and ~100 GET ops/s
+2. **Large objects (≥256KB)**: Trigger erasure coding with 12-chunk distribution across nodes
+3. **PUT latency cliff at 256KB**: Transition from inline to erasure-coded storage adds ~80ms
+4. **GET scales well**: 4MB objects achieve 113 MB/s throughput
+5. **HEAD is fast**: Metadata-only operation, ~100 ops/s for small objects
+6. **DELETE is slow (~1 ops/s)**: Deletes all 12 shards across nodes - needs optimization
+
+---
+
+## Previous Achievement: s3cmd Multipart Upload Now Working!
+
+**Date**: February 27, 2026 (Night)
+
+Fixed query string parsing bug that prevented multipart uploads from working with s3cmd client:
+
+### The Bug
+When s3cmd attempted to initiate multipart upload with `POST /bucket/key?uploads`, the server returned `400 InvalidRequest` instead of initiating the upload.
+
+**Root Cause**: The HTTP server sets `query_string` to point at the `?` character (e.g., `?uploads`), but the S3 handler's query parsing code didn't skip the leading `?`. This caused the query parameter key to be stored as `?uploads` instead of `uploads`, so `has_query_param(req, "uploads")` always returned false.
+
+**Fix**: Added check to skip leading `?` in query string parsing (`src/s3/s3_handler.c:152-154`):
+```c
+/* Skip leading '?' if present */
+if (query[0] == '?') {
+    query++;
+}
+```
+
+### Verified s3cmd Operations
+| Operation | Status | Details |
+|-----------|--------|---------|
+| List buckets | ✅ PASS | `s3cmd ls` |
+| Create bucket | ✅ PASS | `s3cmd mb s3://bucket` |
+| Upload small file (<15MB) | ✅ PASS | Single PUT |
+| Upload large file (>15MB) | ✅ PASS | Multipart upload (4 parts × 5MB) |
+| Download files | ✅ PASS | MD5 verified matches |
+| Delete objects | ✅ PASS | `s3cmd del` |
+| List objects | ✅ PASS | `s3cmd ls s3://bucket/` |
+| HEAD object | ✅ PASS | ETag, Content-Length, Last-Modified |
+
+### Test Results
+Uploaded 20MB file using multipart upload with 5MB chunks:
+- InitiateMultipartUpload: ✅ HTTP 200, UploadId returned
+- UploadPart (×4): ✅ HTTP 200, ETags returned for each part
+- CompleteMultipartUpload: ✅ HTTP 200, final ETag `"ce30602cefc0ae206caf04ff3ffd6a25-4"`
+- Download: ✅ MD5 matches original (`ce30602cefc0ae206caf04ff3ffd6a25`)
+
+---
+
+## Previous Achievement: All 6-Node Cluster Issues FIXED!
+
+**Date**: February 27, 2026 (Evening)
+
+All three issues discovered during 6-node cluster regression testing have been fixed:
+
+| Issue | Status | Fix |
+|-------|--------|-----|
+| LIST Objects returns NoSuchBucket | ✅ FIXED | Implemented `buckets_registry_list()` |
+| DELETE Object doesn't delete shards | ✅ FIXED | Implemented `buckets_distributed_delete_object()` |
+| GET non-existent object crashes server | ✅ FIXED | Added recursion guard in `buckets_get_object()` |
+
+The cluster is now fully operational with complete S3 compatibility for all tested operations.
+
+---
+
+## Previous Achievement: 6-Node Cluster Regression Test - PASSED!
 
 **Date**: February 27, 2026  
 **Milestone**: Full 6-node cluster regression test with libuv HTTP server
@@ -82,10 +230,14 @@ Disabled all 4 parity shards (parts 9-12) to simulate node failure:
    - Added recursion guard to prevent infinite loop when deleting registry entries
 
 **Current Known Issues**:
-1. **GET on non-existent object**: Server crashes when trying to GET an object that doesn't exist
-   - Occurs after DELETE when client tries to verify object is gone
-   - Crash happens in distributed read path when contacting remote nodes
-   - Tracked for future fix (does not affect normal operations)
+1. ~~**GET on non-existent object**: Server crashes when trying to GET an object that doesn't exist~~ → **FIXED** (February 27, 2026)
+   - **Root Cause**: Infinite recursion between `buckets_get_object()` and `buckets_registry_lookup()`
+   - When getting an object, `buckets_get_object()` calls `buckets_registry_lookup()` to find location
+   - On cache miss, `buckets_registry_lookup()` calls `buckets_get_object()` to read from `.buckets-registry` bucket
+   - This created infinite recursion causing stack overflow
+   - **Fix**: Skip registry lookup when reading from `.buckets-registry` bucket itself
+   - **Location**: `src/storage/object.c:573` - added `skip_registry` check
+   - **Result**: GET on non-existent objects now returns 404 correctly without crash
 
 ---
 

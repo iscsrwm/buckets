@@ -3,9 +3,11 @@
 
 # Compiler and flags
 CC := gcc
-CFLAGS := -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -pedantic -O2 -fPIC
-LDFLAGS := -lssl -lcrypto -luuid -lz -lisal -lpthread -lm
-INCLUDES := -Iinclude -Isrc -Ithird_party/cJSON -Ithird_party/mongoose
+# NOTE: Mongoose removed - now using libuv-based HTTP server
+CFLAGS := -std=c11 -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -Wall -Wextra -Werror -pedantic -O2 -fPIC
+LDFLAGS := -lssl -lcrypto -luuid -lz -lisal -lpthread -lm -ldl -lrt
+INCLUDES := -Iinclude -Isrc -Ithird_party/cJSON \
+            -Ithird_party/libuv/include -Ithird_party/llhttp/include
 
 # Debug flags
 DEBUG_FLAGS := -g -O0 -DDEBUG -fsanitize=address -fsanitize=undefined
@@ -29,17 +31,63 @@ ERASURE_SRC := $(wildcard $(SRC_DIR)/erasure/*.c)
 STORAGE_SRC := $(wildcard $(SRC_DIR)/storage/*.c)
 REGISTRY_SRC := $(wildcard $(SRC_DIR)/registry/*.c)
 TOPOLOGY_SRC := $(wildcard $(SRC_DIR)/topology/*.c)
+PLACEMENT_SRC := $(wildcard $(SRC_DIR)/placement/*.c)
 MIGRATION_SRC := $(wildcard $(SRC_DIR)/migration/*.c)
 NET_SRC := $(wildcard $(SRC_DIR)/net/*.c)
 S3_SRC := $(wildcard $(SRC_DIR)/s3/*.c)
 ADMIN_SRC := $(wildcard $(SRC_DIR)/admin/*.c)
 CONFIG_SRC := $(wildcard $(SRC_DIR)/config/*.c)
 CJSON_SRC := third_party/cJSON/cJSON.c
-MONGOOSE_SRC := third_party/mongoose/mongoose.c
+# MONGOOSE_SRC removed - using libuv-based http_server_uv.c instead
+
+# libuv sources (Linux)
+LIBUV_DIR := third_party/libuv
+LIBUV_SRC := $(LIBUV_DIR)/src/fs-poll.c \
+             $(LIBUV_DIR)/src/idna.c \
+             $(LIBUV_DIR)/src/inet.c \
+             $(LIBUV_DIR)/src/random.c \
+             $(LIBUV_DIR)/src/strscpy.c \
+             $(LIBUV_DIR)/src/strtok.c \
+             $(LIBUV_DIR)/src/thread-common.c \
+             $(LIBUV_DIR)/src/threadpool.c \
+             $(LIBUV_DIR)/src/timer.c \
+             $(LIBUV_DIR)/src/uv-common.c \
+             $(LIBUV_DIR)/src/uv-data-getter-setters.c \
+             $(LIBUV_DIR)/src/version.c \
+             $(LIBUV_DIR)/src/unix/async.c \
+             $(LIBUV_DIR)/src/unix/core.c \
+             $(LIBUV_DIR)/src/unix/dl.c \
+             $(LIBUV_DIR)/src/unix/fs.c \
+             $(LIBUV_DIR)/src/unix/getaddrinfo.c \
+             $(LIBUV_DIR)/src/unix/getnameinfo.c \
+             $(LIBUV_DIR)/src/unix/loop-watcher.c \
+             $(LIBUV_DIR)/src/unix/loop.c \
+             $(LIBUV_DIR)/src/unix/pipe.c \
+             $(LIBUV_DIR)/src/unix/poll.c \
+             $(LIBUV_DIR)/src/unix/process.c \
+             $(LIBUV_DIR)/src/unix/random-devurandom.c \
+             $(LIBUV_DIR)/src/unix/signal.c \
+             $(LIBUV_DIR)/src/unix/stream.c \
+             $(LIBUV_DIR)/src/unix/tcp.c \
+             $(LIBUV_DIR)/src/unix/thread.c \
+             $(LIBUV_DIR)/src/unix/tty.c \
+             $(LIBUV_DIR)/src/unix/udp.c \
+             $(LIBUV_DIR)/src/unix/linux.c \
+             $(LIBUV_DIR)/src/unix/procfs-exepath.c \
+             $(LIBUV_DIR)/src/unix/proctitle.c \
+             $(LIBUV_DIR)/src/unix/random-getrandom.c \
+             $(LIBUV_DIR)/src/unix/random-sysctl-linux.c
+
+# llhttp sources
+LLHTTP_DIR := third_party/llhttp
+LLHTTP_SRC := $(LLHTTP_DIR)/src/api.c \
+              $(LLHTTP_DIR)/src/http.c \
+              $(LLHTTP_DIR)/src/llhttp.c
 
 ALL_SRC := $(CORE_SRC) $(CLUSTER_SRC) $(HASH_SRC) $(CRYPTO_SRC) $(ERASURE_SRC) \
-           $(STORAGE_SRC) $(REGISTRY_SRC) $(TOPOLOGY_SRC) $(MIGRATION_SRC) \
-           $(NET_SRC) $(S3_SRC) $(ADMIN_SRC) $(CONFIG_SRC) $(CJSON_SRC) $(MONGOOSE_SRC)
+           $(STORAGE_SRC) $(REGISTRY_SRC) $(TOPOLOGY_SRC) $(PLACEMENT_SRC) $(MIGRATION_SRC) \
+           $(NET_SRC) $(S3_SRC) $(ADMIN_SRC) $(CONFIG_SRC) $(CJSON_SRC) \
+           $(LIBUV_SRC) $(LLHTTP_SRC)
 
 # Object files
 CORE_OBJ := $(CORE_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
@@ -50,17 +98,61 @@ ERASURE_OBJ := $(ERASURE_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 STORAGE_OBJ := $(STORAGE_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 REGISTRY_OBJ := $(REGISTRY_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 TOPOLOGY_OBJ := $(TOPOLOGY_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+PLACEMENT_OBJ := $(PLACEMENT_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 MIGRATION_OBJ := $(MIGRATION_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 NET_OBJ := $(NET_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 S3_OBJ := $(S3_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 ADMIN_OBJ := $(ADMIN_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 CONFIG_OBJ := $(CONFIG_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 CJSON_OBJ := $(OBJ_DIR)/cJSON.o
-MONGOOSE_OBJ := $(OBJ_DIR)/mongoose.o
+# MONGOOSE_OBJ removed - using libuv-based HTTP server
+
+# libuv object files
+LIBUV_OBJ := $(OBJ_DIR)/libuv/fs-poll.o \
+             $(OBJ_DIR)/libuv/idna.o \
+             $(OBJ_DIR)/libuv/inet.o \
+             $(OBJ_DIR)/libuv/random.o \
+             $(OBJ_DIR)/libuv/strscpy.o \
+             $(OBJ_DIR)/libuv/strtok.o \
+             $(OBJ_DIR)/libuv/thread-common.o \
+             $(OBJ_DIR)/libuv/threadpool.o \
+             $(OBJ_DIR)/libuv/timer.o \
+             $(OBJ_DIR)/libuv/uv-common.o \
+             $(OBJ_DIR)/libuv/uv-data-getter-setters.o \
+             $(OBJ_DIR)/libuv/version.o \
+             $(OBJ_DIR)/libuv/unix/async.o \
+             $(OBJ_DIR)/libuv/unix/core.o \
+             $(OBJ_DIR)/libuv/unix/dl.o \
+             $(OBJ_DIR)/libuv/unix/fs.o \
+             $(OBJ_DIR)/libuv/unix/getaddrinfo.o \
+             $(OBJ_DIR)/libuv/unix/getnameinfo.o \
+             $(OBJ_DIR)/libuv/unix/loop-watcher.o \
+             $(OBJ_DIR)/libuv/unix/loop.o \
+             $(OBJ_DIR)/libuv/unix/pipe.o \
+             $(OBJ_DIR)/libuv/unix/poll.o \
+             $(OBJ_DIR)/libuv/unix/process.o \
+             $(OBJ_DIR)/libuv/unix/random-devurandom.o \
+             $(OBJ_DIR)/libuv/unix/signal.o \
+             $(OBJ_DIR)/libuv/unix/stream.o \
+             $(OBJ_DIR)/libuv/unix/tcp.o \
+             $(OBJ_DIR)/libuv/unix/thread.o \
+             $(OBJ_DIR)/libuv/unix/tty.o \
+             $(OBJ_DIR)/libuv/unix/udp.o \
+             $(OBJ_DIR)/libuv/unix/linux.o \
+             $(OBJ_DIR)/libuv/unix/procfs-exepath.o \
+             $(OBJ_DIR)/libuv/unix/proctitle.o \
+             $(OBJ_DIR)/libuv/unix/random-getrandom.o \
+             $(OBJ_DIR)/libuv/unix/random-sysctl-linux.o
+
+# llhttp object files
+LLHTTP_OBJ := $(OBJ_DIR)/llhttp/api.o \
+              $(OBJ_DIR)/llhttp/http.o \
+              $(OBJ_DIR)/llhttp/llhttp.o
 
 ALL_OBJ := $(CORE_OBJ) $(CLUSTER_OBJ) $(HASH_OBJ) $(CRYPTO_OBJ) $(ERASURE_OBJ) \
-           $(STORAGE_OBJ) $(REGISTRY_OBJ) $(TOPOLOGY_OBJ) $(MIGRATION_OBJ) \
-           $(NET_OBJ) $(S3_OBJ) $(ADMIN_OBJ) $(CONFIG_OBJ) $(CJSON_OBJ) $(MONGOOSE_OBJ)
+           $(STORAGE_OBJ) $(REGISTRY_OBJ) $(TOPOLOGY_OBJ) $(PLACEMENT_OBJ) $(MIGRATION_OBJ) \
+           $(NET_OBJ) $(S3_OBJ) $(ADMIN_OBJ) $(CONFIG_OBJ) $(CJSON_OBJ) \
+           $(LIBUV_OBJ) $(LLHTTP_OBJ)
 
 # Test files
 TEST_SRC := $(wildcard $(TEST_DIR)/**/*.c)
@@ -109,8 +201,9 @@ directories:
 	@mkdir -p $(BUILD_DIR) $(BIN_DIR) $(OBJ_DIR) $(TEST_BIN_DIR)
 	@mkdir -p $(OBJ_DIR)/core $(OBJ_DIR)/cluster $(OBJ_DIR)/hash $(OBJ_DIR)/crypto
 	@mkdir -p $(OBJ_DIR)/erasure $(OBJ_DIR)/storage $(OBJ_DIR)/registry
-	@mkdir -p $(OBJ_DIR)/topology $(OBJ_DIR)/migration $(OBJ_DIR)/net
+	@mkdir -p $(OBJ_DIR)/topology $(OBJ_DIR)/placement $(OBJ_DIR)/migration $(OBJ_DIR)/net
 	@mkdir -p $(OBJ_DIR)/s3 $(OBJ_DIR)/admin $(OBJ_DIR)/config
+	@mkdir -p $(OBJ_DIR)/libuv $(OBJ_DIR)/libuv/unix $(OBJ_DIR)/llhttp
 	@mkdir -p $(TEST_BIN_DIR)/net $(TEST_BIN_DIR)/migration $(TEST_BIN_DIR)/s3
 
 # Library target
@@ -141,10 +234,28 @@ $(OBJ_DIR)/cJSON.o: third_party/cJSON/cJSON.c
 	@echo "CC $<"
 	@$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
-# Compile mongoose (relaxed warnings for third-party code, with OpenSSL TLS)
-$(OBJ_DIR)/mongoose.o: third_party/mongoose/mongoose.c
+# Mongoose removed - using libuv-based HTTP server (http_server_uv.c)
+
+# Compile libuv (relaxed warnings for third-party code)
+LIBUV_CFLAGS := -std=c11 -D_GNU_SOURCE -D_POSIX_C_SOURCE=200112 -O2 -fPIC -fvisibility=hidden \
+                -Wno-unused-parameter -Wno-sign-compare \
+                -Ithird_party/libuv/include -Ithird_party/libuv/src
+
+$(OBJ_DIR)/libuv/%.o: third_party/libuv/src/%.c
 	@echo "CC $<"
-	@$(CC) -std=gnu11 -D_GNU_SOURCE -DMG_TLS=2 -DMG_ENABLE_OPENSSL=1 -O2 -fPIC -Wno-unused-variable -Wno-implicit-function-declaration -Wno-int-to-pointer-cast -Ithird_party/mongoose -c $< -o $@
+	@$(CC) $(LIBUV_CFLAGS) -c $< -o $@
+
+$(OBJ_DIR)/libuv/unix/%.o: third_party/libuv/src/unix/%.c
+	@echo "CC $<"
+	@$(CC) $(LIBUV_CFLAGS) -c $< -o $@
+
+# Compile llhttp (relaxed warnings for third-party code)
+LLHTTP_CFLAGS := -std=c11 -O2 -fPIC -Wno-unused-parameter \
+                 -Ithird_party/llhttp/include
+
+$(OBJ_DIR)/llhttp/%.o: third_party/llhttp/src/%.c
+	@echo "CC $<"
+	@$(CC) $(LLHTTP_CFLAGS) -c $< -o $@
 
 # Component-specific builds
 .PHONY: core cluster hash crypto erasure storage registry topology migration net s3 admin

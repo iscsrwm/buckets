@@ -3,6 +3,7 @@
     "id": "node3",
     "address": "localhost",
     "port": 9003,
+    "endpoint": "http://localhost:9003",
     "data_dir": "/tmp/buckets-node3"
   },
   "storage": {
@@ -17,15 +18,17 @@
     "enabled": true,
     "peers": [
       "localhost:9001",
-      "localhost:9002"
+      "localhost:9002",
+      "localhost:9004",
+      "localhost:9005"
     ],
     "sets": 1,
-    "disks_per_set": 4
+    "disks_per_set": 20
   },
   "erasure": {
     "enabled": true,
-    "data_shards": 2,
-    "parity_shards": 2
+    "data_shards": 8,
+    "parity_shards": 4
   },
   "server": {
     "bind_address": "0.0.0.0",

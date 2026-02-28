@@ -866,6 +866,7 @@ int buckets_multidisk_scrub_set(int set_index, bool auto_heal);
  */
 int buckets_parallel_write_chunks(const char *bucket,
                                    const char *object,
+                                   const char *object_path,
                                    buckets_placement_result_t *placement,
                                    const void **chunk_data_array,
                                    size_t chunk_size,
@@ -880,6 +881,7 @@ int buckets_parallel_write_chunks(const char *bucket,
  * 
  * @param bucket Bucket name
  * @param object Object key
+ * @param object_path Hashed object path (prefix/hash/)
  * @param placement Placement result with disk endpoints
  * @param chunk_data_array Output: Array of chunk data pointers (caller must free each)
  * @param chunk_sizes_array Output: Array of chunk sizes
@@ -888,6 +890,7 @@ int buckets_parallel_write_chunks(const char *bucket,
  */
 int buckets_parallel_read_chunks(const char *bucket,
                                   const char *object,
+                                  const char *object_path,
                                   buckets_placement_result_t *placement,
                                   void **chunk_data_array,
                                   size_t *chunk_sizes_array,
@@ -917,6 +920,63 @@ int buckets_parallel_write_metadata(const char *bucket,
                                      const buckets_xl_meta_t *base_meta,
                                      u32 num_disks,
                                      bool has_endpoints);
+
+/* ===================================================================
+ * Binary Chunk Transport
+ * 
+ * Efficient binary transport for chunk data between nodes.
+ * Uses HTTP with raw binary body instead of base64-encoded JSON.
+ * ===================================================================*/
+
+/**
+ * Write chunk to remote node using binary transport
+ * 
+ * @param peer_endpoint Remote node endpoint (e.g., "http://localhost:9002")
+ * @param bucket Bucket name
+ * @param object Object key
+ * @param chunk_index Chunk index (1-based)
+ * @param chunk_data Chunk data
+ * @param chunk_size Chunk size
+ * @param disk_path Disk path on remote node
+ * @return BUCKETS_OK on success
+ */
+int buckets_binary_write_chunk(const char *peer_endpoint,
+                                const char *bucket,
+                                const char *object,
+                                u32 chunk_index,
+                                const void *chunk_data,
+                                size_t chunk_size,
+                                const char *disk_path);
+
+/**
+ * Read chunk from remote node using binary transport
+ * 
+ * @param peer_endpoint Remote node endpoint
+ * @param bucket Bucket name
+ * @param object Object key
+ * @param chunk_index Chunk index (1-based)
+ * @param chunk_data Output: chunk data (caller must free)
+ * @param chunk_size Output: chunk size
+ * @param disk_path Disk path on remote node
+ * @return BUCKETS_OK on success
+ */
+int buckets_binary_read_chunk(const char *peer_endpoint,
+                               const char *bucket,
+                               const char *object,
+                               u32 chunk_index,
+                               void **chunk_data,
+                               size_t *chunk_size,
+                               const char *disk_path);
+
+/**
+ * Register binary chunk transport handlers with HTTP server
+ * 
+ * @param server HTTP server handle
+ * @return BUCKETS_OK on success
+ */
+struct buckets_http_server;
+typedef struct buckets_http_server buckets_http_server_t;
+int buckets_binary_transport_register(buckets_http_server_t *server);
 
 #ifdef __cplusplus
 }

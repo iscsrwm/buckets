@@ -487,6 +487,97 @@ static int rpc_handler_read_xlmeta(const char *method,
 }
 
 /* ===================================================================
+ * RPC Method: storage.deleteChunk
+ * 
+ * Deletes a chunk and xl.meta from local disk on behalf of remote node.
+ * 
+ * Request params:
+ * {
+ *   "bucket": "my-bucket",
+ *   "object": "my-object",
+ *   "chunk_index": 1,
+ *   "disk_path": "/tmp/buckets-node2/disk1"
+ * }
+ * 
+ * Response result:
+ * {
+ *   "success": true
+ * }
+ * ===================================================================*/
+
+static int rpc_handler_delete_chunk(const char *method, cJSON *params, cJSON **result,
+                                     int *error_code, char *error_message,
+                                     void *user_data)
+{
+    (void)method;
+    (void)user_data;
+    
+    if (!params || !result || !error_code || !error_message) {
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    /* Extract params */
+    cJSON *bucket_json = cJSON_GetObjectItem(params, "bucket");
+    cJSON *object_json = cJSON_GetObjectItem(params, "object");
+    cJSON *chunk_index_json = cJSON_GetObjectItem(params, "chunk_index");
+    cJSON *disk_path_json = cJSON_GetObjectItem(params, "disk_path");
+    
+    if (!bucket_json || !cJSON_IsString(bucket_json) ||
+        !object_json || !cJSON_IsString(object_json) ||
+        !chunk_index_json || !cJSON_IsNumber(chunk_index_json) ||
+        !disk_path_json || !cJSON_IsString(disk_path_json)) {
+        *error_code = -1;
+        snprintf(error_message, 256, "Missing required params");
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    const char *bucket = bucket_json->valuestring;
+    const char *object = object_json->valuestring;
+    u32 chunk_index = (u32)chunk_index_json->valueint;
+    const char *disk_path = disk_path_json->valuestring;
+    
+    /* Compute object path */
+    char object_path[PATH_MAX];
+    buckets_compute_object_path(bucket, object, object_path, sizeof(object_path));
+    
+    int deleted = 0;
+    
+    /* Delete chunk file */
+    char chunk_path[PATH_MAX * 2];
+    snprintf(chunk_path, sizeof(chunk_path), "%s/%spart.%u", disk_path, object_path, chunk_index);
+    if (unlink(chunk_path) == 0) {
+        buckets_debug("RPC deleteChunk: deleted chunk %s", chunk_path);
+        deleted++;
+    }
+    
+    /* Delete xl.meta */
+    char meta_path[PATH_MAX * 2];
+    snprintf(meta_path, sizeof(meta_path), "%s/%sxl.meta", disk_path, object_path);
+    if (unlink(meta_path) == 0) {
+        buckets_debug("RPC deleteChunk: deleted xl.meta %s", meta_path);
+        deleted++;
+    }
+    
+    /* Try to remove object directory */
+    char dir_path[PATH_MAX * 2];
+    snprintf(dir_path, sizeof(dir_path), "%s/%s", disk_path, object_path);
+    size_t len = strlen(dir_path);
+    if (len > 0 && dir_path[len-1] == '/') {
+        dir_path[len-1] = '\0';
+    }
+    rmdir(dir_path);
+    
+    /* Build success response */
+    *result = cJSON_CreateObject();
+    cJSON_AddBoolToObject(*result, "success", deleted > 0);
+    
+    buckets_debug("RPC deleteChunk: %s/%s chunk %u from %s - deleted=%d",
+                  bucket, object, chunk_index, disk_path, deleted);
+    
+    return BUCKETS_OK;
+}
+
+/* ===================================================================
  * Initialization
  * ===================================================================*/
 
@@ -528,6 +619,14 @@ int buckets_distributed_rpc_init(buckets_rpc_context_t *rpc_ctx)
                                        rpc_handler_read_xlmeta, NULL);
     if (ret != BUCKETS_OK) {
         buckets_error("Failed to register storage.readXlMeta handler");
+        return ret;
+    }
+    
+    /* Register deleteChunk handler */
+    ret = buckets_rpc_register_handler(rpc_ctx, "storage.deleteChunk",
+                                       rpc_handler_delete_chunk, NULL);
+    if (ret != BUCKETS_OK) {
+        buckets_error("Failed to register storage.deleteChunk handler");
         return ret;
     }
     

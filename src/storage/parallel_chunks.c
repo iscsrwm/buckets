@@ -25,6 +25,7 @@ typedef struct {
     u32 chunk_index;           /* 1-based chunk index */
     char bucket[256];          /* Bucket name */
     char object[1024];         /* Object key */
+    char object_path[1536];    /* Hashed object path (prefix/hash/) */
     char disk_path[512];       /* Disk path (local or for RPC) */
     char node_endpoint[256];   /* Node endpoint for RPC */
     bool is_local;             /* True if local write, false if RPC */
@@ -57,11 +58,8 @@ static void* chunk_write_worker(void *arg)
         extern int buckets_write_chunk(const char *disk_path, const char *object_path,
                                        u32 chunk_index, const void *data, size_t size);
         
-        /* Construct object path */
-        char object_path[1536];
-        snprintf(object_path, sizeof(object_path), "%s/%s", task->bucket, task->object);
-        
-        task->result = buckets_write_chunk(task->disk_path, object_path, 
+        /* Use the pre-computed hashed object path from task */
+        task->result = buckets_write_chunk(task->disk_path, task->object_path, 
                                           task->chunk_index, task->chunk_data, 
                                           task->chunk_size);
         
@@ -73,28 +71,28 @@ static void* chunk_write_worker(void *arg)
                          task->chunk_index, task->disk_path);
         }
     } else {
-        /* Remote RPC write */
-        extern int buckets_distributed_write_chunk(const char *peer_endpoint,
-                                                   const char *bucket,
-                                                   const char *object,
-                                                   u32 chunk_index,
-                                                   const void *chunk_data,
-                                                   size_t chunk_size,
-                                                   const char *disk_path);
+        /* Remote binary write (much faster than JSON RPC) */
+        extern int buckets_binary_write_chunk(const char *peer_endpoint,
+                                              const char *bucket,
+                                              const char *object,
+                                              u32 chunk_index,
+                                              const void *chunk_data,
+                                              size_t chunk_size,
+                                              const char *disk_path);
         
-        task->result = buckets_distributed_write_chunk(task->node_endpoint,
-                                                      task->bucket,
-                                                      task->object,
-                                                      task->chunk_index,
-                                                      task->chunk_data,
-                                                      task->chunk_size,
-                                                      task->disk_path);
+        task->result = buckets_binary_write_chunk(task->node_endpoint,
+                                                  task->bucket,
+                                                  task->object,
+                                                  task->chunk_index,
+                                                  task->chunk_data,
+                                                  task->chunk_size,
+                                                  task->disk_path);
         
         if (task->result == 0) {
-            buckets_debug("Parallel: Wrote chunk %u via RPC to %s:%s",
+            buckets_debug("Parallel: Wrote chunk %u via binary transport to %s:%s",
                          task->chunk_index, task->node_endpoint, task->disk_path);
         } else {
-            buckets_error("Parallel: Failed to write chunk %u via RPC to %s:%s",
+            buckets_error("Parallel: Failed to write chunk %u via binary transport to %s:%s",
                          task->chunk_index, task->node_endpoint, task->disk_path);
         }
     }
@@ -114,14 +112,11 @@ static void* chunk_read_worker(void *arg)
         extern int buckets_read_chunk(const char *disk_path, const char *object_path,
                                       u32 chunk_index, void **data, size_t *size);
         
-        /* Construct object path */
-        char object_path[1536];
-        snprintf(object_path, sizeof(object_path), "%s/%s", task->bucket, task->object);
-        
         void *chunk_data = NULL;
         size_t chunk_size = 0;
         
-        task->result = buckets_read_chunk(task->disk_path, object_path,
+        /* Use the pre-computed hashed object path from task */
+        task->result = buckets_read_chunk(task->disk_path, task->object_path,
                                          task->chunk_index, &chunk_data, &chunk_size);
         
         if (task->result == 0) {
@@ -134,33 +129,33 @@ static void* chunk_read_worker(void *arg)
                          task->chunk_index, task->disk_path);
         }
     } else {
-        /* Remote RPC read */
-        extern int buckets_distributed_read_chunk(const char *peer_endpoint,
-                                                  const char *bucket,
-                                                  const char *object,
-                                                  u32 chunk_index,
-                                                  void **chunk_data,
-                                                  size_t *chunk_size,
-                                                  const char *disk_path);
+        /* Remote binary read (much faster than JSON RPC) */
+        extern int buckets_binary_read_chunk(const char *peer_endpoint,
+                                             const char *bucket,
+                                             const char *object,
+                                             u32 chunk_index,
+                                             void **chunk_data,
+                                             size_t *chunk_size,
+                                             const char *disk_path);
         
         void *chunk_data = NULL;
         size_t chunk_size = 0;
         
-        task->result = buckets_distributed_read_chunk(task->node_endpoint,
-                                                     task->bucket,
-                                                     task->object,
-                                                     task->chunk_index,
-                                                     &chunk_data,
-                                                     &chunk_size,
-                                                     task->disk_path);
+        task->result = buckets_binary_read_chunk(task->node_endpoint,
+                                                 task->bucket,
+                                                 task->object,
+                                                 task->chunk_index,
+                                                 &chunk_data,
+                                                 &chunk_size,
+                                                 task->disk_path);
         
         if (task->result == 0) {
             task->chunk_data_out = chunk_data;
             task->chunk_size = chunk_size;
-            buckets_debug("Parallel: Read chunk %u via RPC from %s:%s (size=%zu)",
+            buckets_debug("Parallel: Read chunk %u via binary transport from %s:%s (size=%zu)",
                          task->chunk_index, task->node_endpoint, task->disk_path, chunk_size);
         } else {
-            buckets_error("Parallel: Failed to read chunk %u via RPC from %s:%s",
+            buckets_error("Parallel: Failed to read chunk %u via binary transport from %s:%s",
                          task->chunk_index, task->node_endpoint, task->disk_path);
         }
     }
@@ -185,12 +180,13 @@ static void* chunk_read_worker(void *arg)
  */
 int buckets_parallel_write_chunks(const char *bucket,
                                    const char *object,
+                                   const char *object_path,
                                    buckets_placement_result_t *placement,
                                    const void **chunk_data_array,
                                    size_t chunk_size,
                                    u32 num_chunks)
 {
-    if (!bucket || !object || !placement || !chunk_data_array) {
+    if (!bucket || !object || !object_path || !placement || !chunk_data_array) {
         buckets_error("Invalid parameters for parallel write");
         return -1;
     }
@@ -220,6 +216,7 @@ int buckets_parallel_write_chunks(const char *bucket,
         task->chunk_index = i + 1;
         strncpy(task->bucket, bucket, sizeof(task->bucket) - 1);
         strncpy(task->object, object, sizeof(task->object) - 1);
+        strncpy(task->object_path, object_path, sizeof(task->object_path) - 1);
         strncpy(task->disk_path, placement->disk_paths[i], sizeof(task->disk_path) - 1);
         
         task->chunk_data = chunk_data_array[i];
@@ -295,12 +292,13 @@ int buckets_parallel_write_chunks(const char *bucket,
  */
 int buckets_parallel_read_chunks(const char *bucket,
                                   const char *object,
+                                  const char *object_path,
                                   buckets_placement_result_t *placement,
                                   void **chunk_data_array,
                                   size_t *chunk_sizes_array,
                                   u32 num_chunks)
 {
-    if (!bucket || !object || !placement || !chunk_data_array || !chunk_sizes_array) {
+    if (!bucket || !object || !object_path || !placement || !chunk_data_array || !chunk_sizes_array) {
         buckets_error("Invalid parameters for parallel read");
         return -1;
     }
@@ -330,6 +328,7 @@ int buckets_parallel_read_chunks(const char *bucket,
         task->chunk_index = i + 1;
         strncpy(task->bucket, bucket, sizeof(task->bucket) - 1);
         strncpy(task->object, object, sizeof(task->object) - 1);
+        strncpy(task->object_path, object_path, sizeof(task->object_path) - 1);
         strncpy(task->disk_path, placement->disk_paths[i], sizeof(task->disk_path) - 1);
         
         task->chunk_data_out = NULL;

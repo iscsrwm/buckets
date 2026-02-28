@@ -3,11 +3,41 @@
 **Status**: ✅ **PARALLEL RPC COMPLETE** (February 27, 2026)  
 **Implementation**: Production-ready for concurrent distributed chunk I/O  
 **Testing**: Verified with 6-node cluster, parallel writes/reads to 12 disks across 3 nodes  
-**Performance**: 12× potential speedup vs sequential RPC (50ms concurrent vs 600ms sequential)
+**Performance**: See benchmark results below
 
 ## Overview
 
 This document describes how Buckets implements **parallel cross-node chunk distribution** for erasure-coded objects. When an erasure set spans multiple nodes, chunks are written and read **concurrently** via threaded RPC calls to remote nodes, maximizing throughput and minimizing latency.
+
+## Performance Benchmarks (February 27, 2026)
+
+### Throughput by File Size
+
+| Size | Upload Speed | Download Speed | Integrity |
+|------|--------------|----------------|-----------|
+| 1MB | 10.37 MB/s | 51.65 MB/s | PASS |
+| 5MB | 4.25 MB/s | 121.95 MB/s | PASS |
+| 10MB | 8.23 MB/s | 166.66 MB/s | PASS |
+| 25MB | 18.68 MB/s | 179.85 MB/s | PASS |
+| 50MB | 32.65 MB/s | 193.79 MB/s | PASS |
+
+### Operations Per Second
+
+| Size | PUT | GET | HEAD |
+|------|-----|-----|------|
+| 1KB | 54.52 | 113.94 | 94.24 |
+| 64KB | 49.86 | 82.86 | 95.99 |
+| 256KB | 10.27 | 61.79 | 70.19 |
+| 1MB | 10.37 | 51.65 | 62.45 |
+| 4MB | 0.86 | 28.42 | 36.96 |
+
+### Key Findings
+
+1. **Small objects (≤64KB)** use inline storage, achieving ~50 PUT ops/s and ~100 GET ops/s
+2. **Large objects (≥256KB)** trigger erasure coding with 12-chunk distribution
+3. **Download scales linearly** with file size, reaching ~194 MB/s for 50MB files
+4. **Upload has fixed overhead** of ~80-100ms for erasure encoding + parallel RPC setup
+5. **100% data integrity** verified across all test sizes
 
 ## Implementation Status
 

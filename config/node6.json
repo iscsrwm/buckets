@@ -1,0 +1,38 @@
+{
+  "node": {
+    "id": "node6",
+    "address": "localhost",
+    "port": 9006,
+    "endpoint": "http://localhost:9006",
+    "data_dir": "/tmp/buckets-6node/node6"
+  },
+  "storage": {
+    "disks": [
+      "/tmp/buckets-6node/node6/disk1",
+      "/tmp/buckets-6node/node6/disk2",
+      "/tmp/buckets-6node/node6/disk3",
+      "/tmp/buckets-6node/node6/disk4"
+    ]
+  },
+  "cluster": {
+    "enabled": true,
+    "peers": [
+      "localhost:9001",
+      "localhost:9002",
+      "localhost:9003",
+      "localhost:9004",
+      "localhost:9005"
+    ],
+    "sets": 2,
+    "disks_per_set": 12
+  },
+  "erasure": {
+    "enabled": true,
+    "data_shards": 8,
+    "parity_shards": 4
+  },
+  "server": {
+    "bind_address": "0.0.0.0",
+    "bind_port": 9006
+  }
+}

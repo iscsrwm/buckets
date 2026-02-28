@@ -11,6 +11,7 @@
 #include <ctype.h>
 #include <unistd.h>
 #include <limits.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <dirent.h>
@@ -27,6 +28,34 @@
 /* ===================================================================
  * Utility Functions
  * ===================================================================*/
+
+/**
+ * Get bucket path (try multi-disk first, fallback to single-disk)
+ * Returns 0 if found, -1 if not found
+ */
+static int get_bucket_path(const char *bucket, char *path, size_t path_len)
+{
+    extern int buckets_get_data_dir(char *data_dir, size_t size);
+    char data_dir[512];
+    if (buckets_get_data_dir(data_dir, sizeof(data_dir)) != 0) {
+        snprintf(data_dir, sizeof(data_dir), "/tmp/buckets-data");
+    }
+    
+    /* Try multi-disk path first */
+    snprintf(path, path_len, "%s/disk1/%s", data_dir, bucket);
+    struct stat st;
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+        return 0;
+    }
+    
+    /* Try single-disk path */
+    snprintf(path, path_len, "%s/%s", data_dir, bucket);
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+        return 0;
+    }
+    
+    return -1;  /* Not found */
+}
 
 int buckets_s3_calculate_etag(const void *data, size_t len, char *etag)
 {
@@ -285,16 +314,17 @@ int buckets_s3_delete_object(buckets_s3_request_t *req, buckets_s3_response_t *r
         return BUCKETS_OK;
     }
     
-    /* Delete object file */
-    char object_path[3072];
-    snprintf(object_path, sizeof(object_path), "/tmp/buckets-data/%s/%s",
-             req->bucket, req->key);
+    /* Use distributed delete (handles multi-disk and RPC deletion) */
+    extern int buckets_distributed_delete_object(const char *bucket, const char *object);
+    int ret = buckets_distributed_delete_object(req->bucket, req->key);
     
-    if (remove(object_path) != 0) {
-        /* Object might not exist - S3 DELETE is idempotent */
-        buckets_debug("DELETE object not found: %s/%s", req->bucket, req->key);
+    if (ret != 0) {
+        /* Object might not exist - S3 DELETE is idempotent, so we still return 204 */
+        buckets_debug("DELETE object (distributed): %s/%s - not found or error", 
+                      req->bucket, req->key);
     } else {
-        buckets_debug("DELETE object: %s/%s", req->bucket, req->key);
+        buckets_info("DELETE object (distributed): %s/%s - deleted successfully", 
+                     req->bucket, req->key);
     }
     
     /* DELETE always returns 204 No Content (success) */
@@ -356,9 +386,16 @@ int buckets_s3_put_bucket(buckets_s3_request_t *req, buckets_s3_response_t *res)
                                      req->bucket);
     }
     
-    /* Create bucket directory */
+    /* Get data directory */
+    extern int buckets_get_data_dir(char *data_dir, size_t size);
+    char data_dir[512];
+    if (buckets_get_data_dir(data_dir, sizeof(data_dir)) != 0) {
+        snprintf(data_dir, sizeof(data_dir), "/tmp/buckets-data");
+    }
+    
+    /* Create bucket directory on all disks (try disk1 first, then fallback to data_dir root) */
     char bucket_path[2048];
-    snprintf(bucket_path, sizeof(bucket_path), "/tmp/buckets-data/%s", req->bucket);
+    snprintf(bucket_path, sizeof(bucket_path), "%s/disk1/%s", data_dir, req->bucket);
     
     /* Check if bucket already exists */
     struct stat st;
@@ -370,14 +407,28 @@ int buckets_s3_put_bucket(buckets_s3_request_t *req, buckets_s3_response_t *res)
                                          "Your previous request to create the named bucket succeeded and you already own it",
                                          req->bucket);
         }
+    } else {
+        /* Try single-disk mode path */
+        snprintf(bucket_path, sizeof(bucket_path), "%s/%s", data_dir, req->bucket);
+        if (stat(bucket_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+            /* Bucket exists in single-disk mode */
+            return buckets_s3_xml_error(res, "BucketAlreadyOwnedByYou",
+                                         "Your previous request to create the named bucket succeeded and you already own it",
+                                         req->bucket);
+        }
     }
     
-    /* Create bucket directory */
-    if (mkdir(bucket_path, 0755) != 0) {
-        buckets_error("Failed to create bucket directory: %s", bucket_path);
-        return buckets_s3_xml_error(res, "InternalError",
-                                     "Failed to create bucket",
-                                     req->bucket);
+    /* Create bucket directory (try multi-disk first) */
+    snprintf(bucket_path, sizeof(bucket_path), "%s/disk1/%s", data_dir, req->bucket);
+    if (mkdir(bucket_path, 0755) != 0 && errno != EEXIST) {
+        /* Multi-disk failed, try single-disk mode */
+        snprintf(bucket_path, sizeof(bucket_path), "%s/%s", data_dir, req->bucket);
+        if (mkdir(bucket_path, 0755) != 0 && errno != EEXIST) {
+            buckets_error("Failed to create bucket directory: %s", bucket_path);
+            return buckets_s3_xml_error(res, "InternalError",
+                                         "Failed to create bucket",
+                                         req->bucket);
+        }
     }
     
     buckets_info("Created bucket: %s", req->bucket);
@@ -404,10 +455,7 @@ int buckets_s3_delete_bucket(buckets_s3_request_t *req, buckets_s3_response_t *r
     
     /* Check if bucket exists */
     char bucket_path[2048];
-    snprintf(bucket_path, sizeof(bucket_path), "/tmp/buckets-data/%s", req->bucket);
-    
-    struct stat st;
-    if (stat(bucket_path, &st) != 0) {
+    if (get_bucket_path(req->bucket, bucket_path, sizeof(bucket_path)) != 0) {
         /* Bucket doesn't exist - return 404 */
         return buckets_s3_xml_error(res, "NoSuchBucket",
                                      "The specified bucket does not exist",
@@ -473,10 +521,7 @@ int buckets_s3_head_bucket(buckets_s3_request_t *req, buckets_s3_response_t *res
     
     /* Check if bucket exists */
     char bucket_path[2048];
-    snprintf(bucket_path, sizeof(bucket_path), "/tmp/buckets-data/%s", req->bucket);
-    
-    struct stat st;
-    if (stat(bucket_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
+    if (get_bucket_path(req->bucket, bucket_path, sizeof(bucket_path)) != 0) {
         /* Bucket doesn't exist - return 404 */
         return buckets_s3_xml_error(res, "NoSuchBucket",
                                      "The specified bucket does not exist",
@@ -499,8 +544,23 @@ int buckets_s3_list_buckets(buckets_s3_request_t *req, buckets_s3_response_t *re
         return BUCKETS_ERR_INVALID_ARG;
     }
     
-    /* Open buckets data directory */
-    DIR *dir = opendir("/tmp/buckets-data");
+    /* Get data directory */
+    extern int buckets_get_data_dir(char *data_dir, size_t size);
+    char data_dir[512];
+    if (buckets_get_data_dir(data_dir, sizeof(data_dir)) != 0) {
+        snprintf(data_dir, sizeof(data_dir), "/tmp/buckets-data");
+    }
+    
+    /* Try multi-disk mode first (disk1 subdirectory) */
+    char buckets_dir[1024];
+    snprintf(buckets_dir, sizeof(buckets_dir), "%s/disk1", data_dir);
+    DIR *dir = opendir(buckets_dir);
+    if (!dir) {
+        /* Try single-disk mode */
+        snprintf(buckets_dir, sizeof(buckets_dir), "%s", data_dir);
+        dir = opendir(buckets_dir);
+    }
+    
     if (!dir) {
         /* No buckets exist yet - return empty list */
         buckets_debug("LIST buckets: directory doesn't exist, returning empty list");
@@ -546,10 +606,15 @@ int buckets_s3_list_buckets(buckets_s3_request_t *req, buckets_s3_response_t *re
         
         /* Check if it's a directory */
         char bucket_path[2048];
-        snprintf(bucket_path, sizeof(bucket_path), "/tmp/buckets-data/%s", entry->d_name);
+        snprintf(bucket_path, sizeof(bucket_path), "%s/%s", buckets_dir, entry->d_name);
         
         struct stat st;
         if (stat(bucket_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            continue;
+        }
+        
+        /* Skip hidden directories and special dirs */
+        if (entry->d_name[0] == '.') {
             continue;
         }
         
@@ -629,7 +694,93 @@ static const char* get_query_param(buckets_s3_request_t *req, const char *key)
 }
 
 /**
- * Collect and sort objects from directory
+ * Collect and sort objects from registry
+ * Returns number of objects collected, or -1 on error
+ * 
+ * This is the primary method for listing objects - uses the location registry
+ * to find all objects in a bucket, which works with hash-based storage paths.
+ */
+static int collect_objects_from_registry(const char *bucket, 
+                                          const char *prefix,
+                                          object_entry_t **objects,
+                                          int *capacity)
+{
+    buckets_object_location_t **locations = NULL;
+    size_t location_count = 0;
+    
+    /* Query registry for all objects in this bucket */
+    int ret = buckets_registry_list(bucket, prefix, 0, &locations, &location_count);
+    if (ret != 0 || locations == NULL) {
+        /* Registry query failed - bucket may not exist or no objects */
+        if (location_count == 0) {
+            /* Empty bucket - return empty list, not error */
+            int cap = 1;
+            object_entry_t *objs = buckets_calloc(cap, sizeof(object_entry_t));
+            if (!objs) return -1;
+            *objects = objs;
+            *capacity = cap;
+            return 0;
+        }
+        return -1;
+    }
+    
+    /* Convert registry locations to object entries */
+    int cap = (int)location_count > 0 ? (int)location_count : 1;
+    object_entry_t *objs = buckets_calloc(cap, sizeof(object_entry_t));
+    if (!objs) {
+        /* Free locations */
+        for (size_t i = 0; i < location_count; i++) {
+            buckets_registry_location_free(locations[i]);
+        }
+        buckets_free(locations);
+        return -1;
+    }
+    
+    int count = 0;
+    for (size_t i = 0; i < location_count; i++) {
+        if (!locations[i] || !locations[i]->object) {
+            buckets_registry_location_free(locations[i]);
+            continue;
+        }
+        
+        /* Skip duplicates (keep only "latest" version) */
+        if (locations[i]->version_id && 
+            strcmp(locations[i]->version_id, "latest") != 0) {
+            buckets_registry_location_free(locations[i]);
+            continue;
+        }
+        
+        /* Copy object info */
+        strncpy(objs[count].name, locations[i]->object, sizeof(objs[count].name) - 1);
+        objs[count].name[sizeof(objs[count].name) - 1] = '\0';
+        
+        /* Create synthetic stat from registry info */
+        memset(&objs[count].st, 0, sizeof(struct stat));
+        objs[count].st.st_size = (off_t)locations[i]->size;
+        objs[count].st.st_mtime = locations[i]->mod_time;
+        objs[count].st.st_mode = S_IFREG | 0644;
+        
+        count++;
+        buckets_registry_location_free(locations[i]);
+    }
+    buckets_free(locations);
+    
+    /* Sort lexicographically */
+    if (count > 0) {
+        qsort(objs, count, sizeof(object_entry_t), compare_objects);
+    }
+    
+    *objects = objs;
+    *capacity = cap;
+    
+    buckets_debug("collect_objects_from_registry: bucket=%s, prefix=%s, found=%d",
+                  bucket, prefix ? prefix : "(none)", count);
+    
+    return count;
+}
+
+/**
+ * Collect and sort objects from directory (fallback for non-registry buckets)
  * Returns number of objects collected, or -1 on error
  */
 static int collect_sorted_objects(const char *bucket_path, 
@@ -702,40 +853,6 @@ static int collect_sorted_objects(const char *bucket_path,
 }
 
 /**
- * Calculate ETag for an object (MD5 of content, or fallback to mtime)
- */
-static void calculate_object_etag(const char *object_path, struct stat *st, char *etag, size_t etag_size)
-{
-    FILE *fp = fopen(object_path, "rb");
-    if (fp) {
-        fseek(fp, 0, SEEK_END);
-        long fsize = ftell(fp);
-        fseek(fp, 0, SEEK_SET);
-        
-        if (fsize > 0 && fsize < 10485760) { /* Only for files < 10MB */
-            unsigned char *content = buckets_malloc(fsize);
-            if (content && fread(content, 1, fsize, fp) == (size_t)fsize) {
-                char md5_hex[33];
-                buckets_s3_calculate_etag(content, fsize, md5_hex);
-                snprintf(etag, etag_size, "\"%s\"", md5_hex);
-                buckets_free(content);
-            } else {
-                /* Fallback to mtime-based ETag */
-                snprintf(etag, etag_size, "\"%016lx\"", (unsigned long)st->st_mtime);
-                if (content) buckets_free(content);
-            }
-        } else {
-            /* Fallback for large files */
-            snprintf(etag, etag_size, "\"%016lx\"", (unsigned long)st->st_mtime);
-        }
-        fclose(fp);
-    } else {
-        /* Fallback if can't open file */
-        snprintf(etag, etag_size, "\"%016lx\"", (unsigned long)st->st_mtime);
-    }
-}
-
-/**
  * Parse integer query parameter (returns default if not found or invalid)
  */
 static int get_query_param_int(buckets_s3_request_t *req, const char *key, int default_value)
@@ -786,18 +903,22 @@ int buckets_s3_list_objects_v1(buckets_s3_request_t *req, buckets_s3_response_t 
         max_keys = 1000; /* S3 limit */
     }
     
-    /* Check if bucket exists and collect sorted objects */
-    char bucket_path[2048];
-    snprintf(bucket_path, sizeof(bucket_path), "/tmp/buckets-data/%s", req->bucket);
-    
+    /* Collect objects from registry (primary) or filesystem (fallback) */
     object_entry_t *objects = NULL;
     int capacity = 0;
-    int total_objects = collect_sorted_objects(bucket_path, prefix, &objects, &capacity);
+    int total_objects = collect_objects_from_registry(req->bucket, prefix, &objects, &capacity);
     
     if (total_objects < 0) {
-        return buckets_s3_xml_error(res, "NoSuchBucket",
-                                     "The specified bucket does not exist",
-                                     req->bucket);
+        /* Registry failed - try filesystem fallback */
+        char bucket_path[2048];
+        snprintf(bucket_path, sizeof(bucket_path), "/tmp/buckets-data/%s", req->bucket);
+        total_objects = collect_sorted_objects(bucket_path, prefix, &objects, &capacity);
+        
+        if (total_objects < 0) {
+            return buckets_s3_xml_error(res, "NoSuchBucket",
+                                         "The specified bucket does not exist",
+                                         req->bucket);
+        }
     }
     
     /* Build XML response */
@@ -838,18 +959,16 @@ int buckets_s3_list_objects_v1(buckets_s3_request_t *req, buckets_s3_response_t 
             continue;
         }
         
-        /* Build object path for ETag calculation */
-        char object_path[3072];
-        snprintf(object_path, sizeof(object_path), "%s/%s", bucket_path, objects[i].name);
-        
         /* Format timestamp */
         char timestamp[64];
         struct tm *tm_info = gmtime(&objects[i].st.st_mtime);
         strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000Z", tm_info);
         
-        /* Calculate ETag */
+        /* Generate ETag from size + mtime (registry doesn't store actual ETag) */
         char etag[64];
-        calculate_object_etag(object_path, &objects[i].st, etag, sizeof(etag));
+        snprintf(etag, sizeof(etag), "\"%016lx%08lx\"", 
+                 (unsigned long)objects[i].st.st_size,
+                 (unsigned long)objects[i].st.st_mtime);
         
         /* Add object to XML */
         offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,
@@ -946,18 +1065,22 @@ int buckets_s3_list_objects_v2(buckets_s3_request_t *req, buckets_s3_response_t 
     /* continuation-token takes precedence over start-after */
     const char *marker = continuation_token ? continuation_token : start_after;
     
-    /* Check if bucket exists and collect sorted objects */
-    char bucket_path[2048];
-    snprintf(bucket_path, sizeof(bucket_path), "/tmp/buckets-data/%s", req->bucket);
-    
+    /* Collect objects from registry (primary) or filesystem (fallback) */
     object_entry_t *objects = NULL;
     int capacity = 0;
-    int total_objects = collect_sorted_objects(bucket_path, prefix, &objects, &capacity);
+    int total_objects = collect_objects_from_registry(req->bucket, prefix, &objects, &capacity);
     
     if (total_objects < 0) {
-        return buckets_s3_xml_error(res, "NoSuchBucket",
-                                     "The specified bucket does not exist",
-                                     req->bucket);
+        /* Registry failed - try filesystem fallback */
+        char bucket_path[2048];
+        snprintf(bucket_path, sizeof(bucket_path), "/tmp/buckets-data/%s", req->bucket);
+        total_objects = collect_sorted_objects(bucket_path, prefix, &objects, &capacity);
+        
+        if (total_objects < 0) {
+            return buckets_s3_xml_error(res, "NoSuchBucket",
+                                         "The specified bucket does not exist",
+                                         req->bucket);
+        }
     }
     
     /* Build XML response (v2 format) */
@@ -1014,18 +1137,16 @@ int buckets_s3_list_objects_v2(buckets_s3_request_t *req, buckets_s3_response_t 
             continue;
         }
         
-        /* Build object path for ETag calculation */
-        char object_path[3072];
-        snprintf(object_path, sizeof(object_path), "%s/%s", bucket_path, objects[i].name);
-        
         /* Format timestamp */
         char timestamp[64];
         struct tm *tm_info = gmtime(&objects[i].st.st_mtime);
         strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000Z", tm_info);
         
-        /* Calculate ETag */
+        /* Generate ETag from size + mtime (registry doesn't store actual ETag) */
         char etag[64];
-        calculate_object_etag(object_path, &objects[i].st, etag, sizeof(etag));
+        snprintf(etag, sizeof(etag), "\"%016lx%08lx\"", 
+                 (unsigned long)objects[i].st.st_size,
+                 (unsigned long)objects[i].st.st_mtime);
         
         /* Add object to XML */
         offset += snprintf(xml_body + offset, sizeof(xml_body) - offset,

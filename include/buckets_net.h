@@ -19,6 +19,9 @@ extern "C" {
 
 #include "buckets.h"
 
+/* Forward declarations */
+typedef struct buckets_router buckets_router_t;
+
 /* ===================================================================
  * HTTP Server (Week 31)
  * ===================================================================*/
@@ -77,6 +80,24 @@ buckets_http_server_t* buckets_http_server_create(const char *addr, int port);
 int buckets_http_server_set_default_handler(buckets_http_server_t *server,
                                               buckets_http_handler_t handler,
                                               void *user_data);
+
+/**
+ * Set router for URL matching
+ * 
+ * @param server Server handle
+ * @param router Router handle
+ * @return BUCKETS_OK on success
+ */
+int buckets_http_server_set_router(buckets_http_server_t *server,
+                                    buckets_router_t *router);
+
+/**
+ * Get router from server
+ * 
+ * @param server Server handle
+ * @return Router handle or NULL if not set
+ */
+buckets_router_t* buckets_http_server_get_router(buckets_http_server_t *server);
 
 /**
  * Start HTTP server
@@ -717,6 +738,91 @@ int buckets_rpc_broadcast(buckets_rpc_context_t *ctx,
  * @param result Broadcast result
  */
 void buckets_broadcast_result_free(buckets_broadcast_result_t *result);
+
+/* ===================================================================
+ * UV HTTP Server (Streaming Support)
+ * ===================================================================*/
+
+/**
+ * UV HTTP server (opaque) - libuv-based with streaming body support
+ * 
+ * Use this server for large uploads that need streaming body processing
+ * to avoid buffering entire request bodies in memory.
+ */
+typedef struct uv_http_server uv_http_server_t;
+
+/**
+ * Create UV HTTP server
+ * 
+ * @param addr Address to bind (e.g., "0.0.0.0" or "127.0.0.1")
+ * @param port Port to listen on (e.g., 9000)
+ * @return Server handle or NULL on error
+ */
+uv_http_server_t* uv_http_server_create(const char *addr, int port);
+
+/**
+ * Enable TLS on UV server
+ * 
+ * @param server Server handle
+ * @param cert_file Path to certificate file (PEM)
+ * @param key_file Path to private key file (PEM)
+ * @return BUCKETS_OK on success
+ */
+int uv_http_server_enable_tls(uv_http_server_t *server,
+                               const char *cert_file,
+                               const char *key_file);
+
+/**
+ * Start UV HTTP server (runs in background thread)
+ * 
+ * @param server Server handle
+ * @return BUCKETS_OK on success
+ */
+int uv_http_server_start(uv_http_server_t *server);
+
+/**
+ * Stop UV HTTP server
+ * 
+ * @param server Server handle
+ * @return BUCKETS_OK on success
+ */
+int uv_http_server_stop(uv_http_server_t *server);
+
+/**
+ * Free UV HTTP server
+ * 
+ * @param server Server handle
+ */
+void uv_http_server_free(uv_http_server_t *server);
+
+/* ===================================================================
+ * Streaming S3 Handler (for UV server)
+ * ===================================================================*/
+
+/**
+ * Initialize streaming S3 subsystem
+ * 
+ * Must be called before using streaming S3 handlers.
+ * 
+ * @return BUCKETS_OK on success
+ */
+int s3_streaming_init_default(void);
+
+/**
+ * Cleanup streaming S3 subsystem
+ */
+void s3_streaming_cleanup(void);
+
+/**
+ * Register streaming S3 handlers with UV server
+ * 
+ * Registers streaming PUT handler for /bucket/object paths.
+ * Non-streaming operations (GET, DELETE, etc.) use legacy handler.
+ * 
+ * @param server UV server handle
+ * @return BUCKETS_OK on success
+ */
+int s3_streaming_register_handlers(uv_http_server_t *server);
 
 #ifdef __cplusplus
 }

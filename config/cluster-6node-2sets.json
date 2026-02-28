@@ -1,0 +1,69 @@
+{
+  "deployment_id": "cluster-6node-2sets",
+  "nodes": [
+    {
+      "id": "node1",
+      "endpoint": "http://localhost:9001",
+      "disks": [
+        "/tmp/buckets-6node/node1/disk1",
+        "/tmp/buckets-6node/node1/disk2",
+        "/tmp/buckets-6node/node1/disk3",
+        "/tmp/buckets-6node/node1/disk4"
+      ]
+    },
+    {
+      "id": "node2",
+      "endpoint": "http://localhost:9002",
+      "disks": [
+        "/tmp/buckets-6node/node2/disk1",
+        "/tmp/buckets-6node/node2/disk2",
+        "/tmp/buckets-6node/node2/disk3",
+        "/tmp/buckets-6node/node2/disk4"
+      ]
+    },
+    {
+      "id": "node3",
+      "endpoint": "http://localhost:9003",
+      "disks": [
+        "/tmp/buckets-6node/node3/disk1",
+        "/tmp/buckets-6node/node3/disk2",
+        "/tmp/buckets-6node/node3/disk3",
+        "/tmp/buckets-6node/node3/disk4"
+      ]
+    },
+    {
+      "id": "node4",
+      "endpoint": "http://localhost:9004",
+      "disks": [
+        "/tmp/buckets-6node/node4/disk1",
+        "/tmp/buckets-6node/node4/disk2",
+        "/tmp/buckets-6node/node4/disk3",
+        "/tmp/buckets-6node/node4/disk4"
+      ]
+    },
+    {
+      "id": "node5",
+      "endpoint": "http://localhost:9005",
+      "disks": [
+        "/tmp/buckets-6node/node5/disk1",
+        "/tmp/buckets-6node/node5/disk2",
+        "/tmp/buckets-6node/node5/disk3",
+        "/tmp/buckets-6node/node5/disk4"
+      ]
+    },
+    {
+      "id": "node6",
+      "endpoint": "http://localhost:9006",
+      "disks": [
+        "/tmp/buckets-6node/node6/disk1",
+        "/tmp/buckets-6node/node6/disk2",
+        "/tmp/buckets-6node/node6/disk3",
+        "/tmp/buckets-6node/node6/disk4"
+      ]
+    }
+  ],
+  "erasure": {
+    "data_shards": 8,
+    "parity_shards": 4
+  }
+}

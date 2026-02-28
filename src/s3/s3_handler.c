@@ -148,6 +148,10 @@ int buckets_s3_parse_request(buckets_http_request_t *http_req,
     /* Parse query string (simple implementation) */
     const char *query = http_req->query_string;
     if (query && query[0] != '\0') {
+        /* Skip leading '?' if present */
+        if (query[0] == '?') {
+            query++;
+        }
         /* Count parameters */
         int count = 1;
         for (const char *p = query; *p; p++) {
@@ -263,6 +267,17 @@ void buckets_s3_handler(buckets_http_request_t *req,
                         void *user_data)
 {
     (void)user_data;
+    
+    /* Check for RPC endpoint */
+    if (req->uri && strcmp(req->uri, "/rpc") == 0) {
+        buckets_info("RPC request received: method=%s, uri=%s, body_len=%zu",
+                     req->method ? req->method : "NULL", req->uri, req->body_len);
+        /* Forward to RPC handler */
+        extern void buckets_rpc_http_handler(buckets_http_request_t *req,
+                                             buckets_http_response_t *res);
+        buckets_rpc_http_handler(req, res);
+        return;
+    }
     
     /* Parse S3 request */
     buckets_s3_request_t *s3_req = NULL;
@@ -395,10 +410,21 @@ void buckets_s3_handler(buckets_http_request_t *req,
         buckets_http_response_set_header(res, "ETag", s3_res->etag);
     }
     
+    if (s3_res->last_modified[0] != '\0') {
+        buckets_http_response_set_header(res, "Last-Modified", s3_res->last_modified);
+    }
+    
     if (s3_res->content_type[0] != '\0') {
         buckets_http_response_set_header(res, "Content-Type", s3_res->content_type);
     } else {
         buckets_http_response_set_header(res, "Content-Type", "application/xml");
+    }
+    
+    /* For HEAD requests, set body_len from s3_res->content_length 
+     * so the HTTP layer uses it for Content-Length header.
+     * We don't send body for HEAD, but Content-Length should be object size. */
+    if (strcmp(method, "HEAD") == 0 && s3_res->content_length > 0) {
+        res->body_len = (size_t)s3_res->content_length;
     }
     
     /* Cleanup */

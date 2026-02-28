@@ -43,6 +43,8 @@ static void print_usage(const char *progname) {
     printf("Server Options:\n");
     printf("  --config <file>     Load configuration from JSON file\n");
     printf("  --port <port>       Server port (default: 9000)\n");
+    printf("  --uv                Use libuv HTTP server with streaming support\n");
+    printf("                      (recommended for large uploads)\n");
     printf("\n");
     printf("Format Options:\n");
     printf("  --config <file>     Configuration file with disk paths (required)\n");
@@ -220,6 +222,7 @@ int main(int argc, char *argv[]) {
         /* Parse options */
         const char *config_file = NULL;
         int port = 9000;
+        bool use_uv_server = false;
         
         for (int i = 2; i < argc; i++) {
             if (strcmp(argv[i], "--config") == 0) {
@@ -243,6 +246,8 @@ int main(int argc, char *argv[]) {
                     ret = 1;
                     goto cleanup;
                 }
+            } else if (strcmp(argv[i], "--uv") == 0) {
+                use_uv_server = true;
             } else {
                 /* Legacy: bare port number */
                 port = atoi(argv[i]);
@@ -447,82 +452,181 @@ int main(int argc, char *argv[]) {
         }
         buckets_info("Press Ctrl+C to stop");
         
-        /* Create HTTP server */
         const char *bind_addr = config ? config->server.bind_address : "0.0.0.0";
-        buckets_http_server_t *server = buckets_http_server_create(bind_addr, port);
-        if (!server) {
-            buckets_error("Failed to create HTTP server");
-            if (config) {
-                buckets_storage_cleanup();
-                buckets_registry_cleanup();
-                buckets_topology_manager_cleanup();
-                buckets_multidisk_cleanup();
-                buckets_config_free(config);
-            }
-            ret = 1;
-            goto cleanup;
-        }
         
-        /* Set S3 handler as default handler for all requests */
-        if (buckets_http_server_set_default_handler(server, buckets_s3_handler, NULL) != BUCKETS_OK) {
-            buckets_error("Failed to set S3 handler");
+        if (use_uv_server) {
+            /* ===== UV HTTP Server (streaming support) ===== */
+            buckets_info("Using libuv HTTP server with streaming support");
+            
+            uv_http_server_t *uv_server = uv_http_server_create(bind_addr, port);
+            if (!uv_server) {
+                buckets_error("Failed to create UV HTTP server");
+                if (config) {
+                    buckets_storage_cleanup();
+                    buckets_registry_cleanup();
+                    buckets_topology_manager_cleanup();
+                    buckets_multidisk_cleanup();
+                    buckets_config_free(config);
+                }
+                ret = 1;
+                goto cleanup;
+            }
+            
+            /* Register streaming S3 handlers */
+            if (s3_streaming_register_handlers(uv_server) != BUCKETS_OK) {
+                buckets_error("Failed to register streaming S3 handlers");
+                uv_http_server_free(uv_server);
+                if (config) {
+                    buckets_storage_cleanup();
+                    buckets_registry_cleanup();
+                    buckets_topology_manager_cleanup();
+                    buckets_multidisk_cleanup();
+                    buckets_config_free(config);
+                }
+                ret = 1;
+                goto cleanup;
+            }
+            
+            /* Start server */
+            if (uv_http_server_start(uv_server) != BUCKETS_OK) {
+                buckets_error("Failed to start UV HTTP server");
+                uv_http_server_free(uv_server);
+                if (config) {
+                    buckets_storage_cleanup();
+                    buckets_registry_cleanup();
+                    buckets_topology_manager_cleanup();
+                    buckets_multidisk_cleanup();
+                    buckets_config_free(config);
+                }
+                ret = 1;
+                goto cleanup;
+            }
+            
+            buckets_info("Server started successfully!");
+            buckets_info("S3 API available at: http://localhost:%d/", port);
+            buckets_info("");
+            buckets_info("Streaming mode enabled - large uploads are processed without full buffering");
+            buckets_info("");
+            buckets_info("Example commands:");
+            buckets_info("  # Upload large file (streaming)");
+            buckets_info("  curl -X PUT --data-binary @bigfile.dat http://localhost:%d/my-bucket/bigfile.dat", port);
+            buckets_info("");
+            buckets_info("Server is running. Press Ctrl+C to stop...");
+            
+            /* Keep server running */
+            while (1) {
+                sleep(1);
+            }
+            
+            /* Cleanup (reached on Ctrl+C) */
+            buckets_info("Shutting down UV server...");
+            uv_http_server_stop(uv_server);
+            uv_http_server_free(uv_server);
+            s3_streaming_cleanup();
+            
+        } else {
+            /* ===== Mongoose HTTP Server (legacy) ===== */
+            buckets_http_server_t *server = buckets_http_server_create(bind_addr, port);
+            if (!server) {
+                buckets_error("Failed to create HTTP server");
+                if (config) {
+                    buckets_storage_cleanup();
+                    buckets_registry_cleanup();
+                    buckets_topology_manager_cleanup();
+                    buckets_multidisk_cleanup();
+                    buckets_config_free(config);
+                }
+                ret = 1;
+                goto cleanup;
+            }
+            
+            /* Create router and register internal endpoints */
+            buckets_router_t *router = buckets_router_create();
+            if (!router) {
+                buckets_error("Failed to create router");
+                buckets_http_server_free(server);
+                if (config) {
+                    buckets_storage_cleanup();
+                    buckets_registry_cleanup();
+                    buckets_topology_manager_cleanup();
+                    buckets_multidisk_cleanup();
+                    buckets_config_free(config);
+                }
+                ret = 1;
+                goto cleanup;
+            }
+            
+            /* Set router on server */
+            buckets_http_server_set_router(server, router);
+            
+            /* Register binary chunk transport handlers for distributed storage */
+            extern int buckets_binary_transport_register(buckets_http_server_t *server);
+            if (buckets_binary_transport_register(server) != BUCKETS_OK) {
+                buckets_warn("Failed to register binary transport handlers");
+                /* Non-fatal - fall back to JSON RPC */
+            }
+            
+            /* Set S3 handler as default handler for all requests */
+            if (buckets_http_server_set_default_handler(server, buckets_s3_handler, NULL) != BUCKETS_OK) {
+                buckets_error("Failed to set S3 handler");
+                buckets_http_server_free(server);
+                if (config) {
+                    buckets_storage_cleanup();
+                    buckets_registry_cleanup();
+                    buckets_topology_manager_cleanup();
+                    buckets_multidisk_cleanup();
+                    buckets_config_free(config);
+                }
+                ret = 1;
+                goto cleanup;
+            }
+            
+            /* Start server */
+            if (buckets_http_server_start(server) != BUCKETS_OK) {
+                buckets_error("Failed to start HTTP server");
+                buckets_http_server_free(server);
+                if (config) {
+                    buckets_storage_cleanup();
+                    buckets_registry_cleanup();
+                    buckets_topology_manager_cleanup();
+                    buckets_multidisk_cleanup();
+                    buckets_config_free(config);
+                }
+                ret = 1;
+                goto cleanup;
+            }
+            
+            buckets_info("Server started successfully!");
+            buckets_info("S3 API available at: http://localhost:%d/", port);
+            buckets_info("");
+            buckets_info("Example commands:");
+            buckets_info("  # List buckets");
+            buckets_info("  curl -v http://localhost:%d/", port);
+            buckets_info("");
+            buckets_info("  # Create bucket");
+            buckets_info("  curl -v -X PUT http://localhost:%d/my-bucket", port);
+            buckets_info("");
+            buckets_info("  # Upload object");
+            buckets_info("  echo 'Hello World' | curl -v -X PUT --data-binary @- http://localhost:%d/my-bucket/hello.txt", port);
+            buckets_info("");
+            buckets_info("  # Download object");
+            buckets_info("  curl -v http://localhost:%d/my-bucket/hello.txt", port);
+            buckets_info("");
+            buckets_info("Server is running. Press Ctrl+C to stop...");
+            
+            /* Keep server running - in a real implementation, we'd have a signal handler */
+            /* For now, just loop forever - the HTTP server runs in background thread */
+            while (1) {
+                /* User can stop with Ctrl+C which will cleanup automatically */
+                sleep(1);
+            }
+            
+            /* Cleanup (reached on Ctrl+C) */
+            buckets_info("Shutting down server...");
+            buckets_http_server_stop(server);
             buckets_http_server_free(server);
-            if (config) {
-                buckets_storage_cleanup();
-                buckets_registry_cleanup();
-                buckets_topology_manager_cleanup();
-                buckets_multidisk_cleanup();
-                buckets_config_free(config);
-            }
-            ret = 1;
-            goto cleanup;
         }
         
-        /* Start server */
-        if (buckets_http_server_start(server) != BUCKETS_OK) {
-            buckets_error("Failed to start HTTP server");
-            buckets_http_server_free(server);
-            if (config) {
-                buckets_storage_cleanup();
-                buckets_registry_cleanup();
-                buckets_topology_manager_cleanup();
-                buckets_multidisk_cleanup();
-                buckets_config_free(config);
-            }
-            ret = 1;
-            goto cleanup;
-        }
-        
-        buckets_info("Server started successfully!");
-        buckets_info("S3 API available at: http://localhost:%d/", port);
-        buckets_info("");
-        buckets_info("Example commands:");
-        buckets_info("  # List buckets");
-        buckets_info("  curl -v http://localhost:%d/", port);
-        buckets_info("");
-        buckets_info("  # Create bucket");
-        buckets_info("  curl -v -X PUT http://localhost:%d/my-bucket", port);
-        buckets_info("");
-        buckets_info("  # Upload object");
-        buckets_info("  echo 'Hello World' | curl -v -X PUT --data-binary @- http://localhost:%d/my-bucket/hello.txt", port);
-        buckets_info("");
-        buckets_info("  # Download object");
-        buckets_info("  curl -v http://localhost:%d/my-bucket/hello.txt", port);
-        buckets_info("");
-        buckets_info("Server is running. Press Ctrl+C to stop...");
-        
-        /* Keep server running - in a real implementation, we'd have a signal handler */
-        /* For now, just loop forever - the HTTP server polls internally */
-        while (1) {
-            /* Server runs in mongoose polling loop */
-            /* User can stop with Ctrl+C which will cleanup automatically */
-            sleep(1);
-        }
-        
-        /* Cleanup (reached on Ctrl+C) */
-        buckets_info("Shutting down server...");
-        buckets_http_server_stop(server);
-        buckets_http_server_free(server);
         if (config) {
             buckets_info("Cleaning up storage layer...");
             buckets_storage_cleanup();

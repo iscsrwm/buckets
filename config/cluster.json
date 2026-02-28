@@ -1,0 +1,50 @@
+{
+  "cluster": {
+    "deployment_id": "unified-cluster-2026",
+    "sets": 1,
+    "disks_per_set": 12
+  },
+  "nodes": [
+    {
+      "id": "node1",
+      "address": "localhost",
+      "port": 9001,
+      "data_dir": "/tmp/buckets-node1",
+      "disks": [
+        "/tmp/buckets-node1/disk1",
+        "/tmp/buckets-node1/disk2",
+        "/tmp/buckets-node1/disk3",
+        "/tmp/buckets-node1/disk4"
+      ]
+    },
+    {
+      "id": "node2",
+      "address": "localhost",
+      "port": 9002,
+      "data_dir": "/tmp/buckets-node2",
+      "disks": [
+        "/tmp/buckets-node2/disk1",
+        "/tmp/buckets-node2/disk2",
+        "/tmp/buckets-node2/disk3",
+        "/tmp/buckets-node2/disk4"
+      ]
+    },
+    {
+      "id": "node3",
+      "address": "localhost",
+      "port": 9003,
+      "data_dir": "/tmp/buckets-node3",
+      "disks": [
+        "/tmp/buckets-node3/disk1",
+        "/tmp/buckets-node3/disk2",
+        "/tmp/buckets-node3/disk3",
+        "/tmp/buckets-node3/disk4"
+      ]
+    }
+  ],
+  "erasure": {
+    "enabled": true,
+    "data_shards": 8,
+    "parity_shards": 4
+  }
+}

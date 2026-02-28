@@ -9,7 +9,10 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -76,17 +79,57 @@ static int create_connection(const char *host, int port)
         return -1;
     }
     
-    /* Connect to server */
+    /* Connect to server with timeout */
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
     memcpy(&server_addr.sin_addr.s_addr, server->h_addr_list[0], server->h_length);
     server_addr.sin_port = htons(port);
     
-    if (connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        buckets_error("Failed to connect to %s:%d: %s", host, port, strerror(errno));
-        close(sockfd);
-        return -1;
+    /* Set socket to non-blocking mode for connect */
+    int flags = fcntl(sockfd, F_GETFL, 0);
+    fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
+    
+    int connect_result = connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr));
+    
+    if (connect_result < 0) {
+        if (errno == EINPROGRESS) {
+            /* Connection in progress, wait with timeout */
+            fd_set write_fds;
+            struct timeval timeout;
+            timeout.tv_sec = 5;   /* 5 second connect timeout */
+            timeout.tv_usec = 0;
+            
+            FD_ZERO(&write_fds);
+            FD_SET(sockfd, &write_fds);
+            
+            int select_result = select(sockfd + 1, NULL, &write_fds, NULL, &timeout);
+            
+            if (select_result <= 0) {
+                /* Timeout or error */
+                buckets_error("Connection to %s:%d timed out or failed", host, port);
+                close(sockfd);
+                return -1;
+            }
+            
+            /* Check if connection succeeded */
+            int sock_error = 0;
+            socklen_t len = sizeof(sock_error);
+            if (getsockopt(sockfd, SOL_SOCKET, SO_ERROR, &sock_error, &len) < 0 || sock_error != 0) {
+                buckets_error("Failed to connect to %s:%d: %s", host, port, 
+                             sock_error ? strerror(sock_error) : "unknown error");
+                close(sockfd);
+                return -1;
+            }
+        } else {
+            /* Immediate connection error (e.g., connection refused) */
+            buckets_error("Failed to connect to %s:%d: %s", host, port, strerror(errno));
+            close(sockfd);
+            return -1;
+        }
     }
+    
+    /* Set socket back to blocking mode */
+    fcntl(sockfd, F_SETFL, flags);
     
     return sockfd;
 }
@@ -96,7 +139,7 @@ static int create_connection(const char *host, int port)
  */
 static bool is_connection_alive(int fd)
 {
-    char buf[1];
+    char buf[1024];
     ssize_t result = recv(fd, buf, 1, MSG_PEEK | MSG_DONTWAIT);
     
     if (result == 0) {
@@ -107,6 +150,23 @@ static bool is_connection_alive(int fd)
     if (result < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
         /* Error on socket */
         return false;
+    }
+    
+    /* If there's unexpected data in the buffer, drain it or reject the connection */
+    if (result > 0) {
+        /* There's data waiting - this shouldn't happen if we properly consumed responses */
+        /* Drain up to 1KB of leftover data to try to recover the connection */
+        ssize_t drained = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
+        if (drained > 0) {
+            buckets_warn("Drained %zd bytes of leftover data from connection fd=%d", drained, fd);
+        }
+        /* After draining, check again if more data exists */
+        result = recv(fd, buf, 1, MSG_PEEK | MSG_DONTWAIT);
+        if (result > 0) {
+            /* Still has data after draining - connection is corrupted */
+            buckets_warn("Connection fd=%d still has data after draining, marking as dead", fd);
+            return false;
+        }
     }
     
     return true;
@@ -368,22 +428,21 @@ int buckets_conn_send_request(buckets_connection_t *conn,
         return BUCKETS_ERR_INVALID_ARG;
     }
     
-    /* Build HTTP request */
-    char request[4096];
-    int len;
+    /* Build HTTP request headers */
+    char headers[1024];
+    int header_len;
     
     if (body && body_len > 0) {
-        len = snprintf(request, sizeof(request),
+        header_len = snprintf(headers, sizeof(headers),
                       "%s %s HTTP/1.1\r\n"
                       "Host: %s:%d\r\n"
+                      "Content-Type: application/json\r\n"
                       "Content-Length: %zu\r\n"
                       "Connection: keep-alive\r\n"
-                      "\r\n"
-                      "%.*s",
-                      method, path, conn->host, conn->port, body_len,
-                      (int)body_len, body);
+                      "\r\n",
+                      method, path, conn->host, conn->port, body_len);
     } else {
-        len = snprintf(request, sizeof(request),
+        header_len = snprintf(headers, sizeof(headers),
                       "%s %s HTTP/1.1\r\n"
                       "Host: %s:%d\r\n"
                       "Connection: keep-alive\r\n"
@@ -391,42 +450,150 @@ int buckets_conn_send_request(buckets_connection_t *conn,
                       method, path, conn->host, conn->port);
     }
     
-    /* Send request */
-    ssize_t sent = send(conn->fd, request, len, 0);
+    /* Set send timeout to prevent blocking forever on large sends */
+    struct timeval send_timeout;
+    send_timeout.tv_sec = 120;  /* 120 second timeout for large chunk sends */
+    send_timeout.tv_usec = 0;
+    if (setsockopt(conn->fd, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout)) < 0) {
+        buckets_warn("Failed to set send timeout: %s", strerror(errno));
+    }
+    
+    /* Send headers */
+    ssize_t sent = send(conn->fd, headers, header_len, 0);
     if (sent < 0) {
-        buckets_error("Failed to send request: %s", strerror(errno));
+        buckets_error("Failed to send request headers: %s", strerror(errno));
         return BUCKETS_ERR_IO;
     }
     
-    /* Receive response */
-    char buffer[8192];
-    ssize_t received = recv(conn->fd, buffer, sizeof(buffer) - 1, 0);
-    if (received < 0) {
-        buckets_error("Failed to receive response: %s", strerror(errno));
-        return BUCKETS_ERR_IO;
+    /* Send body if present - loop to handle large bodies */
+    if (body && body_len > 0) {
+        size_t total_sent = 0;
+        while (total_sent < body_len) {
+            ssize_t n = send(conn->fd, body + total_sent, body_len - total_sent, 0);
+            if (n < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    /* Timeout or would block - retry */
+                    continue;
+                }
+                buckets_error("Failed to send request body: %s (sent %zu/%zu bytes)", 
+                             strerror(errno), total_sent, body_len);
+                return BUCKETS_ERR_IO;
+            }
+            if (n == 0) {
+                buckets_error("Connection closed while sending body (sent %zu/%zu bytes)",
+                             total_sent, body_len);
+                return BUCKETS_ERR_IO;
+            }
+            total_sent += n;
+        }
     }
     
-    buffer[received] = '\0';
+    /* Set receive timeout to prevent hanging - use longer timeout for large transfers */
+    struct timeval timeout;
+    timeout.tv_sec = 120;  /* 120 second timeout for large responses */
+    timeout.tv_usec = 0;
+    if (setsockopt(conn->fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+        buckets_warn("Failed to set recv timeout: %s", strerror(errno));
+    }
+    
+    /* Receive response - read chunks until we find headers end */
+    char header_buffer[8192];
+    size_t header_bytes = 0;
+    char *headers_end = NULL;
+    
+    /* Read in chunks until we find \r\n\r\n (end of headers) */
+    while (header_bytes < sizeof(header_buffer) - 256) {
+        ssize_t n = recv(conn->fd, header_buffer + header_bytes, 
+                        sizeof(header_buffer) - header_bytes - 1, 0);
+        if (n < 0) {
+            buckets_error("Failed to receive response headers: %s", strerror(errno));
+            return BUCKETS_ERR_IO;
+        }
+        if (n == 0) {
+            buckets_error("Connection closed before headers received");
+            return BUCKETS_ERR_IO;
+        }
+        header_bytes += n;
+        header_buffer[header_bytes] = '\0';
+        
+        /* Check if we've received complete headers */
+        headers_end = strstr(header_buffer, "\r\n\r\n");
+        if (headers_end) {
+            break;
+        }
+    }
+    
+    if (!headers_end) {
+        buckets_error("Failed to find end of HTTP headers");
+        return BUCKETS_ERR_IO;
+    }
     
     /* Parse status code */
     if (status_code) {
         *status_code = 0;
-        char *status_line = strstr(buffer, "HTTP/1.");
+        char *status_line = strstr(header_buffer, "HTTP/1.");
         if (status_line) {
             sscanf(status_line, "HTTP/1.%*d %d", status_code);
         }
     }
     
-    /* Find body (after \r\n\r\n) */
-    if (response) {
-        char *body_start = strstr(buffer, "\r\n\r\n");
-        if (body_start) {
-            body_start += 4;
-            *response = buckets_strdup(body_start);
+    /* Parse Content-Length */
+    size_t content_length = 0;
+    char *cl_header = strstr(header_buffer, "Content-Length:");
+    if (cl_header) {
+        sscanf(cl_header, "Content-Length: %zu", &content_length);
+    }
+    
+    if (!response) {
+        return BUCKETS_OK;
+    }
+    
+    /* Calculate how much body data we already received */
+    headers_end += 4;  /* Skip \r\n\r\n */
+    size_t body_in_header_buffer = header_bytes - (headers_end - header_buffer);
+    
+    /* Allocate buffer for complete body */
+    char *body_data = NULL;
+    size_t total_body_bytes = 0;
+    
+    if (content_length > 0) {
+        /* We know the exact size */
+        body_data = buckets_malloc(content_length + 1);
+        
+        /* Copy body data from header buffer */
+        if (body_in_header_buffer > 0) {
+            memcpy(body_data, headers_end, body_in_header_buffer);
+            total_body_bytes = body_in_header_buffer;
+        }
+        
+        /* Read remaining body */
+        while (total_body_bytes < content_length) {
+            ssize_t n = recv(conn->fd, body_data + total_body_bytes,
+                           content_length - total_body_bytes, 0);
+            if (n < 0) {
+                buckets_error("Failed to receive response body: %s", strerror(errno));
+                buckets_free(body_data);
+                return BUCKETS_ERR_IO;
+            }
+            if (n == 0) {
+                break;  /* Connection closed */
+            }
+            total_body_bytes += n;
+        }
+        
+        body_data[total_body_bytes] = '\0';
+    } else {
+        /* No Content-Length, use what we have in header buffer */
+        if (body_in_header_buffer > 0) {
+            body_data = buckets_malloc(body_in_header_buffer + 1);
+            memcpy(body_data, headers_end, body_in_header_buffer);
+            body_data[body_in_header_buffer] = '\0';
+            total_body_bytes = body_in_header_buffer;
         } else {
-            *response = buckets_strdup(buffer);
+            body_data = buckets_strdup("");
         }
     }
     
+    *response = body_data;
     return BUCKETS_OK;
 }

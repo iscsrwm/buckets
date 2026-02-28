@@ -1,0 +1,37 @@
+{
+  "node": {
+    "id": "node4",
+    "address": "localhost",
+    "port": 9004,
+    "endpoint": "http://localhost:9004",
+    "data_dir": "/tmp/buckets-node4"
+  },
+  "storage": {
+    "disks": [
+      "/tmp/buckets-node4/disk1",
+      "/tmp/buckets-node4/disk2",
+      "/tmp/buckets-node4/disk3",
+      "/tmp/buckets-node4/disk4"
+    ]
+  },
+  "cluster": {
+    "enabled": true,
+    "peers": [
+      "localhost:9001",
+      "localhost:9002",
+      "localhost:9003",
+      "localhost:9005"
+    ],
+    "sets": 1,
+    "disks_per_set": 20
+  },
+  "erasure": {
+    "enabled": true,
+    "data_shards": 8,
+    "parity_shards": 4
+  },
+  "server": {
+    "bind_address": "0.0.0.0",
+    "bind_port": 9004
+  }
+}

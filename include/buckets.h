@@ -48,6 +48,8 @@ typedef enum {
     BUCKETS_ERR_CORRUPT,
     BUCKETS_ERR_UNSUPPORTED,
     BUCKETS_ERR_CRYPTO,
+    BUCKETS_ERR_INIT,
+    BUCKETS_ERR_RPC,
 } buckets_error_t;
 
 /* Return result with error handling */
@@ -63,6 +65,11 @@ typedef struct {
 
 /* Timestamp (microseconds since epoch) */
 typedef u64 buckets_time_t;
+
+/* System bucket for metadata storage */
+#define BUCKETS_SYSTEM_BUCKET ".buckets.sys"
+#define BUCKETS_BUCKET_METADATA_PREFIX "buckets/"
+#define BUCKETS_BUCKET_METADATA_FILE "bucket.json"
 
 /* Common macros */
 #define BUCKETS_UNUSED(x) ((void)(x))

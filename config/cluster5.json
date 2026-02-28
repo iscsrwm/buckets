@@ -1,0 +1,64 @@
+{
+  "cluster": {
+    "deployment_id": "",
+    "sets": 1,
+    "disks_per_set": 20,
+    "vnodes": 150
+  },
+  "erasure": {
+    "data_shards": 8,
+    "parity_shards": 4
+  },
+  "nodes": [
+    {
+      "id": "node1",
+      "endpoint": "http://localhost:9001",
+      "disks": [
+        "/tmp/buckets-node1/disk1",
+        "/tmp/buckets-node1/disk2",
+        "/tmp/buckets-node1/disk3",
+        "/tmp/buckets-node1/disk4"
+      ]
+    },
+    {
+      "id": "node2",
+      "endpoint": "http://localhost:9002",
+      "disks": [
+        "/tmp/buckets-node2/disk1",
+        "/tmp/buckets-node2/disk2",
+        "/tmp/buckets-node2/disk3",
+        "/tmp/buckets-node2/disk4"
+      ]
+    },
+    {
+      "id": "node3",
+      "endpoint": "http://localhost:9003",
+      "disks": [
+        "/tmp/buckets-node3/disk1",
+        "/tmp/buckets-node3/disk2",
+        "/tmp/buckets-node3/disk3",
+        "/tmp/buckets-node3/disk4"
+      ]
+    },
+    {
+      "id": "node4",
+      "endpoint": "http://localhost:9004",
+      "disks": [
+        "/tmp/buckets-node4/disk1",
+        "/tmp/buckets-node4/disk2",
+        "/tmp/buckets-node4/disk3",
+        "/tmp/buckets-node4/disk4"
+      ]
+    },
+    {
+      "id": "node5",
+      "endpoint": "http://localhost:9005",
+      "disks": [
+        "/tmp/buckets-node5/disk1",
+        "/tmp/buckets-node5/disk2",
+        "/tmp/buckets-node5/disk3",
+        "/tmp/buckets-node5/disk4"
+      ]
+    }
+  ]
+}
