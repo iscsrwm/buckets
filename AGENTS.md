@@ -69,8 +69,10 @@
 1. Cross-node distribution (spread erasure shards across multiple nodes)
 2. Registry integration (track object locations for distributed GET)
 3. Automatic healing (reconstruct missing chunks to spare disks)
-4. DELETE optimization (currently ~1 ops/s, needs parallel shard deletion)
-5. Week 41: Versioning, metadata, full AWS Signature V4
+4. Week 41: Versioning, metadata, full AWS Signature V4
+
+**Recently Completed**:
+- DELETE optimization: 65x faster (1.2 → 85+ ops/s) via parallel shard deletion
 
 ---
 

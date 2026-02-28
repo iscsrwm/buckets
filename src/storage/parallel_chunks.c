@@ -9,10 +9,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <unistd.h>
 
 #include "buckets.h"
 #include "buckets_storage.h"
 #include "buckets_placement.h"
+#include "buckets_net.h"
+#include "cJSON.h"
 
 /* Maximum number of concurrent chunk operations */
 #define MAX_PARALLEL_CHUNKS 32
@@ -549,4 +552,211 @@ int buckets_parallel_write_metadata(const char *bucket,
     
     buckets_info("Parallel metadata write: All %u disks succeeded", num_disks);
     return 0;
+}
+
+/* ===================================================================
+ * Parallel Delete Operations
+ * ===================================================================*/
+
+/**
+ * Delete task for parallel deletion
+ */
+typedef struct {
+    u32 chunk_index;           /* 1-based chunk index */
+    char bucket[256];          /* Bucket name */
+    char object[1024];         /* Object key */
+    char object_path[1536];    /* Hashed object path */
+    char disk_path[512];       /* Disk path */
+    char node_endpoint[256];   /* Node endpoint for RPC */
+    bool is_local;             /* True if local delete, false if RPC */
+    int result;                /* Operation result */
+    pthread_t thread;          /* Thread handle */
+} delete_task_t;
+
+/**
+ * Worker thread for chunk deletion
+ */
+static void* chunk_delete_worker(void *arg)
+{
+    delete_task_t *task = (delete_task_t*)arg;
+    
+    if (task->is_local) {
+        /* Local delete - delete chunk and xl.meta directly */
+        char chunk_path[PATH_MAX * 2];
+        char meta_path[PATH_MAX * 2];
+        char dir_path[PATH_MAX * 2];
+        
+        /* Delete chunk file */
+        snprintf(chunk_path, sizeof(chunk_path), "%s/%spart.%u", 
+                 task->disk_path, task->object_path, task->chunk_index);
+        unlink(chunk_path);  /* Ignore errors - file may not exist */
+        
+        /* Delete xl.meta */
+        snprintf(meta_path, sizeof(meta_path), "%s/%sxl.meta", 
+                 task->disk_path, task->object_path);
+        if (unlink(meta_path) == 0) {
+            task->result = 0;
+            buckets_debug("Parallel delete: Removed %s", meta_path);
+        } else {
+            /* Not necessarily an error - may already be deleted */
+            task->result = 0;
+        }
+        
+        /* Try to remove object directory (will fail if not empty, that's ok) */
+        snprintf(dir_path, sizeof(dir_path), "%s/%s", task->disk_path, task->object_path);
+        size_t len = strlen(dir_path);
+        if (len > 0 && dir_path[len-1] == '/') {
+            dir_path[len-1] = '\0';
+        }
+        rmdir(dir_path);  /* Ignore errors */
+        
+    } else {
+        /* Remote delete via RPC */
+        extern buckets_rpc_context_t* buckets_distributed_storage_get_rpc_context(void);
+        buckets_rpc_context_t *rpc_ctx = buckets_distributed_storage_get_rpc_context();
+        
+        if (!rpc_ctx) {
+            buckets_error("Parallel delete: No RPC context for remote delete");
+            task->result = -1;
+            return NULL;
+        }
+        
+        /* Build RPC params */
+        cJSON *params = cJSON_CreateObject();
+        cJSON_AddStringToObject(params, "bucket", task->bucket);
+        cJSON_AddStringToObject(params, "object", task->object);
+        cJSON_AddNumberToObject(params, "chunk_index", task->chunk_index);
+        cJSON_AddStringToObject(params, "disk_path", task->disk_path);
+        
+        /* Make RPC call (2 second timeout - deletes are fast) */
+        buckets_rpc_response_t *response = NULL;
+        int ret = buckets_rpc_call(rpc_ctx, task->node_endpoint, 
+                                   "storage.deleteChunk", params, &response, 2000);
+        
+        cJSON_Delete(params);
+        
+        if (ret != 0 || !response) {
+            buckets_error("Parallel delete: RPC failed to %s", task->node_endpoint);
+            task->result = -1;
+        } else if (response->error_code != 0) {
+            buckets_error("Parallel delete: Remote error: %s",
+                         response->error_message ? response->error_message : "unknown");
+            task->result = -1;
+        } else {
+            task->result = 0;
+            buckets_debug("Parallel delete: chunk %u via RPC to %s",
+                         task->chunk_index, task->node_endpoint);
+        }
+        
+        if (response) {
+            buckets_rpc_response_free(response);
+        }
+    }
+    
+    return NULL;
+}
+
+/**
+ * Delete object chunks in parallel across all disks
+ * 
+ * @param bucket Bucket name
+ * @param object Object key
+ * @param object_path Hashed object path (prefix/hash/)
+ * @param placement Placement result with disk info
+ * @return 0 on success, -1 on error (some deletes may still succeed)
+ */
+int buckets_parallel_delete_chunks(const char *bucket,
+                                    const char *object,
+                                    const char *object_path,
+                                    buckets_placement_result_t *placement)
+{
+    if (!bucket || !object || !object_path || !placement) {
+        buckets_error("Invalid parameters for parallel delete");
+        return -1;
+    }
+    
+    u32 num_disks = placement->disk_count;
+    if (num_disks == 0 || num_disks > MAX_PARALLEL_CHUNKS) {
+        buckets_error("Invalid disk count for parallel delete: %u", num_disks);
+        return -1;
+    }
+    
+    buckets_info("Parallel delete: %u disks for %s/%s", num_disks, bucket, object);
+    
+    /* Check if we have endpoints for distributed mode */
+    bool has_endpoints = (placement->disk_endpoints && 
+                         placement->disk_endpoints[0] && 
+                         placement->disk_endpoints[0][0] != '\0');
+    
+    /* Allocate task array */
+    delete_task_t *tasks = buckets_calloc(num_disks, sizeof(delete_task_t));
+    if (!tasks) {
+        return -1;
+    }
+    
+    /* Initialize tasks */
+    for (u32 i = 0; i < num_disks; i++) {
+        delete_task_t *task = &tasks[i];
+        
+        task->chunk_index = i + 1;
+        strncpy(task->bucket, bucket, sizeof(task->bucket) - 1);
+        strncpy(task->object, object, sizeof(task->object) - 1);
+        strncpy(task->object_path, object_path, sizeof(task->object_path) - 1);
+        strncpy(task->disk_path, placement->disk_paths[i], sizeof(task->disk_path) - 1);
+        
+        /* Determine if local or remote */
+        if (has_endpoints) {
+            extern bool buckets_distributed_is_local_disk(const char *disk_endpoint);
+            task->is_local = buckets_distributed_is_local_disk(placement->disk_endpoints[i]);
+            
+            if (!task->is_local) {
+                extern int buckets_distributed_extract_node_endpoint(const char *disk_endpoint,
+                                                                     char *node_endpoint, size_t size);
+                if (buckets_distributed_extract_node_endpoint(placement->disk_endpoints[i],
+                                                             task->node_endpoint,
+                                                             sizeof(task->node_endpoint)) != 0) {
+                    buckets_error("Failed to extract node endpoint from: %s",
+                                 placement->disk_endpoints[i]);
+                    task->is_local = true;  /* Fall back to local */
+                }
+            }
+        } else {
+            task->is_local = true;  /* No endpoints = local only mode */
+        }
+        
+        task->result = -1;  /* Initialize as failed */
+    }
+    
+    /* Launch threads - all in parallel */
+    for (u32 i = 0; i < num_disks; i++) {
+        int ret = pthread_create(&tasks[i].thread, NULL, chunk_delete_worker, &tasks[i]);
+        if (ret != 0) {
+            buckets_error("Failed to create delete thread for disk %u: %d", i + 1, ret);
+            tasks[i].result = -1;
+        }
+    }
+    
+    /* Wait for all threads to complete */
+    int deleted_count = 0;
+    int failed_count = 0;
+    for (u32 i = 0; i < num_disks; i++) {
+        if (tasks[i].thread != 0) {
+            pthread_join(tasks[i].thread, NULL);
+        }
+        
+        if (tasks[i].result == 0) {
+            deleted_count++;
+        } else {
+            failed_count++;
+            buckets_debug("Parallel delete: disk %u failed", i + 1);
+        }
+    }
+    
+    buckets_free(tasks);
+    
+    buckets_info("Parallel delete: %s/%s - deleted from %d/%u disks",
+                 bucket, object, deleted_count, num_disks);
+    
+    /* Consider success if at least one disk was deleted */
+    return (deleted_count > 0) ? 0 : -1;
 }
