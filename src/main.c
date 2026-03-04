@@ -135,33 +135,96 @@ static int format_disks_from_config(const char *config_file, bool force) {
                  format->meta.deployment_id, 
                  cluster_deployment_id ? cluster_deployment_id : "random");
     
-    /* Assign disk UUIDs and save format to each disk */
-    int disk_idx = 0;
-    for (int set = 0; set < sets; set++) {
-        for (int disk = 0; disk < disks_per_set; disk++) {
-            if (disk_idx >= config->storage.disk_count) {
-                buckets_error("Configuration error: not enough disks for topology");
+    /* For distributed clusters, we need to figure out which disk positions
+     * in the topology belong to THIS node. The topology is cluster-wide,
+     * but each node only formats its local disks. */
+    
+    if (config->cluster.enabled && config->cluster.node_count > 0) {
+        /* Distributed cluster mode: find this node's disk positions */
+        int this_node_idx = -1;
+        for (int i = 0; i < config->cluster.node_count; i++) {
+            if (strcmp(config->cluster.nodes[i].id, config->node.id) == 0) {
+                this_node_idx = i;
+                break;
+            }
+        }
+        
+        if (this_node_idx < 0) {
+            buckets_error("This node '%s' not found in cluster.nodes", config->node.id);
+            buckets_format_free(format);
+            buckets_config_free(config);
+            return 1;
+        }
+        
+        /* Calculate this node's starting position in the cluster-wide disk array.
+         * Disks are numbered sequentially across all nodes. */
+        int disk_offset = 0;
+        for (int i = 0; i < this_node_idx; i++) {
+            disk_offset += config->cluster.nodes[i].disk_count;
+        }
+        
+        buckets_info("This node (%s) is at position %d, disk offset %d",
+                     config->node.id, this_node_idx, disk_offset);
+        
+        /* Format only this node's local disks with their correct topology positions */
+        for (int local_disk = 0; local_disk < config->storage.disk_count; local_disk++) {
+            int global_disk = disk_offset + local_disk;
+            int set = global_disk / disks_per_set;
+            int disk_in_set = global_disk % disks_per_set;
+            
+            if (set >= sets) {
+                buckets_error("Disk %d exceeds topology (sets=%d, disks_per_set=%d)",
+                              global_disk, sets, disks_per_set);
                 buckets_format_free(format);
                 buckets_config_free(config);
                 return 1;
             }
             
-            /* Set this_disk UUID */
-            strncpy(format->erasure.this_disk, format->erasure.sets[set][disk], 
+            /* Set this_disk UUID from the topology */
+            strncpy(format->erasure.this_disk, format->erasure.sets[set][disk_in_set],
                     sizeof(format->erasure.this_disk) - 1);
             
             /* Save format to disk */
-            buckets_info("Formatting disk %s (set %d, disk %d, uuid=%s)",
-                        config->storage.disks[disk_idx], set, disk, format->erasure.this_disk);
+            buckets_info("Formatting disk %s (global=%d, set=%d, disk=%d, uuid=%s)",
+                        config->storage.disks[local_disk], global_disk, set, disk_in_set,
+                        format->erasure.this_disk);
             
-            if (buckets_format_save(config->storage.disks[disk_idx], format) != BUCKETS_OK) {
-                buckets_error("Failed to save format to disk: %s", config->storage.disks[disk_idx]);
+            if (buckets_format_save(config->storage.disks[local_disk], format) != BUCKETS_OK) {
+                buckets_error("Failed to save format to disk: %s", config->storage.disks[local_disk]);
                 buckets_format_free(format);
                 buckets_config_free(config);
                 return 1;
             }
-            
-            disk_idx++;
+        }
+    } else {
+        /* Single-node mode: format all local disks sequentially */
+        int disk_idx = 0;
+        for (int set = 0; set < sets; set++) {
+            for (int disk = 0; disk < disks_per_set; disk++) {
+                if (disk_idx >= config->storage.disk_count) {
+                    buckets_error("Configuration error: not enough disks for topology");
+                    buckets_format_free(format);
+                    buckets_config_free(config);
+                    return 1;
+                }
+                
+                /* Set this_disk UUID */
+                strncpy(format->erasure.this_disk, format->erasure.sets[set][disk], 
+                        sizeof(format->erasure.this_disk) - 1);
+                
+                /* Save format to disk */
+                buckets_info("Formatting disk %s (set %d, disk %d, uuid=%s)",
+                            config->storage.disks[disk_idx], set, disk, format->erasure.this_disk);
+                
+                if (buckets_format_save(config->storage.disks[disk_idx], format) != BUCKETS_OK) {
+                    buckets_error("Failed to save format to disk: %s", config->storage.disks[disk_idx]);
+                    buckets_format_free(format);
+                    buckets_config_free(config);
+                    return 1;
+                }
+                
+                disk_idx++;
+            }
         }
     }
     
@@ -190,7 +253,7 @@ static int format_disks_from_config(const char *config_file, bool force) {
     
     buckets_info("Successfully formatted all disks");
     buckets_info("Deployment ID: %s", format->meta.deployment_id);
-    buckets_info("Disks formatted: %d", disk_idx);
+    buckets_info("Disks formatted: %d", config->storage.disk_count);
     
     /* Cleanup */
     buckets_topology_free(topology);

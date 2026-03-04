@@ -697,6 +697,93 @@ void buckets_binary_chunk_read_handler(buckets_http_request_t *req,
 }
 
 /* ===================================================================
+ * UV HTTP Server Wrappers
+ * ===================================================================*/
+
+/**
+ * UV HTTP wrapper for binary chunk write handler
+ * Called from libuv async thread pool
+ */
+void binary_chunk_write_uv_handler(uv_http_conn_t *conn, void *user_data)
+{
+    (void)user_data;
+    
+    /* Build buckets_http_request_t from connection */
+    buckets_http_request_t http_req;
+    memset(&http_req, 0, sizeof(http_req));
+    
+    http_req.method = "PUT";
+    http_req.uri = conn->url;
+    http_req.body = conn->body;
+    http_req.body_len = conn->body_len;
+    http_req.internal = conn;
+    
+    /* Create response structure */
+    buckets_http_response_t http_res;
+    memset(&http_res, 0, sizeof(http_res));
+    
+    /* Call the binary chunk write handler */
+    buckets_binary_chunk_write_handler(&http_req, &http_res, NULL);
+    
+    /* Send response */
+    if (http_res.status_code > 0) {
+        uv_http_response_start(conn, http_res.status_code, NULL, 0,
+                               http_res.body_len);
+        if (http_res.body && http_res.body_len > 0) {
+            uv_http_response_write(conn, http_res.body, http_res.body_len);
+        }
+        uv_http_response_end(conn);
+    }
+    
+    /* Cleanup */
+    if (http_res.body) buckets_free(http_res.body);
+    if (http_res.headers) buckets_free(http_res.headers);
+}
+
+/**
+ * UV HTTP wrapper for binary chunk read handler
+ * Called from libuv async thread pool
+ */
+void binary_chunk_read_uv_handler(uv_http_conn_t *conn, void *user_data)
+{
+    (void)user_data;
+    
+    /* Build buckets_http_request_t from connection */
+    buckets_http_request_t http_req;
+    memset(&http_req, 0, sizeof(http_req));
+    
+    http_req.method = "GET";
+    http_req.uri = conn->url;
+    http_req.body = NULL;
+    http_req.body_len = 0;
+    http_req.internal = conn;
+    
+    /* Create response structure */
+    buckets_http_response_t http_res;
+    memset(&http_res, 0, sizeof(http_res));
+    
+    /* Call the binary chunk read handler */
+    buckets_binary_chunk_read_handler(&http_req, &http_res, NULL);
+    
+    /* Send response */
+    if (http_res.status_code > 0) {
+        const char *headers[] = {
+            "Content-Type", "application/octet-stream"
+        };
+        uv_http_response_start(conn, http_res.status_code, headers, 2,
+                               http_res.body_len);
+        if (http_res.body && http_res.body_len > 0) {
+            uv_http_response_write(conn, http_res.body, http_res.body_len);
+        }
+        uv_http_response_end(conn);
+    }
+    
+    /* Cleanup */
+    if (http_res.body) buckets_free(http_res.body);
+    if (http_res.headers) buckets_free(http_res.headers);
+}
+
+/* ===================================================================
  * Registration
  * ===================================================================*/
 

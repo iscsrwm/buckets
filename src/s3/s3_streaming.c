@@ -457,6 +457,11 @@ int s3_stream_on_request_start(uv_stream_request_t *req, void *user_data)
         return -1;
     }
     
+    /* Skip internal routes - let the binary chunk handler deal with them */
+    if (strncmp(req->url, "/_internal/", 11) == 0) {
+        return -1;  /* Fall through to async route handler */
+    }
+    
     /* Parse URL */
     char bucket[256];
     char key[1024];
@@ -777,20 +782,25 @@ int s3_streaming_register_handlers(uv_http_server_t *server)
     
     buckets_info("Registered SYNC RPC handler (runs in event loop for low latency)");
     
-    /* Register /_internal/chunk as async route - binary transport also makes RPCs */
+    /* Register /_internal/chunk handlers - these need their own handlers for binary chunk I/O */
+    extern void binary_chunk_write_uv_handler(uv_http_conn_t *conn, void *user_data);
+    extern void binary_chunk_read_uv_handler(uv_http_conn_t *conn, void *user_data);
+    
     ret = uv_http_server_add_async_route(server, "PUT", "/_internal/chunk",
-                                          s3_legacy_uv_handler, NULL);
+                                          binary_chunk_write_uv_handler, NULL);
     if (ret != BUCKETS_OK) {
         buckets_warn("Failed to register async PUT chunk handler");
         /* Non-fatal - continue */
     }
     
     ret = uv_http_server_add_async_route(server, "GET", "/_internal/chunk",
-                                          s3_legacy_uv_handler, NULL);
+                                          binary_chunk_read_uv_handler, NULL);
     if (ret != BUCKETS_OK) {
         buckets_warn("Failed to register async GET chunk handler");
         /* Non-fatal - continue */
     }
+    
+    buckets_info("Registered binary chunk handlers for /_internal/chunk");
     
     /* Register legacy handler as ASYNC default for all S3 operations.
      * This is critical because S3 operations (PUT/GET/DELETE) make RPC calls
