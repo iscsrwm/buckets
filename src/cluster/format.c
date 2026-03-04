@@ -28,7 +28,20 @@
 static cJSON* format_to_json(buckets_format_t *format);
 static buckets_format_t* format_from_json(cJSON *json);
 
-buckets_format_t* buckets_format_new(int set_count, int disks_per_set)
+/**
+ * Create a new format with a specified deployment_id
+ * 
+ * This function allows creating a format with a deterministic deployment_id
+ * derived from a cluster name. This is critical for multi-node clusters
+ * where all nodes must use the same deployment_id for consistent placement.
+ * 
+ * @param set_count Number of erasure sets
+ * @param disks_per_set Number of disks per set
+ * @param cluster_deployment_id Cluster name/ID from config (NULL for random UUID)
+ * @return New format structure, or NULL on error
+ */
+buckets_format_t* buckets_format_new_with_deployment_id(int set_count, int disks_per_set,
+                                                        const char *cluster_deployment_id)
 {
     if (set_count <= 0 || disks_per_set <= 0) {
         buckets_error("Invalid set configuration: set_count=%d, disks_per_set=%d",
@@ -44,7 +57,15 @@ buckets_format_t* buckets_format_new(int set_count, int disks_per_set)
     strncpy(format->meta.format_type, BUCKETS_FORMAT_TYPE, sizeof(format->meta.format_type) - 1);
     
     /* Generate deployment ID (cluster UUID) */
-    buckets_uuid_generate(format->meta.deployment_id);
+    if (cluster_deployment_id && cluster_deployment_id[0] != '\0') {
+        /* Use deterministic UUID derived from cluster name */
+        buckets_uuid_generate_from_name(cluster_deployment_id, format->meta.deployment_id);
+        buckets_info("Using deterministic deployment_id from cluster name '%s': %s",
+                     cluster_deployment_id, format->meta.deployment_id);
+    } else {
+        /* Fall back to random UUID (single-node mode) */
+        buckets_uuid_generate(format->meta.deployment_id);
+    }
     
     /* Initialize erasure information */
     strncpy(format->erasure.version, BUCKETS_ERASURE_VERSION, sizeof(format->erasure.version) - 1);
@@ -59,9 +80,12 @@ buckets_format_t* buckets_format_new(int set_count, int disks_per_set)
     for (int i = 0; i < set_count; i++) {
         format->erasure.sets[i] = buckets_calloc(disks_per_set, sizeof(char *));
         for (int j = 0; j < disks_per_set; j++) {
-            /* Generate UUID for each disk */
+            /* Generate deterministic UUIDs for disks based on deployment_id + position */
             char disk_uuid[37];
-            buckets_uuid_generate(disk_uuid);
+            char disk_name[128];
+            snprintf(disk_name, sizeof(disk_name), "%s-set%d-disk%d",
+                     format->meta.deployment_id, i, j);
+            buckets_uuid_generate_from_name(disk_name, disk_uuid);
             format->erasure.sets[i][j] = buckets_strdup(disk_uuid);
         }
     }
@@ -73,6 +97,12 @@ buckets_format_t* buckets_format_new(int set_count, int disks_per_set)
                   format->meta.deployment_id, set_count, disks_per_set);
     
     return format;
+}
+
+buckets_format_t* buckets_format_new(int set_count, int disks_per_set)
+{
+    /* Default to random deployment_id for backward compatibility */
+    return buckets_format_new_with_deployment_id(set_count, disks_per_set, NULL);
 }
 
 void buckets_format_free(buckets_format_t *format)

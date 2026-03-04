@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/select.h>
@@ -96,7 +97,7 @@ static int create_connection(const char *host, int port)
             /* Connection in progress, wait with timeout */
             fd_set write_fds;
             struct timeval timeout;
-            timeout.tv_sec = 5;   /* 5 second connect timeout */
+            timeout.tv_sec = 2;   /* 2 second connect timeout (reduced from 5) */
             timeout.tv_usec = 0;
             
             FD_ZERO(&write_fds);
@@ -135,36 +136,50 @@ static int create_connection(const char *host, int port)
 }
 
 /**
- * Check if connection is still alive
+ * Check if connection is still alive (fast check)
+ * 
+ * Uses poll() for a quick check to avoid blocking.
+ * If there's unexpected data, mark connection as dead rather than trying to drain.
  */
 static bool is_connection_alive(int fd)
 {
-    char buf[1024];
-    ssize_t result = recv(fd, buf, 1, MSG_PEEK | MSG_DONTWAIT);
+    /* Use poll for non-blocking check - faster than recv with MSG_PEEK */
+    struct pollfd pfd;
+    pfd.fd = fd;
+    pfd.events = POLLIN | POLLERR | POLLHUP | POLLNVAL;
+    pfd.revents = 0;
     
-    if (result == 0) {
-        /* Connection closed by peer */
+    int ret = poll(&pfd, 1, 0);  /* Non-blocking check */
+    
+    if (ret < 0) {
+        /* poll error */
         return false;
     }
     
-    if (result < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-        /* Error on socket */
+    if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+        /* Connection error or closed */
         return false;
     }
     
-    /* If there's unexpected data in the buffer, drain it or reject the connection */
-    if (result > 0) {
-        /* There's data waiting - this shouldn't happen if we properly consumed responses */
-        /* Drain up to 1KB of leftover data to try to recover the connection */
-        ssize_t drained = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
-        if (drained > 0) {
-            buckets_warn("Drained %zd bytes of leftover data from connection fd=%d", drained, fd);
+    if (pfd.revents & POLLIN) {
+        /* There's data waiting - check if it's EOF or actual data */
+        char buf[1];
+        ssize_t result = recv(fd, buf, 1, MSG_PEEK | MSG_DONTWAIT);
+        
+        if (result == 0) {
+            /* Connection closed by peer (EOF) */
+            return false;
         }
-        /* After draining, check again if more data exists */
-        result = recv(fd, buf, 1, MSG_PEEK | MSG_DONTWAIT);
+        
         if (result > 0) {
-            /* Still has data after draining - connection is corrupted */
-            buckets_warn("Connection fd=%d still has data after draining, marking as dead", fd);
+            /* Unexpected data in buffer - connection is out of sync */
+            /* Don't try to drain - just mark as dead for safety */
+            buckets_debug("Connection fd=%d has unexpected data, marking as dead", fd);
+            return false;
+        }
+        
+        /* result < 0: EAGAIN/EWOULDBLOCK is OK, other errors mean dead */
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
             return false;
         }
     }
@@ -256,10 +271,16 @@ int buckets_conn_pool_get(buckets_conn_pool_t *pool,
         return BUCKETS_ERR_NOMEM;
     }
     
-    /* Create new connection */
+    /* 
+     * OPTIMIZATION: Release lock before creating connection.
+     * This allows other threads to get/release connections while we're
+     * waiting for the TCP handshake to complete.
+     */
+    pthread_mutex_unlock(&pool->lock);
+    
+    /* Create new connection outside the lock */
     int fd = create_connection(host, port);
     if (fd < 0) {
-        pthread_mutex_unlock(&pool->lock);
         return BUCKETS_ERR_IO;
     }
     
@@ -267,7 +288,6 @@ int buckets_conn_pool_get(buckets_conn_pool_t *pool,
     buckets_connection_t *new_conn = buckets_calloc(1, sizeof(buckets_connection_t));
     if (!new_conn) {
         close(fd);
-        pthread_mutex_unlock(&pool->lock);
         return BUCKETS_ERR_NOMEM;
     }
     
@@ -276,8 +296,20 @@ int buckets_conn_pool_get(buckets_conn_pool_t *pool,
     new_conn->port = port;
     new_conn->in_use = true;
     new_conn->last_used = time(NULL);
-    new_conn->next = pool->connections;
     
+    /* Re-acquire lock to add connection to pool */
+    pthread_mutex_lock(&pool->lock);
+    
+    /* Check limit again (could have changed while we were creating connection) */
+    if (pool->max_conns > 0 && pool->total_conns >= pool->max_conns) {
+        pthread_mutex_unlock(&pool->lock);
+        close(fd);
+        buckets_free(new_conn);
+        buckets_error("Connection pool limit reached (%d) after connect", pool->max_conns);
+        return BUCKETS_ERR_NOMEM;
+    }
+    
+    new_conn->next = pool->connections;
     pool->connections = new_conn;
     pool->total_conns++;
     pool->active_conns++;
@@ -452,7 +484,7 @@ int buckets_conn_send_request(buckets_connection_t *conn,
     
     /* Set send timeout to prevent blocking forever on large sends */
     struct timeval send_timeout;
-    send_timeout.tv_sec = 120;  /* 120 second timeout for large chunk sends */
+    send_timeout.tv_sec = 30;  /* 30 second timeout for sends (reduced from 120) */
     send_timeout.tv_usec = 0;
     if (setsockopt(conn->fd, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout)) < 0) {
         buckets_warn("Failed to set send timeout: %s", strerror(errno));
@@ -488,9 +520,9 @@ int buckets_conn_send_request(buckets_connection_t *conn,
         }
     }
     
-    /* Set receive timeout to prevent hanging - use longer timeout for large transfers */
+    /* Set receive timeout to prevent hanging */
     struct timeval timeout;
-    timeout.tv_sec = 120;  /* 120 second timeout for large responses */
+    timeout.tv_sec = 30;  /* 30 second timeout for receives (reduced from 120) */
     timeout.tv_usec = 0;
     if (setsockopt(conn->fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
         buckets_warn("Failed to set recv timeout: %s", strerror(errno));

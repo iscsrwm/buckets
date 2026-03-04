@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <dirent.h>
+#include <semaphore.h>
 #include <openssl/evp.h>
 
 #include "buckets.h"
@@ -24,6 +25,24 @@
 #include "buckets_registry.h"
 
 #define MD5_DIGEST_LENGTH 16
+
+/* Semaphore to limit concurrent DELETE operations.
+ * DELETE is the heaviest operation because it:
+ * 1. Spawns threads for each disk (up to 12)
+ * 2. Each thread may make RPC calls to remote nodes
+ * 3. Those RPCs need to be processed by remote thread pools
+ * With many concurrent DELETEs, this causes thread pool exhaustion.
+ * Limiting to 4 concurrent DELETEs prevents deadlock. */
+#define MAX_CONCURRENT_DELETES 4
+static sem_t g_delete_semaphore;
+static bool g_delete_semaphore_initialized = false;
+
+static void init_delete_semaphore(void) {
+    if (!g_delete_semaphore_initialized) {
+        sem_init(&g_delete_semaphore, 0, MAX_CONCURRENT_DELETES);
+        g_delete_semaphore_initialized = true;
+    }
+}
 
 /* ===================================================================
  * Utility Functions
@@ -200,19 +219,46 @@ int buckets_s3_put_object(buckets_s3_request_t *req, buckets_s3_response_t *res)
     const void *data = req->body ? req->body : "";
     size_t size = req->body_len;
     
-    buckets_info("S3 PUT: body_len=%zu, body_ptr=%p", size, (void*)data);
-    if (size >= 4) {
-        const u8 *bytes = (const u8 *)data;
-        buckets_info("S3 PUT: first 4 bytes: %02x %02x %02x %02x", 
-                    bytes[0], bytes[1], bytes[2], bytes[3]);
-    }
-    if (size > 131072) {
-        const u8 *bytes = (const u8 *)data;
-        buckets_info("S3 PUT: bytes at 131072: %02x %02x %02x %02x",
-                    bytes[131072], bytes[131073], bytes[131074], bytes[131075]);
+    buckets_info("S3 PUT: body_len=%zu, body_ptr=%p, user_meta_count=%d", 
+                 size, (void*)data, req->user_meta_count);
+    
+    int ret;
+    
+    /* Check if we have user metadata */
+    if (req->user_meta_count > 0) {
+        /* Use put_object_with_metadata for user metadata support */
+        buckets_xl_meta_t meta;
+        memset(&meta, 0, sizeof(meta));
+        
+        /* Set content type */
+        if (content_type) {
+            meta.meta.content_type = buckets_strdup(content_type);
+        }
+        
+        /* Copy user metadata */
+        for (int i = 0; i < req->user_meta_count; i++) {
+            buckets_add_user_metadata(&meta, req->user_meta_keys[i], req->user_meta_values[i]);
+            buckets_info("S3 PUT: Adding user metadata: %s = %s", 
+                        req->user_meta_keys[i], req->user_meta_values[i]);
+        }
+        
+        ret = buckets_put_object_with_metadata(req->bucket, req->key, data, size, &meta, false, NULL);
+        
+        /* Free metadata strings we allocated */
+        if (meta.meta.content_type) {
+            buckets_free(meta.meta.content_type);
+        }
+        for (u32 i = 0; i < meta.meta.user_count; i++) {
+            buckets_free(meta.meta.user_keys[i]);
+            buckets_free(meta.meta.user_values[i]);
+        }
+        if (meta.meta.user_keys) buckets_free(meta.meta.user_keys);
+        if (meta.meta.user_values) buckets_free(meta.meta.user_values);
+    } else {
+        /* No user metadata - use simple put */
+        ret = buckets_put_object(req->bucket, req->key, data, size, content_type);
     }
     
-    int ret = buckets_put_object(req->bucket, req->key, data, size, content_type);
     if (ret != 0) {
         buckets_error("Failed to write object to distributed storage: %s/%s", 
                      req->bucket, req->key);
@@ -282,19 +328,40 @@ int buckets_s3_get_object(buckets_s3_request_t *req, buckets_s3_response_t *res)
     res->body_len = object_size;
     res->content_length = object_size;
     
-    /* Set content type (default to application/octet-stream) */
-    if (req->content_type[0] != '\0') {
-        strncpy(res->content_type, req->content_type, sizeof(res->content_type) - 1);
-        res->content_type[sizeof(res->content_type) - 1] = '\0';
+    /* Get metadata for content-type and user metadata */
+    buckets_xl_meta_t meta;
+    memset(&meta, 0, sizeof(meta));
+    
+    if (buckets_head_object(req->bucket, req->key, &meta) == 0) {
+        /* Set content type from metadata */
+        if (meta.meta.content_type && meta.meta.content_type[0] != '\0') {
+            strncpy(res->content_type, meta.meta.content_type, sizeof(res->content_type) - 1);
+            res->content_type[sizeof(res->content_type) - 1] = '\0';
+        } else {
+            strcpy(res->content_type, "application/octet-stream");
+        }
+        
+        /* Copy user metadata to response */
+        for (u32 i = 0; i < meta.meta.user_count && res->user_meta_count < BUCKETS_S3_MAX_USER_METADATA; i++) {
+            res->user_meta_keys[res->user_meta_count] = buckets_strdup(meta.meta.user_keys[i]);
+            res->user_meta_values[res->user_meta_count] = buckets_strdup(meta.meta.user_values[i]);
+            res->user_meta_count++;
+            buckets_debug("GET: returning user metadata: %s = %s", 
+                         meta.meta.user_keys[i], meta.meta.user_values[i]);
+        }
+        
+        /* Free metadata (we've copied what we need) */
+        buckets_xl_meta_free(&meta);
     } else {
+        /* Fallback - no metadata available */
         strcpy(res->content_type, "application/octet-stream");
     }
     
     /* Format last modified time */
     buckets_s3_format_timestamp(time(NULL), res->last_modified);
     
-    buckets_info("GET object: %s/%s (%zu bytes, ETag: %s) - read from distributed storage",
-                 req->bucket, req->key, res->body_len, res->etag);
+    buckets_info("GET object: %s/%s (%zu bytes, ETag: %s, user_meta=%d) - read from distributed storage",
+                 req->bucket, req->key, res->body_len, res->etag, res->user_meta_count);
     
     return BUCKETS_OK;
 }
@@ -314,9 +381,32 @@ int buckets_s3_delete_object(buckets_s3_request_t *req, buckets_s3_response_t *r
         return BUCKETS_OK;
     }
     
+    /* Initialize delete semaphore on first use */
+    init_delete_semaphore();
+    
+    /* Acquire semaphore to limit concurrent deletes.
+     * This prevents thread pool exhaustion when many concurrent DELETE
+     * requests come in, each spawning threads for parallel disk operations. */
+    struct timespec timeout;
+    clock_gettime(CLOCK_REALTIME, &timeout);
+    timeout.tv_sec += 30;  /* 30 second timeout */
+    
+    if (sem_timedwait(&g_delete_semaphore, &timeout) != 0) {
+        buckets_warn("DELETE %s/%s: timed out waiting for delete slot (max concurrent: %d)",
+                    req->bucket, req->key, MAX_CONCURRENT_DELETES);
+        buckets_s3_xml_error(res, "SlowDown",
+                            "Too many concurrent delete requests",
+                            req->key);
+        res->status_code = 503;
+        return BUCKETS_OK;
+    }
+    
     /* Use distributed delete (handles multi-disk and RPC deletion) */
     extern int buckets_distributed_delete_object(const char *bucket, const char *object);
     int ret = buckets_distributed_delete_object(req->bucket, req->key);
+    
+    /* Release semaphore */
+    sem_post(&g_delete_semaphore);
     
     if (ret != 0) {
         /* Object might not exist - S3 DELETE is idempotent, so we still return 204 */

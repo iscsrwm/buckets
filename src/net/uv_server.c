@@ -123,7 +123,27 @@ int uv_http_server_set_handler(uv_http_server_t *server,
     pthread_mutex_lock(&server->lock);
     server->default_handler = handler;
     server->default_handler_data = user_data;
+    server->default_handler_is_async = false;
     pthread_mutex_unlock(&server->lock);
+    
+    return BUCKETS_OK;
+}
+
+int uv_http_server_set_async_handler(uv_http_server_t *server,
+                                      uv_http_handler_t handler,
+                                      void *user_data)
+{
+    if (!server) {
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    pthread_mutex_lock(&server->lock);
+    server->default_handler = handler;
+    server->default_handler_data = user_data;
+    server->default_handler_is_async = true;
+    pthread_mutex_unlock(&server->lock);
+    
+    buckets_info("Set async default handler (runs in thread pool)");
     
     return BUCKETS_OK;
 }
@@ -185,6 +205,41 @@ int uv_http_server_add_streaming_route(uv_http_server_t *server,
     route->next = server->routes;
     server->routes = route;
     pthread_mutex_unlock(&server->lock);
+    
+    return BUCKETS_OK;
+}
+
+int uv_http_server_add_async_route(uv_http_server_t *server,
+                                    const char *method,
+                                    const char *path_prefix,
+                                    uv_http_handler_t handler,
+                                    void *user_data)
+{
+    if (!server || !path_prefix || !handler) {
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    uv_route_t *route = buckets_calloc(1, sizeof(uv_route_t));
+    if (!route) {
+        return BUCKETS_ERR_NOMEM;
+    }
+    
+    if (method) {
+        route->method = buckets_strdup(method);
+    }
+    route->path_prefix = buckets_strdup(path_prefix);
+    route->is_streaming = false;
+    route->is_async = true;  /* This route runs in thread pool */
+    route->handler.legacy = handler;
+    route->user_data = user_data;
+    
+    pthread_mutex_lock(&server->lock);
+    route->next = server->routes;
+    server->routes = route;
+    pthread_mutex_unlock(&server->lock);
+    
+    buckets_info("Added async route: %s %s (runs in thread pool)", 
+                 method ? method : "*", path_prefix);
     
     return BUCKETS_OK;
 }
@@ -702,6 +757,15 @@ static void on_timeout(uv_timer_t *timer)
     uv_http_conn_t *conn = (uv_http_conn_t*)timer->data;
     
     buckets_debug("Connection timeout (state=%d)", conn->state);
+    
+    /* Don't close if async handler is still processing - it will handle cleanup.
+     * Just restart the timer to check again later. */
+    if (conn->state == CONN_STATE_PROCESSING || conn->async_work != NULL) {
+        buckets_debug("Connection has async work in progress, extending timeout");
+        uv_timer_start(&conn->timeout_timer, on_timeout, 
+                       conn->server->body_timeout_ms, 0);
+        return;
+    }
     
     /* Send timeout response if we haven't started a response */
     if (!conn->response_started && conn->state != CONN_STATE_CLOSING) {
@@ -1255,6 +1319,36 @@ const char* uv_http_get_header(uv_http_conn_t *conn, const char *name)
     return NULL;
 }
 
+/**
+ * Iterate all headers matching a prefix (for x-amz-meta-* handling)
+ * Calls callback for each matching header.
+ * Returns number of headers processed.
+ */
+int uv_http_iterate_headers_with_prefix(void *conn_ptr, const char *prefix,
+                                         void (*callback)(const char *name, const char *value, void *user_data),
+                                         void *user_data)
+{
+    uv_http_conn_t *conn = (uv_http_conn_t *)conn_ptr;
+    if (!conn || !prefix || !callback) {
+        return 0;
+    }
+    
+    int count = 0;
+    size_t prefix_len = strlen(prefix);
+    uv_http_header_t *header = conn->headers;
+    
+    while (header) {
+        if (header->name_len >= prefix_len &&
+            strncasecmp(header->name, prefix, prefix_len) == 0) {
+            callback(header->name, header->value, user_data);
+            count++;
+        }
+        header = header->next;
+    }
+    
+    return count;
+}
+
 /* ===================================================================
  * Streaming Route Matching
  * ===================================================================*/
@@ -1316,6 +1410,226 @@ static void build_stream_request(uv_http_conn_t *conn, uv_stream_request_t *req)
 }
 
 /* ===================================================================
+ * Async Handler Thread Pool Support
+ * ===================================================================*/
+
+/**
+ * Worker thread function for async handlers.
+ * Runs in libuv thread pool, NOT the event loop thread.
+ * 
+ * IMPORTANT: The handler MUST NOT call uv_write or any libuv functions directly!
+ * Instead, it should use uv_http_response_* which will buffer the response.
+ */
+static void async_handler_work(uv_work_t *work)
+{
+    uv_async_work_t *async = (uv_async_work_t *)work;
+    
+    /* Call the actual handler in the worker thread.
+     * The handler will call uv_http_response_* which will buffer the response
+     * since conn->async_work is set. */
+    if (async->route) {
+        /* Use route handler */
+        async->route->handler.legacy(async->conn, async->route->user_data);
+    } else {
+        /* Use handler override (for async default handler) */
+        async->handler(async->conn, async->handler_data);
+    }
+    
+    /* Note: response_ready is set by uv_http_response_end, not here */
+}
+
+/**
+ * Helper to send buffered response from async handler.
+ * Called from event loop thread (safe to use uv_write).
+ */
+static void send_buffered_response(uv_http_conn_t *conn, uv_async_work_t *async)
+{
+    /* Check if connection is still valid for writing */
+    if (conn->state == CONN_STATE_CLOSING || uv_is_closing((uv_handle_t*)&conn->tcp)) {
+        buckets_debug("Connection closing, skipping buffered response send");
+        return;
+    }
+    
+    /* Build response header */
+    char header_buf[4096];
+    int offset = snprintf(header_buf, sizeof(header_buf),
+                         "HTTP/1.1 %d %s\r\n",
+                         async->status_code, http_status_string(async->status_code));
+    
+    /* Add custom headers */
+    for (int i = 0; i < async->num_headers && async->response_headers[i]; i += 2) {
+        offset += snprintf(header_buf + offset, sizeof(header_buf) - offset,
+                          "%s: %s\r\n", 
+                          async->response_headers[i], 
+                          async->response_headers[i+1]);
+    }
+    
+    /* Add Content-Length header */
+    offset += snprintf(header_buf + offset, sizeof(header_buf) - offset,
+                      "Content-Length: %zu\r\n", async->response_body_len);
+    
+    /* Add Connection header */
+    offset += snprintf(header_buf + offset, sizeof(header_buf) - offset,
+                      "Connection: %s\r\n",
+                      conn->keep_alive ? "keep-alive" : "close");
+    
+    /* End headers */
+    offset += snprintf(header_buf + offset, sizeof(header_buf) - offset, "\r\n");
+    
+    /* Allocate single buffer for headers + body */
+    size_t total_len = offset + async->response_body_len;
+    char *write_buf = buckets_malloc(total_len);
+    if (!write_buf) {
+        buckets_error("Failed to allocate write buffer");
+        uv_http_conn_close(conn);
+        return;
+    }
+    
+    memcpy(write_buf, header_buf, offset);
+    if (async->response_body_len > 0) {
+        memcpy(write_buf + offset, async->response_body, async->response_body_len);
+    }
+    
+    /* Mark this as the final write - on_write_complete will handle keep-alive */
+    conn->pending_final_write = true;
+    
+    /* Write response (now safe - we're on event loop thread) */
+    uv_buf_t buf = uv_buf_init(write_buf, total_len);
+    uv_write_t *req = buckets_malloc(sizeof(uv_write_t));
+    if (!req) {
+        buckets_free(write_buf);
+        buckets_error("Failed to allocate write request");
+        conn->pending_final_write = false;
+        uv_http_conn_close(conn);
+        return;
+    }
+    req->data = write_buf;
+    
+    int ret = uv_write(req, (uv_stream_t*)&conn->tcp, &buf, 1, on_write_complete);
+    if (ret != 0) {
+        buckets_free(write_buf);
+        buckets_free(req);
+        buckets_error("uv_write failed: %s", uv_strerror(ret));
+        conn->pending_final_write = false;
+        uv_http_conn_close(conn);
+    }
+}
+
+/**
+ * After-work callback for async handlers.
+ * Runs in the event loop thread after worker completes.
+ * This is where we actually send the buffered response (safe to use uv_write here).
+ */
+static void async_handler_after_work(uv_work_t *work, int status)
+{
+    uv_async_work_t *async = (uv_async_work_t *)work;
+    uv_http_conn_t *conn = async->conn;
+    
+    (void)status;  /* Ignore cancel status for now */
+    
+    /* Clear async_work pointer so response functions work normally if called again */
+    conn->async_work = NULL;
+    
+    /* Send the buffered response (now safe - we're on event loop thread).
+     * Note: send_buffered_response sets pending_final_write=true, so on_write_complete
+     * will handle keep-alive/close AFTER the write completes - don't do it here! */
+    if (async->response_ready && async->response_started) {
+        send_buffered_response(conn, async);
+        /* Don't touch conn after this - on_write_complete handles keep-alive/close */
+    } else if (!conn->response_started) {
+        /* Handler didn't send response - send 500 and close.
+         * Since async_work is cleared, uv_http_response_* will write directly. */
+        conn->pending_final_write = true;
+        uv_http_response_start(conn, 500, NULL, 0, 0);
+        /* Note: uv_http_response_end doesn't write anything for non-chunked with 0 body */
+    }
+    
+    /* Free async work structure and its buffers */
+    for (int i = 0; i < async->num_headers && async->response_headers[i]; i++) {
+        buckets_free(async->response_headers[i]);
+    }
+    if (async->response_body) {
+        buckets_free(async->response_body);
+    }
+    buckets_free(async);
+}
+
+/**
+ * Queue an async handler to run in thread pool.
+ */
+static int queue_async_handler(uv_http_conn_t *conn, uv_route_t *route)
+{
+    uv_async_work_t *async = buckets_calloc(1, sizeof(uv_async_work_t));
+    if (!async) {
+        return BUCKETS_ERR_NOMEM;
+    }
+    
+    async->conn = conn;
+    async->route = route;
+    async->response_ready = false;
+    async->response_started = false;
+    
+    /* Link async to connection so response functions can buffer */
+    conn->async_work = async;
+    
+    /* Mark connection as processing to prevent timeout */
+    conn->state = CONN_STATE_PROCESSING;
+    
+    /* Queue work to libuv thread pool */
+    int ret = uv_queue_work(conn->server->loop, &async->work,
+                            async_handler_work, async_handler_after_work);
+    
+    if (ret != 0) {
+        buckets_error("Failed to queue async work: %s", uv_strerror(ret));
+        conn->async_work = NULL;
+        buckets_free(async);
+        return BUCKETS_ERR_IO;
+    }
+    
+    return BUCKETS_OK;
+}
+
+/**
+ * Queue the default handler to run asynchronously.
+ * Similar to queue_async_handler but uses handler override instead of route.
+ */
+static int queue_async_default_handler(uv_http_conn_t *conn, 
+                                        uv_http_handler_t handler, 
+                                        void *user_data)
+{
+    uv_async_work_t *async = buckets_calloc(1, sizeof(uv_async_work_t));
+    if (!async) {
+        return BUCKETS_ERR_NOMEM;
+    }
+    
+    async->conn = conn;
+    async->route = NULL;  /* No route - using handler override */
+    async->handler = handler;
+    async->handler_data = user_data;
+    async->response_ready = false;
+    async->response_started = false;
+    
+    /* Link async to connection so response functions can buffer */
+    conn->async_work = async;
+    
+    /* Mark connection as processing to prevent timeout */
+    conn->state = CONN_STATE_PROCESSING;
+    
+    /* Queue work to libuv thread pool */
+    int ret = uv_queue_work(conn->server->loop, &async->work,
+                            async_handler_work, async_handler_after_work);
+    
+    if (ret != 0) {
+        buckets_error("Failed to queue async default handler: %s", uv_strerror(ret));
+        conn->async_work = NULL;
+        buckets_free(async);
+        return BUCKETS_ERR_IO;
+    }
+    
+    return BUCKETS_OK;
+}
+
+/* ===================================================================
  * Request Processing
  * ===================================================================*/
 
@@ -1358,7 +1672,22 @@ static void process_request(uv_http_conn_t *conn)
         if (path_len >= prefix_len && 
             strncmp(path, route->path_prefix, prefix_len) == 0) {
             /* Match found */
-            route->handler.legacy(conn, route->user_data);
+            
+            if (route->is_async) {
+                /* Async route - queue to thread pool and return immediately.
+                 * Response will be sent when worker completes.
+                 * This prevents blocking the event loop! */
+                if (queue_async_handler(conn, route) == BUCKETS_OK) {
+                    return;  /* Don't fall through to done - async will handle it */
+                }
+                /* If queue failed, fall through to send 500 */
+                buckets_error("Failed to queue async handler for %s", path);
+                uv_http_response_start(conn, 500, NULL, 0, 0);
+                uv_http_response_end(conn);
+            } else {
+                /* Sync route - call directly (blocks event loop) */
+                route->handler.legacy(conn, route->user_data);
+            }
             goto done;
         }
         
@@ -1367,7 +1696,20 @@ static void process_request(uv_http_conn_t *conn)
     
     /* Use default handler */
     if (server->default_handler) {
-        server->default_handler(conn, server->default_handler_data);
+        if (server->default_handler_is_async) {
+            /* Async default handler - queue to thread pool and return immediately */
+            if (queue_async_default_handler(conn, server->default_handler, 
+                                            server->default_handler_data) == BUCKETS_OK) {
+                return;  /* Don't fall through to done - async will handle it */
+            }
+            /* If queue failed, fall through to send 500 */
+            buckets_error("Failed to queue async default handler");
+            uv_http_response_start(conn, 500, NULL, 0, 0);
+            uv_http_response_end(conn);
+        } else {
+            /* Sync default handler - call directly (blocks event loop) */
+            server->default_handler(conn, server->default_handler_data);
+        }
     } else {
         /* No handler - 404 */
         uv_http_response_start(conn, 404, NULL, 0, 0);
@@ -1378,18 +1720,24 @@ done:
     /* Handle keep-alive or close */
     if (!conn->response_started) {
         /* Handler didn't send response - send 500 */
+        conn->pending_final_write = true;
         uv_http_response_start(conn, 500, NULL, 0, 0);
         uv_http_response_end(conn);
+        /* on_write_complete will handle keep-alive/close */
+        return;
     }
     
-    if (conn->keep_alive && conn->state != CONN_STATE_CLOSING) {
-        /* Reset for next request */
-        uv_http_conn_reset(conn);
-        conn->state = CONN_STATE_KEEPALIVE_WAIT;
-        uv_http_conn_reset_timeout(conn, server->keepalive_timeout_ms);
-    } else {
-        uv_http_conn_close(conn);
+    /* If response was started by a synchronous handler (like streaming PUT),
+     * the response write is asynchronous. We need to wait for on_write_complete
+     * to handle keep-alive. Set pending_final_write so that happens. */
+    if (conn->response_started && !conn->pending_final_write) {
+        conn->pending_final_write = true;
+        /* on_write_complete will handle keep-alive/close */
+        return;
     }
+    
+    /* Only reach here if response wasn't started (handled above) or
+     * if an async handler returned (should not happen in normal flow) */
 }
 
 /* ===================================================================
@@ -1403,6 +1751,34 @@ int uv_http_response_start(uv_http_conn_t *conn, int status,
     if (conn->response_started) {
         buckets_error("Response already started");
         return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    /* Check if connection is still valid for writing */
+    if (conn->state == CONN_STATE_CLOSING || uv_is_closing((uv_handle_t*)&conn->tcp)) {
+        buckets_debug("Connection closing, skipping response start");
+        return BUCKETS_ERR_IO;
+    }
+    
+    /* If running in async handler (worker thread), buffer response instead of
+     * calling uv_write directly - uv_write is NOT thread-safe! */
+    if (conn->async_work) {
+        uv_async_work_t *async = conn->async_work;
+        async->status_code = status;
+        async->content_length = content_length;
+        async->response_started = true;
+        
+        /* Copy headers */
+        async->num_headers = 0;
+        for (int i = 0; i < num_headers && headers && headers[i] && async->num_headers < 62; i += 2) {
+            async->response_headers[async->num_headers] = buckets_strdup(headers[i]);
+            async->response_headers[async->num_headers + 1] = buckets_strdup(headers[i + 1]);
+            async->num_headers += 2;
+        }
+        async->response_headers[async->num_headers] = NULL;
+        
+        conn->response_started = true;
+        conn->response_chunked = false;
+        return BUCKETS_OK;
     }
     
     /* Build response header */
@@ -1455,6 +1831,34 @@ int uv_http_response_start(uv_http_conn_t *conn, int status,
 int uv_http_response_write(uv_http_conn_t *conn, const void *data, size_t len)
 {
     if (len == 0) return BUCKETS_OK;
+    
+    /* Check if connection is still valid for writing */
+    if (conn->state == CONN_STATE_CLOSING || uv_is_closing((uv_handle_t*)&conn->tcp)) {
+        buckets_debug("Connection closing, skipping response write");
+        return BUCKETS_ERR_IO;
+    }
+    
+    /* If running in async handler (worker thread), buffer response body instead of
+     * calling uv_write directly - uv_write is NOT thread-safe! */
+    if (conn->async_work) {
+        uv_async_work_t *async = conn->async_work;
+        
+        /* Grow buffer if needed */
+        size_t needed = async->response_body_len + len;
+        if (needed > async->response_body_capacity) {
+            size_t new_cap = async->response_body_capacity ? async->response_body_capacity * 2 : 4096;
+            while (new_cap < needed) new_cap *= 2;
+            char *new_buf = buckets_realloc(async->response_body, new_cap);
+            if (!new_buf) return BUCKETS_ERR_NOMEM;
+            async->response_body = new_buf;
+            async->response_body_capacity = new_cap;
+        }
+        
+        /* Append data */
+        memcpy(async->response_body + async->response_body_len, data, len);
+        async->response_body_len += len;
+        return BUCKETS_OK;
+    }
     
     /* Allocate write buffer */
     char *write_buf;
@@ -1515,6 +1919,13 @@ int uv_http_response_write(uv_http_conn_t *conn, const void *data, size_t len)
 
 int uv_http_response_end(uv_http_conn_t *conn)
 {
+    /* If running in async handler (worker thread), mark response ready.
+     * The actual send will happen in async_handler_after_work on the event loop thread. */
+    if (conn->async_work) {
+        conn->async_work->response_ready = true;
+        return BUCKETS_OK;
+    }
+    
     if (conn->response_chunked && conn->response_started) {
         /* Send terminating chunk for chunked encoding: "0\r\n\r\n" */
         const char *terminator = "0\r\n\r\n";
@@ -1541,15 +1952,31 @@ int uv_http_response_end(uv_http_conn_t *conn)
 
 static void on_write_complete(uv_write_t *req, int status)
 {
+    /* Extract connection pointer BEFORE freeing req */
+    uv_http_conn_t *conn = (uv_http_conn_t*)req->handle->data;
+    
     char *buf = (char*)req->data;
     if (buf) buckets_free(buf);
     buckets_free(req);
     
+    if (!conn) return;
+    
     if (status < 0) {
-        /* Get connection from write request */
-        uv_http_conn_t *conn = (uv_http_conn_t*)req->handle->data;
-        if (conn) {
-            buckets_debug("Write failed: %s", uv_strerror(status));
+        buckets_debug("Write failed: %s", uv_strerror(status));
+        uv_http_conn_close(conn);
+        return;
+    }
+    
+    /* If this was the final response write, handle keep-alive now */
+    if (conn->pending_final_write) {
+        conn->pending_final_write = false;
+        
+        if (conn->keep_alive && conn->state != CONN_STATE_CLOSING) {
+            /* Reset for next request */
+            uv_http_conn_reset(conn);
+            conn->state = CONN_STATE_KEEPALIVE_WAIT;
+            uv_http_conn_reset_timeout(conn, conn->server->keepalive_timeout_ms);
+        } else {
             uv_http_conn_close(conn);
         }
     }

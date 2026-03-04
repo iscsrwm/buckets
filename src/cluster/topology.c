@@ -755,7 +755,27 @@ int buckets_topology_populate_endpoints_from_config(buckets_cluster_topology_t *
     uuid_endpoint_map_t *uuid_map = buckets_calloc(total_disks, sizeof(uuid_endpoint_map_t));
     int map_count = 0;
     
-    /* Iterate through topology to get all UUIDs */
+    /* Iterate through topology to get all UUIDs and map them to endpoints.
+     * 
+     * The topology lists disks in order: set0[disk0, disk1, ...], set1[disk0, disk1, ...]
+     * The config.cluster.nodes lists nodes in order: node0, node1, node2, ...
+     * Each node has its own disk_count (usually the same for all nodes).
+     * 
+     * We need to map global_disk_idx -> (node_idx, disk_in_node) correctly.
+     * This requires iterating through nodes to find cumulative disk counts.
+     */
+    
+    /* Build cumulative disk count array for fast lookup */
+    int *cumulative_disks = buckets_calloc(config->cluster.node_count + 1, sizeof(int));
+    cumulative_disks[0] = 0;
+    for (int i = 0; i < config->cluster.node_count; i++) {
+        cumulative_disks[i + 1] = cumulative_disks[i] + config->cluster.nodes[i].disk_count;
+    }
+    int total_cluster_disks = cumulative_disks[config->cluster.node_count];
+    
+    buckets_info("Building endpoint map: %d nodes, %d total disks in cluster config",
+                 config->cluster.node_count, total_cluster_disks);
+    
     int global_disk_idx = 0;
     for (int pool_idx = 0; pool_idx < topology->pool_count; pool_idx++) {
         buckets_pool_topology_t *pool = &topology->pools[pool_idx];
@@ -766,16 +786,23 @@ int buckets_topology_populate_endpoints_from_config(buckets_cluster_topology_t *
             for (int disk_idx = 0; disk_idx < set->disk_count; disk_idx++) {
                 buckets_disk_info_t *disk = &set->disks[disk_idx];
                 
-                /* Find which node this disk belongs to based on position */
-                /* Assume disks are distributed evenly: node0 has disks 0-3, node1 has 4-7, etc */
-                int disks_per_node = config->storage.disk_count;  /* Each node has same number of disks */
-                int owner_node_idx = global_disk_idx / disks_per_node;
-                int disk_in_node = global_disk_idx % disks_per_node;
+                /* Find which node owns this disk by searching cumulative counts */
+                int owner_node_idx = -1;
+                int disk_in_node = -1;
                 
-                if (owner_node_idx < config->cluster.node_count) {
+                for (int n = 0; n < config->cluster.node_count; n++) {
+                    if (global_disk_idx >= cumulative_disks[n] && 
+                        global_disk_idx < cumulative_disks[n + 1]) {
+                        owner_node_idx = n;
+                        disk_in_node = global_disk_idx - cumulative_disks[n];
+                        break;
+                    }
+                }
+                
+                if (owner_node_idx >= 0 && owner_node_idx < config->cluster.node_count) {
                     buckets_cluster_node_t *node = &config->cluster.nodes[owner_node_idx];
                     
-                    if (disk_in_node < node->disk_count) {
+                    if (disk_in_node >= 0 && disk_in_node < node->disk_count) {
                         /* Create mapping entry */
                         uuid_endpoint_map_t *entry = &uuid_map[map_count++];
                         strncpy(entry->uuid, disk->uuid, sizeof(entry->uuid) - 1);
@@ -785,15 +812,24 @@ int buckets_topology_populate_endpoints_from_config(buckets_cluster_topology_t *
                         snprintf(entry->endpoint, sizeof(entry->endpoint), 
                                 "%s%s", node->endpoint, node->disks[disk_in_node]);
                         
-                        buckets_debug("Mapped UUID %s (global_idx=%d, node=%d, disk=%d) -> %s", 
-                                    disk->uuid, global_disk_idx, owner_node_idx, disk_in_node, entry->endpoint);
+                        buckets_info("Mapped UUID %s (global_idx=%d, node=%d/%s, disk=%d) -> %s", 
+                                    disk->uuid, global_disk_idx, owner_node_idx, 
+                                    node->id ? node->id : "?", disk_in_node, entry->endpoint);
+                    } else {
+                        buckets_warn("Invalid disk_in_node=%d for node %d (has %d disks)",
+                                    disk_in_node, owner_node_idx, node->disk_count);
                     }
+                } else {
+                    buckets_warn("Could not find owner node for global_disk_idx=%d (total_cluster_disks=%d)",
+                                global_disk_idx, total_cluster_disks);
                 }
                 
                 global_disk_idx++;
             }
         }
     }
+    
+    buckets_free(cumulative_disks);
     
     buckets_info("Built UUID->endpoint map with %d entries from topology", map_count);
     

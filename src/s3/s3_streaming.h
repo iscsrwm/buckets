@@ -49,6 +49,11 @@ typedef struct {
     char content_type[128];
     char etag[65];                 /* Computed MD5/BLAKE2b */
     
+    /* User metadata (x-amz-meta-*) */
+    char *user_meta_keys[32];      /* Keys without x-amz-meta- prefix */
+    char *user_meta_values[32];    /* Values */
+    int user_meta_count;           /* Number of entries */
+    
     /* Chunk buffering */
     uint8_t *chunk_buffer;         /* Current chunk being assembled */
     size_t chunk_buffer_len;       /* Bytes in current chunk */

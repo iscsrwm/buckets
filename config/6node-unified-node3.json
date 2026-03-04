@@ -20,13 +20,13 @@
     "deployment_id": "6node-unified-cluster",
     "nodes": [
       {
-        "id": "node3",
-        "endpoint": "http://localhost:9003",
+        "id": "node1",
+        "endpoint": "http://localhost:9001",
         "disks": [
-          "/tmp/buckets-6node-unified/node3/disk1",
-          "/tmp/buckets-6node-unified/node3/disk2",
-          "/tmp/buckets-6node-unified/node3/disk3",
-          "/tmp/buckets-6node-unified/node3/disk4"
+          "/tmp/buckets-6node-unified/node1/disk1",
+          "/tmp/buckets-6node-unified/node1/disk2",
+          "/tmp/buckets-6node-unified/node1/disk3",
+          "/tmp/buckets-6node-unified/node1/disk4"
         ]
       },
       {

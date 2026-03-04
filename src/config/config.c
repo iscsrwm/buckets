@@ -163,6 +163,12 @@ buckets_config_t* buckets_config_load(const char *filepath)
             config->cluster.enabled = cJSON_IsTrue(enabled);
         }
         
+        /* Parse deployment_id - critical for consistent placement across nodes */
+        cJSON *deployment_id = cJSON_GetObjectItem(cluster, "deployment_id");
+        if (deployment_id && cJSON_IsString(deployment_id)) {
+            config->cluster.deployment_id = buckets_strdup(deployment_id->valuestring);
+        }
+        
         cJSON *peers = cJSON_GetObjectItem(cluster, "peers");
         if (peers) {
             if (parse_string_array(peers, &config->cluster.peers,
@@ -304,6 +310,8 @@ void buckets_config_free(buckets_config_t *config)
     buckets_free(config->storage.disks);
     
     /* Free cluster */
+    buckets_free(config->cluster.deployment_id);
+    
     if (config->cluster.peers) {
         for (int i = 0; i < config->cluster.peer_count; i++) {
             buckets_free(config->cluster.peers[i]);

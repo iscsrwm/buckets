@@ -38,7 +38,7 @@
 #define STREAM_BUFFER_SIZE (256 * 1024)  /* 256 KB chunks */
 
 /* Timeout for socket operations (seconds) */
-#define SOCKET_TIMEOUT_SEC 300  /* 5 minutes for large transfers */
+#define SOCKET_TIMEOUT_SEC 30  /* 30 seconds max (reduced from 300) */
 
 /* ===================================================================
  * URL Encoding/Decoding

@@ -34,7 +34,7 @@ static char g_local_node_endpoint[256] = {0};
 int buckets_distributed_storage_init(void)
 {
     /* Create connection pool for RPC calls */
-    g_conn_pool = buckets_conn_pool_create(30);  /* max=30 connections */
+    g_conn_pool = buckets_conn_pool_create(200);  /* max=200 connections for cluster */
     if (!g_conn_pool) {
         buckets_error("Failed to create connection pool for distributed storage");
         return BUCKETS_ERR_NOMEM;
@@ -310,10 +310,10 @@ int buckets_distributed_write_chunk(const char *peer_endpoint,
     
     buckets_free(chunk_data_b64);
     
-    /* Call RPC - use longer timeout for large chunk transfers */
+    /* Call RPC - use reasonable timeout for chunk transfers */
     buckets_rpc_response_t *response = NULL;
     int ret = buckets_rpc_call(g_rpc_ctx, peer_endpoint, "storage.writeChunk",
-                               params, &response, 300000);  /* 300 second (5 min) timeout for large chunks */
+                               params, &response, 30000);  /* 30 second timeout (reduced from 300) */
     
     cJSON_Delete(params);
     
@@ -596,10 +596,20 @@ int buckets_distributed_read_xlmeta(const char *peer_endpoint,
  * ===================================================================*/
 
 /**
- * Delete object from all distributed disks
+ * Delete object from distributed disks
  * 
- * Looks up placement to find all disks where the object is stored,
- * then deletes chunks and metadata from each disk (local and remote).
+ * Uses placement to find all disks in the erasure set and deletes the object
+ * from all of them. This is simpler and avoids the deadlock that would occur
+ * if we tried to lookup the registry (which makes RPC calls).
+ * 
+ * Note: We intentionally DON'T use registry lookup here because:
+ * 1. Registry lookup calls buckets_get_object() which makes readXlMeta RPCs
+ * 2. If multiple DELETEs are happening concurrently, each node would be waiting
+ *    for RPC responses from other nodes while holding thread pool threads
+ * 3. This creates a deadlock where all nodes are waiting for each other
+ * 
+ * Instead, we just delete from all placement disks. The delete is idempotent,
+ * so deleting from disks that don't have the object is harmless.
  */
 int buckets_distributed_delete_object(const char *bucket, const char *object)
 {
@@ -618,11 +628,14 @@ int buckets_distributed_delete_object(const char *bucket, const char *object)
         return buckets_delete_object(bucket, object);
     }
     
+    buckets_info("DELETE using placement: %u disks for %s/%s",
+                placement->disk_count, bucket, object);
+    
     /* Compute object path (hash-based) */
     char object_path[PATH_MAX];
     buckets_compute_object_path(bucket, object, object_path, sizeof(object_path));
     
-    /* Use parallel delete for performance (deletes all shards concurrently) */
+    /* Use parallel delete */
     extern int buckets_parallel_delete_chunks(const char *bucket,
                                                const char *object,
                                                const char *object_path,

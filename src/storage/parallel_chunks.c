@@ -220,6 +220,13 @@ int buckets_parallel_write_chunks(const char *bucket,
         strncpy(task->bucket, bucket, sizeof(task->bucket) - 1);
         strncpy(task->object, object, sizeof(task->object) - 1);
         strncpy(task->object_path, object_path, sizeof(task->object_path) - 1);
+        
+        /* NULL check for disk_path to prevent segfault in strncpy */
+        if (placement->disk_paths[i] == NULL) {
+            buckets_error("NULL disk_path at index %u for object %s/%s", i, bucket, object);
+            buckets_free(tasks);
+            return -1;
+        }
         strncpy(task->disk_path, placement->disk_paths[i], sizeof(task->disk_path) - 1);
         
         task->chunk_data = chunk_data_array[i];
@@ -227,6 +234,12 @@ int buckets_parallel_write_chunks(const char *bucket,
         
         /* Determine if local or remote */
         if (has_endpoints) {
+            /* NULL check for disk_endpoint to prevent segfault */
+            if (placement->disk_endpoints[i] == NULL) {
+                buckets_error("NULL disk_endpoint at index %u for object %s/%s", i, bucket, object);
+                buckets_free(tasks);
+                return -1;
+            }
             extern bool buckets_distributed_is_local_disk(const char *disk_endpoint);
             task->is_local = buckets_distributed_is_local_disk(placement->disk_endpoints[i]);
             
@@ -332,6 +345,13 @@ int buckets_parallel_read_chunks(const char *bucket,
         strncpy(task->bucket, bucket, sizeof(task->bucket) - 1);
         strncpy(task->object, object, sizeof(task->object) - 1);
         strncpy(task->object_path, object_path, sizeof(task->object_path) - 1);
+        
+        /* NULL check for disk_path to prevent segfault in strncpy */
+        if (placement->disk_paths[i] == NULL) {
+            buckets_error("NULL disk_path at index %u for object %s/%s", i, bucket, object);
+            buckets_free(tasks);
+            return -1;
+        }
         strncpy(task->disk_path, placement->disk_paths[i], sizeof(task->disk_path) - 1);
         
         task->chunk_data_out = NULL;
@@ -339,6 +359,12 @@ int buckets_parallel_read_chunks(const char *bucket,
         
         /* Determine if local or remote */
         if (has_endpoints) {
+            /* NULL check for disk_endpoint to prevent segfault */
+            if (placement->disk_endpoints[i] == NULL) {
+                buckets_error("NULL disk_endpoint at index %u for object %s/%s", i, bucket, object);
+                buckets_free(tasks);
+                return -1;
+            }
             extern bool buckets_distributed_is_local_disk(const char *disk_endpoint);
             task->is_local = buckets_distributed_is_local_disk(placement->disk_endpoints[i]);
             
@@ -612,6 +638,9 @@ static void* chunk_delete_worker(void *arg)
         
     } else {
         /* Remote delete via RPC */
+        buckets_info("DEBUG: Remote delete START chunk=%u to %s", 
+                    task->chunk_index, task->node_endpoint);
+        
         extern buckets_rpc_context_t* buckets_distributed_storage_get_rpc_context(void);
         buckets_rpc_context_t *rpc_ctx = buckets_distributed_storage_get_rpc_context();
         
@@ -628,15 +657,19 @@ static void* chunk_delete_worker(void *arg)
         cJSON_AddNumberToObject(params, "chunk_index", task->chunk_index);
         cJSON_AddStringToObject(params, "disk_path", task->disk_path);
         
+        buckets_info("DEBUG: About to call RPC to %s", task->node_endpoint);
+        
         /* Make RPC call (2 second timeout - deletes are fast) */
         buckets_rpc_response_t *response = NULL;
         int ret = buckets_rpc_call(rpc_ctx, task->node_endpoint, 
                                    "storage.deleteChunk", params, &response, 2000);
         
+        buckets_info("DEBUG: RPC returned ret=%d response=%p", ret, (void*)response);
+        
         cJSON_Delete(params);
         
         if (ret != 0 || !response) {
-            buckets_error("Parallel delete: RPC failed to %s", task->node_endpoint);
+            buckets_error("Parallel delete: RPC failed to %s (ret=%d)", task->node_endpoint, ret);
             task->result = -1;
         } else if (response->error_code != 0) {
             buckets_error("Parallel delete: Remote error: %s",
@@ -644,8 +677,8 @@ static void* chunk_delete_worker(void *arg)
             task->result = -1;
         } else {
             task->result = 0;
-            buckets_debug("Parallel delete: chunk %u via RPC to %s",
-                         task->chunk_index, task->node_endpoint);
+            buckets_info("DEBUG: Remote delete SUCCESS chunk=%u to %s",
+                        task->chunk_index, task->node_endpoint);
         }
         
         if (response) {
@@ -702,10 +735,23 @@ int buckets_parallel_delete_chunks(const char *bucket,
         strncpy(task->bucket, bucket, sizeof(task->bucket) - 1);
         strncpy(task->object, object, sizeof(task->object) - 1);
         strncpy(task->object_path, object_path, sizeof(task->object_path) - 1);
+        
+        /* NULL check for disk_path to prevent segfault in strncpy */
+        if (placement->disk_paths[i] == NULL) {
+            buckets_error("NULL disk_path at index %u for object %s/%s", i, bucket, object);
+            buckets_free(tasks);
+            return -1;
+        }
         strncpy(task->disk_path, placement->disk_paths[i], sizeof(task->disk_path) - 1);
         
         /* Determine if local or remote */
         if (has_endpoints) {
+            /* NULL check for disk_endpoint to prevent segfault */
+            if (placement->disk_endpoints[i] == NULL) {
+                buckets_error("NULL disk_endpoint at index %u for object %s/%s", i, bucket, object);
+                buckets_free(tasks);
+                return -1;
+            }
             extern bool buckets_distributed_is_local_disk(const char *disk_endpoint);
             task->is_local = buckets_distributed_is_local_disk(placement->disk_endpoints[i]);
             
@@ -727,28 +773,54 @@ int buckets_parallel_delete_chunks(const char *bucket,
         task->result = -1;  /* Initialize as failed */
     }
     
-    /* Launch threads - all in parallel */
+    /* Execute deletes: local deletes can be parallel, remote deletes are sequential
+     * to prevent thread pool exhaustion and deadlock.
+     * 
+     * The problem with parallel remote deletes is:
+     * 1. Each remote delete blocks a thread waiting for RPC response
+     * 2. Remote node needs a thread to process the RPC
+     * 3. If all threads are blocked waiting for each other = deadlock
+     */
+    int deleted_count = 0;
+    int failed_count = 0;
+    
+    /* First pass: do all LOCAL deletes in parallel (fast, no RPC blocking) */
+    u32 local_count = 0;
     for (u32 i = 0; i < num_disks; i++) {
-        int ret = pthread_create(&tasks[i].thread, NULL, chunk_delete_worker, &tasks[i]);
-        if (ret != 0) {
-            buckets_error("Failed to create delete thread for disk %u: %d", i + 1, ret);
-            tasks[i].result = -1;
+        if (tasks[i].is_local) {
+            int ret = pthread_create(&tasks[i].thread, NULL, chunk_delete_worker, &tasks[i]);
+            if (ret != 0) {
+                buckets_error("Failed to create delete thread for disk %u: %d", i + 1, ret);
+                tasks[i].result = -1;
+                tasks[i].thread = 0;
+            } else {
+                local_count++;
+            }
         }
     }
     
-    /* Wait for all threads to complete */
-    int deleted_count = 0;
-    int failed_count = 0;
+    /* Wait for local deletes */
     for (u32 i = 0; i < num_disks; i++) {
-        if (tasks[i].thread != 0) {
+        if (tasks[i].is_local && tasks[i].thread != 0) {
             pthread_join(tasks[i].thread, NULL);
+            if (tasks[i].result == 0) {
+                deleted_count++;
+            } else {
+                failed_count++;
+            }
         }
-        
-        if (tasks[i].result == 0) {
-            deleted_count++;
-        } else {
-            failed_count++;
-            buckets_debug("Parallel delete: disk %u failed", i + 1);
+    }
+    
+    /* Second pass: do REMOTE deletes sequentially (avoids thread pool exhaustion) */
+    for (u32 i = 0; i < num_disks; i++) {
+        if (!tasks[i].is_local) {
+            /* Execute synchronously in current thread - no new thread needed */
+            chunk_delete_worker(&tasks[i]);
+            if (tasks[i].result == 0) {
+                deleted_count++;
+            } else {
+                failed_count++;
+            }
         }
     }
     

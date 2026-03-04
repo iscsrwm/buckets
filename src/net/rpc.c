@@ -9,11 +9,17 @@
 #include <string.h>
 #include <time.h>
 #include <pthread.h>
+#include <semaphore.h>
 #include <uuid/uuid.h>
 
 #include "buckets.h"
 #include "buckets_net.h"
 #include "cJSON.h"
+
+/* Maximum concurrent outgoing RPC calls per context.
+ * This prevents thread pool exhaustion when many parallel operations
+ * are making RPC calls simultaneously. */
+#define MAX_CONCURRENT_RPC_CALLS 16
 
 /* ===================================================================
  * RPC Context Structure
@@ -36,6 +42,8 @@ struct buckets_rpc_context {
     buckets_conn_pool_t *pool;         /* Connection pool for RPC calls */
     rpc_handler_entry_t *handlers;     /* Handler list */
     pthread_mutex_t lock;              /* Thread safety */
+    sem_t rpc_semaphore;               /* Limits concurrent outgoing RPC calls */
+    bool semaphore_initialized;        /* Track if semaphore was initialized */
 };
 
 /* ===================================================================
@@ -86,12 +94,26 @@ buckets_rpc_context_t* buckets_rpc_context_create(buckets_conn_pool_t *pool)
     
     ctx->pool = pool;
     ctx->handlers = NULL;
+    ctx->semaphore_initialized = false;
     
     if (pthread_mutex_init(&ctx->lock, NULL) != 0) {
         buckets_error("RPC context create: failed to initialize mutex");
         buckets_free(ctx);
         return NULL;
     }
+    
+    /* Initialize semaphore to limit concurrent RPC calls.
+     * This prevents thread pool exhaustion when many parallel operations
+     * (e.g., DELETE across 12 disks x N concurrent requests) are active. */
+    if (sem_init(&ctx->rpc_semaphore, 0, MAX_CONCURRENT_RPC_CALLS) != 0) {
+        buckets_error("RPC context create: failed to initialize semaphore");
+        pthread_mutex_destroy(&ctx->lock);
+        buckets_free(ctx);
+        return NULL;
+    }
+    ctx->semaphore_initialized = true;
+    
+    buckets_info("RPC context created with max %d concurrent calls", MAX_CONCURRENT_RPC_CALLS);
     
     return ctx;
 }
@@ -152,6 +174,11 @@ void buckets_rpc_context_free(buckets_rpc_context_t *ctx)
         rpc_handler_entry_t *next = entry->next;
         buckets_free(entry);
         entry = next;
+    }
+    
+    /* Destroy semaphore */
+    if (ctx->semaphore_initialized) {
+        sem_destroy(&ctx->rpc_semaphore);
     }
     
     pthread_mutex_destroy(&ctx->lock);
@@ -395,6 +422,32 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
         timeout_ms = 5000;
     }
     
+    /* Acquire semaphore to limit concurrent RPC calls.
+     * This prevents thread pool exhaustion when many parallel operations
+     * are making RPC calls simultaneously (e.g., 6 nodes x 12 disks = 72 threads).
+     * Use timed wait to avoid deadlock - if we can't get the semaphore within
+     * the timeout, fail the RPC call. */
+    struct timespec sem_timeout;
+    clock_gettime(CLOCK_REALTIME, &sem_timeout);
+    sem_timeout.tv_sec += (timeout_ms / 1000) + 1;  /* Add 1 second buffer */
+    sem_timeout.tv_nsec += (timeout_ms % 1000) * 1000000;
+    if (sem_timeout.tv_nsec >= 1000000000) {
+        sem_timeout.tv_sec++;
+        sem_timeout.tv_nsec -= 1000000000;
+    }
+    
+    buckets_info("DEBUG RPC: waiting for semaphore to %s method=%s", peer_endpoint, method);
+    
+    if (sem_timedwait(&ctx->rpc_semaphore, &sem_timeout) != 0) {
+        buckets_warn("RPC call to %s: timed out waiting for semaphore (concurrent limit: %d)",
+                    peer_endpoint, MAX_CONCURRENT_RPC_CALLS);
+        return BUCKETS_ERR_TIMEOUT;
+    }
+    
+    buckets_info("DEBUG RPC: got semaphore, proceeding to %s", peer_endpoint);
+    
+    /* From here on, we must release the semaphore before returning */
+    
     /* Create RPC request */
     buckets_rpc_request_t request;
     memset(&request, 0, sizeof(request));
@@ -408,6 +461,7 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
     char *request_json = NULL;
     int ret = buckets_rpc_request_serialize(&request, &request_json);
     if (ret != BUCKETS_OK) {
+        sem_post(&ctx->rpc_semaphore);
         return ret;
     }
     
@@ -419,6 +473,7 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
     const char *proto_end = strstr(peer_endpoint, "://");
     if (!proto_end) {
         buckets_free(request_json);
+        sem_post(&ctx->rpc_semaphore);
         return BUCKETS_ERR_INVALID_ARG;
     }
     
@@ -426,12 +481,14 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
     const char *port_start = strchr(host_start, ':');
     if (!port_start) {
         buckets_free(request_json);
+        sem_post(&ctx->rpc_semaphore);
         return BUCKETS_ERR_INVALID_ARG;
     }
     
     size_t host_length = port_start - host_start;
     if (host_length >= sizeof(host)) {
         buckets_free(request_json);
+        sem_post(&ctx->rpc_semaphore);
         return BUCKETS_ERR_INVALID_ARG;
     }
     
@@ -446,6 +503,7 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
     
     if (ret != BUCKETS_OK) {
         buckets_free(request_json);
+        sem_post(&ctx->rpc_semaphore);
         buckets_error("RPC call: failed to get connection to %s", peer_endpoint);
         return ret;
     }
@@ -464,6 +522,7 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
     if (ret != BUCKETS_OK) {
         /* RPC failed - close connection */
         buckets_conn_pool_close(ctx->pool, conn);
+        sem_post(&ctx->rpc_semaphore);
         buckets_error("RPC call: failed to send request to %s", peer_endpoint);
         return ret;
     }
@@ -472,6 +531,7 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
         buckets_error("RPC call: HTTP %d from %s", status_code, peer_endpoint);
         buckets_free(response_body);
         buckets_conn_pool_close(ctx->pool, conn);
+        sem_post(&ctx->rpc_semaphore);
         return BUCKETS_ERR_NETWORK;
     }
     
@@ -484,6 +544,7 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
     if (ret != BUCKETS_OK) {
         buckets_error("RPC call: failed to parse response from %s", peer_endpoint);
         buckets_conn_pool_close(ctx->pool, conn);
+        sem_post(&ctx->rpc_semaphore);
         return ret;
     }
     
@@ -497,12 +558,15 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
     double total_rpc_time = (end_parse.tv_sec - start_rpc.tv_sec) + 
                            (end_parse.tv_nsec - start_rpc.tv_nsec) / 1e9;
     
-    buckets_debug("⏱️  RPC %s: total=%.3fms (conn=%.3fms, send=%.3fms, parse=%.3fms)",
+    buckets_debug("RPC %s: total=%.3fms (conn=%.3fms, send=%.3fms, parse=%.3fms)",
                   method, total_rpc_time * 1000, conn_time * 1000, 
                   send_time * 1000, parse_time * 1000);
     
     /* Success - release connection back to pool for reuse */
     buckets_conn_pool_release(ctx->pool, conn);
+    
+    /* Release semaphore to allow other threads to make RPC calls */
+    sem_post(&ctx->rpc_semaphore);
     
     *response = res;
     return BUCKETS_OK;
@@ -580,6 +644,8 @@ int buckets_rpc_dispatch(buckets_rpc_context_t *ctx,
 void buckets_rpc_http_handler(buckets_http_request_t *req,
                                buckets_http_response_t *res)
 {
+    buckets_info("DEBUG RPC HANDLER: received request, body_len=%zu", req->body_len);
+    
     /* Only accept POST requests */
     if (!req->method || strcmp(req->method, "POST") != 0) {
         buckets_http_response_error(res, 405, "Method not allowed");
@@ -614,6 +680,8 @@ void buckets_rpc_http_handler(buckets_http_request_t *req,
         return;
     }
     
+    buckets_info("DEBUG RPC HANDLER: method=%s", method_obj->valuestring);
+    
     const char *method = method_obj->valuestring;
     cJSON *params = cJSON_GetObjectItem(json, "params");
     cJSON *id_obj = cJSON_GetObjectItem(json, "id");
@@ -642,12 +710,16 @@ void buckets_rpc_http_handler(buckets_http_request_t *req,
     }
     
     /* Call handler */
+    buckets_info("DEBUG RPC HANDLER: calling handler for %s", method);
+    
     cJSON *result_obj = NULL;
     int error_code = 0;
     char error_message[256] = {0};
     
     int ret = entry->handler(method, params, &result_obj, &error_code, 
                             error_message, entry->user_data);
+    
+    buckets_info("DEBUG RPC HANDLER: handler returned ret=%d for %s", ret, method);
     
     /* Build RPC response in internal format */
     cJSON *response = cJSON_CreateObject();

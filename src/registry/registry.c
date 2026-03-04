@@ -706,9 +706,21 @@ int buckets_registry_lookup(const char *bucket, const char *object,
         return -1;  /* Not found */
     }
     
-    /* Deserialize from JSON */
-    *location = buckets_registry_location_from_json((const char*)json_data);
+    /* Null-terminate the JSON data for cJSON_Parse (buckets_get_object returns 
+     * non-null-terminated data from base64_decode for inline objects) */
+    char *json_str = buckets_malloc(json_size + 1);
+    if (!json_str) {
+        buckets_free(json_data);
+        buckets_free(key);
+        return -1;
+    }
+    memcpy(json_str, json_data, json_size);
+    json_str[json_size] = '\0';
     buckets_free(json_data);
+    
+    /* Deserialize from JSON */
+    *location = buckets_registry_location_from_json(json_str);
+    buckets_free(json_str);
     
     if (!*location) {
         buckets_free(key);

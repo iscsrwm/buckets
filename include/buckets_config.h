@@ -48,6 +48,7 @@ typedef struct {
  */
 typedef struct {
     bool enabled;           /* Enable clustering */
+    char *deployment_id;    /* Cluster deployment ID (used to generate consistent UUIDs) */
     char **peers;           /* Array of peer addresses (deprecated, use nodes) */
     int peer_count;         /* Number of peers */
     buckets_cluster_node_t *nodes;  /* Array of cluster nodes with disk info */

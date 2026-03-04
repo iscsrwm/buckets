@@ -116,14 +116,26 @@ static int format_disks_from_config(const char *config_file, bool force) {
     int sets = config->cluster.enabled ? config->cluster.sets : 1;
     int disks_per_set = config->cluster.enabled ? config->cluster.disks_per_set : config->storage.disk_count;
     
-    buckets_format_t *format = buckets_format_new(sets, disks_per_set);
+    /* Use the cluster's deployment_id from config to generate a deterministic UUID.
+     * This is critical for multi-node clusters - all nodes must use the same
+     * deployment_id for consistent object placement. */
+    const char *cluster_deployment_id = config->cluster.enabled ? 
+                                        config->cluster.deployment_id : NULL;
+    
+    extern buckets_format_t* buckets_format_new_with_deployment_id(int set_count, 
+                                                                   int disks_per_set,
+                                                                   const char *cluster_deployment_id);
+    buckets_format_t *format = buckets_format_new_with_deployment_id(sets, disks_per_set,
+                                                                     cluster_deployment_id);
     if (!format) {
         buckets_error("Failed to create format structure");
         buckets_config_free(config);
         return 1;
     }
     
-    buckets_info("Created format with deployment_id: %s", format->meta.deployment_id);
+    buckets_info("Created format with deployment_id: %s (from cluster: %s)", 
+                 format->meta.deployment_id, 
+                 cluster_deployment_id ? cluster_deployment_id : "random");
     
     /* Assign disk UUIDs and save format to each disk */
     int disk_idx = 0;
@@ -193,6 +205,15 @@ static int format_disks_from_config(const char *config_file, bool force) {
 int main(int argc, char *argv[]) {
     int ret = 0;
 
+    /* Set libuv thread pool size BEFORE any libuv calls.
+     * Default is 4 which is too small for distributed operations.
+     * Each async handler (RPC, S3 ops) uses a thread from this pool.
+     * With 6 nodes making concurrent RPCs, we need more threads to
+     * prevent deadlock. 32 threads should handle typical workloads. */
+    if (getenv("UV_THREADPOOL_SIZE") == NULL) {
+        setenv("UV_THREADPOOL_SIZE", "32", 1);
+    }
+
     /* Initialize logging first */
     buckets_log_init();
 
@@ -222,7 +243,7 @@ int main(int argc, char *argv[]) {
         /* Parse options */
         const char *config_file = NULL;
         int port = 9000;
-        bool use_uv_server = false;
+        bool use_uv_server = true;  /* Default to UV server for async/sync route support */
         
         for (int i = 2; i < argc; i++) {
             if (strcmp(argv[i], "--config") == 0) {

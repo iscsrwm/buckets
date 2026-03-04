@@ -123,6 +123,7 @@ struct uv_http_conn {
     bool response_started;
     bool response_chunked;
     bool message_complete;         /* Set by on_message_complete, processed after parse */
+    bool pending_final_write;      /* True when final response write is pending (for keep-alive handling) */
     uv_write_t write_req;
     char *write_buffer;
     size_t write_buffer_len;
@@ -130,6 +131,9 @@ struct uv_http_conn {
     /* Streaming handler context */
     void *stream_ctx;
     uv_route_t *streaming_route;   /* Active streaming route, or NULL */
+    
+    /* Async handler context - set when handler runs in thread pool */
+    struct uv_async_work *async_work;  /* Non-NULL when in async handler */
     
     /* Read buffer */
     char read_buffer[BUCKETS_READ_BUFFER_SIZE];
@@ -213,6 +217,7 @@ struct uv_route {
     char *method;                  /* GET, PUT, etc. or NULL for any */
     char *path_prefix;             /* Path prefix to match */
     bool is_streaming;             /* Use streaming handler? */
+    bool is_async;                 /* Run handler in thread pool? */
     union {
         uv_http_handler_t legacy;
         uv_stream_handler_t streaming;
@@ -220,6 +225,31 @@ struct uv_route {
     void *user_data;
     struct uv_route *next;
 };
+
+/* ===================================================================
+ * Async Handler Work Structure
+ * ===================================================================*/
+
+typedef struct uv_async_work {
+    uv_work_t work;                /* Must be first for casting */
+    uv_http_conn_t *conn;
+    uv_route_t *route;             /* Route if from add_route, NULL if default handler */
+    
+    /* Handler override for default handler (when route is NULL) */
+    uv_http_handler_t handler;
+    void *handler_data;
+    
+    /* Response built by handler in worker thread - buffered for thread safety */
+    int status_code;
+    char *response_headers[64];    /* Header name/value pairs, NULL terminated */
+    int num_headers;
+    size_t content_length;
+    char *response_body;           /* Buffered body data */
+    size_t response_body_len;
+    size_t response_body_capacity;
+    bool response_ready;           /* Response has been prepared */
+    bool response_started;         /* Handler called response_start */
+} uv_async_work_t;
 
 /* ===================================================================
  * HTTP Server
@@ -252,6 +282,7 @@ struct uv_http_server {
     uv_route_t *routes;
     uv_http_handler_t default_handler;
     void *default_handler_data;
+    bool default_handler_is_async;     /* Run default handler in thread pool? */
     
     /* Connection tracking */
     uv_http_conn_t *connections;
@@ -285,6 +316,18 @@ int uv_http_server_add_streaming_route(uv_http_server_t *server,
                                         const char *method,
                                         const char *path_prefix,
                                         uv_stream_handler_t *handler);
+
+/* Add async route - handler runs in thread pool, doesn't block event loop */
+int uv_http_server_add_async_route(uv_http_server_t *server,
+                                    const char *method,
+                                    const char *path_prefix,
+                                    uv_http_handler_t handler,
+                                    void *user_data);
+
+/* Set async default handler - runs in thread pool, doesn't block event loop */
+int uv_http_server_set_async_handler(uv_http_server_t *server,
+                                      uv_http_handler_t handler,
+                                      void *user_data);
 int uv_http_server_start(uv_http_server_t *server);
 int uv_http_server_stop(uv_http_server_t *server);
 void uv_http_server_free(uv_http_server_t *server);

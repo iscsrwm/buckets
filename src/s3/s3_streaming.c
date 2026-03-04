@@ -14,6 +14,7 @@
 #include "buckets_storage.h"
 #include "buckets_crypto.h"
 #include "s3_streaming.h"
+#include "../net/uv_server_internal.h"  /* For uv_http_server_add_async_route */
 
 /* ===================================================================
  * Global State
@@ -106,6 +107,26 @@ static void url_decode_inplace(char *str)
 static const char* get_header(uv_http_conn_t *conn, const char *name)
 {
     return uv_http_get_header(conn, name);
+}
+
+/* Callback for user metadata header iteration */
+static void stream_user_meta_callback(const char *name, const char *value, void *user_data)
+{
+    s3_stream_upload_t *upload = (s3_stream_upload_t *)user_data;
+    
+    if (upload->user_meta_count >= 32) {
+        buckets_warn("Too many user metadata headers, ignoring: %s", name);
+        return;
+    }
+    
+    /* Strip "x-amz-meta-" prefix (11 characters) */
+    const char *key = name + 11;
+    
+    upload->user_meta_keys[upload->user_meta_count] = buckets_strdup(key);
+    upload->user_meta_values[upload->user_meta_count] = buckets_strdup(value);
+    upload->user_meta_count++;
+    
+    buckets_debug("Streaming PUT: parsed user metadata: %s = %s", key, value);
 }
 
 /* Send error response */
@@ -213,6 +234,12 @@ void s3_stream_upload_free(s3_stream_upload_t *upload)
             }
         }
         buckets_free(upload->data_chunks);
+    }
+    
+    /* Free user metadata */
+    for (int i = 0; i < upload->user_meta_count; i++) {
+        buckets_free(upload->user_meta_keys[i]);
+        buckets_free(upload->user_meta_values[i]);
     }
     
     buckets_free(upload);
@@ -348,9 +375,47 @@ int s3_stream_upload_complete(s3_stream_upload_t *upload)
     }
     
     /* Write to storage using existing storage layer */
-    int ret = buckets_put_object(upload->bucket, upload->key,
+    int ret;
+    
+    /* Check if we have user metadata */
+    if (upload->user_meta_count > 0) {
+        /* Use put_object_with_metadata for user metadata support */
+        buckets_xl_meta_t meta;
+        memset(&meta, 0, sizeof(meta));
+        
+        /* Set content type */
+        if (upload->content_type[0]) {
+            meta.meta.content_type = buckets_strdup(upload->content_type);
+        }
+        
+        /* Copy user metadata */
+        for (int i = 0; i < upload->user_meta_count; i++) {
+            buckets_add_user_metadata(&meta, upload->user_meta_keys[i], 
+                                      upload->user_meta_values[i]);
+            buckets_info("Streaming PUT: Adding user metadata: %s = %s", 
+                        upload->user_meta_keys[i], upload->user_meta_values[i]);
+        }
+        
+        ret = buckets_put_object_with_metadata(upload->bucket, upload->key, 
+                                                object_data, total_size, 
+                                                &meta, false, NULL);
+        
+        /* Free metadata strings */
+        if (meta.meta.content_type) {
+            buckets_free(meta.meta.content_type);
+        }
+        for (u32 i = 0; i < meta.meta.user_count; i++) {
+            buckets_free(meta.meta.user_keys[i]);
+            buckets_free(meta.meta.user_values[i]);
+        }
+        if (meta.meta.user_keys) buckets_free(meta.meta.user_keys);
+        if (meta.meta.user_values) buckets_free(meta.meta.user_values);
+    } else {
+        /* No user metadata - use simple put */
+        ret = buckets_put_object(upload->bucket, upload->key,
                                   object_data, total_size,
                                   upload->content_type[0] ? upload->content_type : NULL);
+    }
     
     buckets_free(object_data);
     
@@ -361,8 +426,8 @@ int s3_stream_upload_complete(s3_stream_upload_t *upload)
     
     upload->completed = true;
     
-    buckets_info("Streaming upload complete: %s/%s (%zu bytes, ETag=%s)",
-                upload->bucket, upload->key, total_size, upload->etag);
+    buckets_info("Streaming upload complete: %s/%s (%zu bytes, ETag=%s, user_meta=%d)",
+                upload->bucket, upload->key, total_size, upload->etag, upload->user_meta_count);
     
     return 0;
 }
@@ -422,6 +487,18 @@ int s3_stream_on_request_start(uv_stream_request_t *req, void *user_data)
     const char *ct = get_header(conn, "Content-Type");
     if (ct) {
         strncpy(upload->content_type, ct, sizeof(upload->content_type) - 1);
+    }
+    
+    /* Parse x-amz-meta-* headers using external iterator */
+    extern int uv_http_iterate_headers_with_prefix(void *conn_ptr, const char *prefix,
+                                                    void (*callback)(const char *name, const char *value, void *user_data),
+                                                    void *user_data);
+    
+    uv_http_iterate_headers_with_prefix(conn, "x-amz-meta-", 
+                                        stream_user_meta_callback, upload);
+    
+    if (upload->user_meta_count > 0) {
+        buckets_info("Streaming PUT: parsed %d user metadata headers", upload->user_meta_count);
     }
     
     /* Store upload state in connection */
@@ -562,32 +639,67 @@ static void s3_legacy_uv_handler(uv_http_conn_t *conn, void *user_data)
     
     /* Send response using UV server API */
     if (http_res.status_code > 0) {
-        const char *headers[10];
+        /* Parse all headers from the headers string (format: "Name: value\r\n...") */
+        /* Max 64 headers (32 name-value pairs) */
+        const char *headers[64];
         int header_count = 0;
         
-        /* Add Content-Type header */
-        if (http_res.headers && strstr(http_res.headers, "Content-Type")) {
-            /* Parse headers string - simplified, assumes single header */
-            headers[header_count++] = "Content-Type";
-            /* Find the value after "Content-Type: " */
-            const char *ct = strstr(http_res.headers, "Content-Type:");
-            if (ct) {
-                ct += 13; /* Skip "Content-Type:" */
-                while (*ct == ' ') ct++;
-                /* Find end of value */
-                const char *end = strchr(ct, '\r');
-                if (!end) end = strchr(ct, '\n');
-                if (!end) end = ct + strlen(ct);
-                /* Copy value (statically allocated, careful!) */
-                static char ct_value[128];
-                size_t len = (size_t)(end - ct);
-                if (len >= sizeof(ct_value)) len = sizeof(ct_value) - 1;
-                strncpy(ct_value, ct, len);
-                ct_value[len] = '\0';
-                headers[header_count++] = ct_value;
+        /* Thread-local buffers for header names and values - allows up to 32 headers.
+         * NOTE: These must NOT be static as this handler runs in libuv thread pool! */
+        char header_names[32][128];
+        char header_values[32][512];
+        int parsed_count = 0;
+        
+        if (http_res.headers && http_res.headers[0] != '\0') {
+            const char *p = http_res.headers;
+            
+            while (*p && parsed_count < 32) {
+                /* Find the colon separating name from value */
+                const char *colon = strchr(p, ':');
+                if (!colon) break;
+                
+                /* Extract header name */
+                size_t name_len = (size_t)(colon - p);
+                if (name_len >= sizeof(header_names[0])) {
+                    name_len = sizeof(header_names[0]) - 1;
+                }
+                strncpy(header_names[parsed_count], p, name_len);
+                header_names[parsed_count][name_len] = '\0';
+                
+                /* Skip colon and optional space */
+                const char *value_start = colon + 1;
+                while (*value_start == ' ') value_start++;
+                
+                /* Find end of value (CRLF or end of string) */
+                const char *value_end = strstr(value_start, "\r\n");
+                if (!value_end) {
+                    value_end = value_start + strlen(value_start);
+                }
+                
+                /* Extract header value */
+                size_t value_len = (size_t)(value_end - value_start);
+                if (value_len >= sizeof(header_values[0])) {
+                    value_len = sizeof(header_values[0]) - 1;
+                }
+                strncpy(header_values[parsed_count], value_start, value_len);
+                header_values[parsed_count][value_len] = '\0';
+                
+                /* Add to headers array */
+                headers[header_count++] = header_names[parsed_count];
+                headers[header_count++] = header_values[parsed_count];
+                parsed_count++;
+                
+                /* Move to next header */
+                if (*value_end == '\r') {
+                    p = value_end + 2;  /* Skip \r\n */
+                } else {
+                    break;
+                }
             }
-        } else if (http_res.body_len > 0) {
-            /* Default to application/xml for S3 responses */
+        }
+        
+        /* Default Content-Type if not set */
+        if (parsed_count == 0 && http_res.body_len > 0) {
             headers[header_count++] = "Content-Type";
             headers[header_count++] = "application/xml";
         }
@@ -609,9 +721,13 @@ static void s3_legacy_uv_handler(uv_http_conn_t *conn, void *user_data)
                 offset += write_size;
             }
         }
+        
+        /* Mark response complete - critical for async handlers! */
+        uv_http_response_end(conn);
     } else {
         /* No response set - send 500 */
         uv_http_response_start(conn, 500, NULL, 0, 0);
+        uv_http_response_end(conn);
     }
     
     /* Free response body if allocated */
@@ -647,14 +763,45 @@ int s3_streaming_register_handlers(uv_http_server_t *server)
     
     buckets_info("Registered streaming S3 PUT handler");
     
-    /* Register legacy handler as default for all other operations */
-    ret = uv_http_server_set_handler(server, s3_legacy_uv_handler, NULL);
+    /* Register /rpc as SYNCHRONOUS route - runs in event loop.
+     * RPC handlers (storage.deleteChunk, storage.readChunk, etc.) only do local
+     * file I/O and DON'T make nested RPC calls. Running them in the event loop
+     * ensures they can always respond immediately, preventing deadlock when
+     * S3 operations are blocking the thread pool waiting for RPC responses. */
+    ret = uv_http_server_add_route(server, "POST", "/rpc", 
+                                    s3_legacy_uv_handler, NULL);
     if (ret != BUCKETS_OK) {
-        buckets_error("Failed to register legacy S3 handler");
+        buckets_error("Failed to register RPC handler");
         return ret;
     }
     
-    buckets_info("Registered legacy S3 handler for GET/DELETE/HEAD/LIST");
+    buckets_info("Registered SYNC RPC handler (runs in event loop for low latency)");
+    
+    /* Register /_internal/chunk as async route - binary transport also makes RPCs */
+    ret = uv_http_server_add_async_route(server, "PUT", "/_internal/chunk",
+                                          s3_legacy_uv_handler, NULL);
+    if (ret != BUCKETS_OK) {
+        buckets_warn("Failed to register async PUT chunk handler");
+        /* Non-fatal - continue */
+    }
+    
+    ret = uv_http_server_add_async_route(server, "GET", "/_internal/chunk",
+                                          s3_legacy_uv_handler, NULL);
+    if (ret != BUCKETS_OK) {
+        buckets_warn("Failed to register async GET chunk handler");
+        /* Non-fatal - continue */
+    }
+    
+    /* Register legacy handler as ASYNC default for all S3 operations.
+     * This is critical because S3 operations (PUT/GET/DELETE) make RPC calls
+     * to other nodes. Running these in the event loop would block it. */
+    ret = uv_http_server_set_async_handler(server, s3_legacy_uv_handler, NULL);
+    if (ret != BUCKETS_OK) {
+        buckets_error("Failed to register async S3 handler");
+        return ret;
+    }
+    
+    buckets_info("Registered ASYNC S3 handler for GET/DELETE/HEAD/LIST (runs in thread pool)");
     
     return BUCKETS_OK;
 }

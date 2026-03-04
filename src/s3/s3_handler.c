@@ -102,17 +102,82 @@ static void url_decode(char *dst, const char *src)
     *dst = '\0';
 }
 
+/* External functions from uv_server.c for header access */
+extern const char* uv_http_get_header(void *conn, const char *name);
+extern int uv_http_iterate_headers_with_prefix(void *conn_ptr, const char *prefix,
+                                                void (*callback)(const char *name, const char *value, void *user_data),
+                                                void *user_data);
+
 /**
- * Get header value from HTTP request
+ * Get header value from HTTP request (case-insensitive)
  */
 static const char* get_header(buckets_http_request_t *http_req, const char *name)
 {
-    /* This is a simplified implementation */
-    /* In a real HTTP server, we'd parse all headers properly */
-    /* For now, mongoose provides limited header access */
-    (void)http_req;
-    (void)name;
-    return NULL;
+    if (!http_req || !http_req->internal || !name) {
+        return NULL;
+    }
+    
+    /* Use the UV server's header getter */
+    return uv_http_get_header(http_req->internal, name);
+}
+
+/**
+ * Callback context for user metadata parsing
+ */
+typedef struct {
+    buckets_s3_request_t *req;
+} user_meta_ctx_t;
+
+/**
+ * Callback for each x-amz-meta-* header
+ */
+static void user_meta_callback(const char *name, const char *value, void *user_data)
+{
+    user_meta_ctx_t *ctx = (user_meta_ctx_t *)user_data;
+    buckets_s3_request_t *req = ctx->req;
+    
+    if (req->user_meta_count >= BUCKETS_S3_MAX_USER_METADATA) {
+        buckets_warn("Too many user metadata headers, ignoring: %s", name);
+        return;
+    }
+    
+    /* Strip "x-amz-meta-" prefix (11 characters) */
+    const char *key = name + 11;
+    
+    /* Store key and value (will be freed when request is freed) */
+    req->user_meta_keys[req->user_meta_count] = buckets_strdup(key);
+    req->user_meta_values[req->user_meta_count] = buckets_strdup(value);
+    req->user_meta_count++;
+    
+    buckets_debug("Parsed user metadata: %s = %s", key, value);
+}
+
+/**
+ * Parse x-amz-meta-* headers from HTTP request
+ * Returns number of user metadata entries found
+ */
+static int parse_user_metadata(buckets_http_request_t *http_req, buckets_s3_request_t *req)
+{
+    if (!http_req || !http_req->internal || !req) {
+        return 0;
+    }
+    
+    /* Get Content-Type header */
+    const char *ct = get_header(http_req, "Content-Type");
+    if (ct && ct[0] != '\0') {
+        strncpy(req->content_type, ct, sizeof(req->content_type) - 1);
+    }
+    
+    /* Iterate all x-amz-meta-* headers */
+    user_meta_ctx_t ctx = { .req = req };
+    uv_http_iterate_headers_with_prefix(http_req->internal, "x-amz-meta-",
+                                        user_meta_callback, &ctx);
+    
+    if (req->user_meta_count > 0) {
+        buckets_info("Parsed %d user metadata headers", req->user_meta_count);
+    }
+    
+    return req->user_meta_count;
 }
 
 /* ===================================================================
@@ -196,12 +261,8 @@ int buckets_s3_parse_request(buckets_http_request_t *http_req,
         }
     }
     
-    /* Extract headers */
-    const char *content_type = get_header(http_req, "Content-Type");
-    if (content_type) {
-        strncpy(req->content_type, content_type, sizeof(req->content_type) - 1);
-        req->content_type[sizeof(req->content_type) - 1] = '\0';
-    }
+    /* Extract headers and user metadata */
+    parse_user_metadata(http_req, req);
     
     req->content_length = http_req->body_len;
     
@@ -228,6 +289,12 @@ void buckets_s3_request_free(buckets_s3_request_t *req)
         buckets_free(req->query_params_values);
     }
     
+    /* Free user metadata */
+    for (int i = 0; i < req->user_meta_count; i++) {
+        buckets_free(req->user_meta_keys[i]);
+        buckets_free(req->user_meta_values[i]);
+    }
+    
     buckets_free(req);
 }
 
@@ -240,6 +307,12 @@ void buckets_s3_response_free(buckets_s3_response_t *res)
     /* Free body if allocated */
     if (res->body) {
         buckets_free(res->body);
+    }
+    
+    /* Free user metadata */
+    for (int i = 0; i < res->user_meta_count; i++) {
+        buckets_free(res->user_meta_keys[i]);
+        buckets_free(res->user_meta_values[i]);
     }
     
     buckets_free(res);
@@ -267,6 +340,16 @@ void buckets_s3_handler(buckets_http_request_t *req,
                         void *user_data)
 {
     (void)user_data;
+    
+    /* Check for health endpoint */
+    if (req->uri && strcmp(req->uri, "/health") == 0) {
+        res->status_code = 200;
+        /* Note: Don't set body to string literal - it would be freed in s3_streaming.c.
+         * A 200 with no body is sufficient for health checks. */
+        res->body = NULL;
+        res->body_len = 0;
+        return;
+    }
     
     /* Check for RPC endpoint */
     if (req->uri && strcmp(req->uri, "/rpc") == 0) {
@@ -418,6 +501,14 @@ void buckets_s3_handler(buckets_http_request_t *req,
         buckets_http_response_set_header(res, "Content-Type", s3_res->content_type);
     } else {
         buckets_http_response_set_header(res, "Content-Type", "application/xml");
+    }
+    
+    /* Set user metadata headers (x-amz-meta-*) */
+    for (int i = 0; i < s3_res->user_meta_count; i++) {
+        char header_name[256];
+        snprintf(header_name, sizeof(header_name), "x-amz-meta-%s", s3_res->user_meta_keys[i]);
+        buckets_http_response_set_header(res, header_name, s3_res->user_meta_values[i]);
+        buckets_debug("Setting response header: %s: %s", header_name, s3_res->user_meta_values[i]);
     }
     
     /* For HEAD requests, set body_len from s3_res->content_length 

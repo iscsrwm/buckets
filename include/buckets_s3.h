@@ -24,6 +24,9 @@ extern "C" {
  * S3 Request/Response Types
  * ===================================================================*/
 
+/* Maximum user metadata entries per object */
+#define BUCKETS_S3_MAX_USER_METADATA 32
+
 /**
  * S3 request structure
  */
@@ -42,6 +45,11 @@ typedef struct {
     i64 content_length;
     char if_match[64];         /* ETag for conditional requests */
     char if_none_match[64];    /* ETag for conditional requests */
+    
+    /* User metadata (x-amz-meta-*) */
+    char *user_meta_keys[BUCKETS_S3_MAX_USER_METADATA];    /* Keys without x-amz-meta- prefix */
+    char *user_meta_values[BUCKETS_S3_MAX_USER_METADATA];  /* Values */
+    int user_meta_count;       /* Number of user metadata entries */
     
     /* Authentication */
     char access_key[128];
@@ -72,6 +80,11 @@ typedef struct {
     char content_type[128];
     char last_modified[64];    /* RFC 2822 format */
     char version_id[64];       /* Version ID */
+    
+    /* User metadata (x-amz-meta-*) - for GET/HEAD responses */
+    char *user_meta_keys[BUCKETS_S3_MAX_USER_METADATA];    /* Keys without prefix */
+    char *user_meta_values[BUCKETS_S3_MAX_USER_METADATA];  /* Values */
+    int user_meta_count;       /* Number of user metadata entries */
     
     /* Error info */
     char error_code[64];       /* S3 error code */

@@ -17,7 +17,50 @@
 
 ---
 
-## 🎉 Latest Achievement: DELETE Performance 65x Faster!
+## 🎉 Latest Achievement: S3 User Metadata Headers (x-amz-meta-*)
+
+**Date**: February 27, 2026 (Night)
+
+Implemented full S3-compatible user metadata support, allowing users to attach custom metadata to objects via `x-amz-meta-*` headers.
+
+### Features
+- **PUT with metadata**: Parse `x-amz-meta-*` headers from HTTP request and store in xl.meta
+- **GET with metadata**: Return user metadata headers in response
+- **HEAD with metadata**: Return user metadata headers in response
+- Up to 32 user metadata entries per object (S3-compatible limit)
+
+### Implementation Details
+- Added `user_meta_keys`, `user_meta_values`, `user_meta_count` fields to `buckets_s3_request_t` and `buckets_s3_response_t`
+- Added `uv_http_iterate_headers_with_prefix()` to `src/net/uv_server.c` for prefix-based header iteration
+- Updated `s3_streaming.c` to parse metadata during streaming PUT uploads
+- Fixed header passthrough in `s3_legacy_uv_handler()` - was only passing Content-Type, now passes all headers
+- User metadata stored in xl.meta JSON with `x-amz-meta-` prefix
+
+### Files Modified
+- `include/buckets_s3.h` - Request/response struct fields
+- `src/s3/s3_handler.c` - Header parsing and response output
+- `src/s3/s3_ops.c` - PUT with metadata, GET metadata retrieval
+- `src/s3/s3_streaming.c` - Streaming PUT metadata support + header passthrough fix
+- `src/s3/s3_streaming.h` - Stream upload struct fields
+- `src/net/uv_server.c` - Header iteration function
+
+### Usage Example
+```bash
+# PUT with metadata
+curl -X PUT -d "Hello World" \
+    -H "x-amz-meta-author: John Doe" \
+    -H "x-amz-meta-project: buckets" \
+    http://localhost:9001/bucket/key.txt
+
+# GET returns metadata headers
+curl -v http://localhost:9001/bucket/key.txt
+# < x-amz-meta-author: John Doe
+# < x-amz-meta-project: buckets
+```
+
+---
+
+## Previous Achievement: DELETE Performance 65x Faster!
 
 **Date**: February 27, 2026 (Late Night)
 

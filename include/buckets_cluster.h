@@ -197,6 +197,7 @@ extern buckets_server_pools_t *g_server_pools;
 
 /* UUID generation and parsing */
 void buckets_uuid_generate(char *uuid_str);        // Generate UUID string (37 bytes)
+void buckets_uuid_generate_from_name(const char *name, char *uuid_str); // Deterministic UUID from name
 int buckets_uuid_parse(const char *str, u8 *uuid); // Parse UUID string to bytes
 void buckets_uuid_to_string(const u8 *uuid, char *str);
 
