@@ -2,7 +2,6 @@
  * HTTP Server Implementation (libuv-based)
  * 
  * Implements the buckets_http_server_* API using the UV HTTP server.
- * This replaces the mongoose-based implementation.
  */
 
 #include <stdio.h>

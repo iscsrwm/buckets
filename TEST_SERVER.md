@@ -37,7 +37,7 @@ curl -v -X PUT http://localhost:9000/my-bucket -H "Content-Length: 0"
 
 **Expected Response**: 200 OK
 
-**Note**: The `Content-Length: 0` header is required by the HTTP server (mongoose) for PUT requests, even when there's no body.
+**Note**: The `Content-Length: 0` header is required by the HTTP server for PUT requests, even when there's no body.
 
 ### 3. List Buckets Again
 

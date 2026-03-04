@@ -35,7 +35,7 @@ typedef struct {
     const char *query_string;  /* key=value&... */
     const char *body;          /* Request body */
     size_t body_len;           /* Body length */
-    void *internal;            /* Internal mongoose data */
+    void *internal;            /* Internal server data */
 } buckets_http_request_t;
 
 /**

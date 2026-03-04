@@ -1,9 +1,9 @@
 # Buckets Project Status
 
-**Last Updated**: February 27, 2026 (Night)  
+**Last Updated**: March 3, 2026  
 **Current Phase**: Phase 9 - S3 API Layer (Weeks 35-42) - 🔄 In Progress  
 **Current Week**: Week 40 ✅ COMPLETE + libuv HTTP Server Migration (All Phases Complete) ✅  
-**Status**: 🟢 Active Development - Performance Benchmark Complete!  
+**Status**: 🟢 Active Development - Mongoose Removal Complete!  
 **Overall Progress**: 40/52 weeks (77% complete)  
 **Phase 1 Status**: ✅ COMPLETE (Foundation - Weeks 1-4)  
 **Phase 2 Status**: ✅ COMPLETE (Hashing - Weeks 5-7)  
@@ -17,7 +17,40 @@
 
 ---
 
-## 🎉 Latest Achievement: S3 User Metadata Headers (x-amz-meta-*)
+## 🎉 Latest Achievement: Legacy Server Code Path Removed
+
+**Date**: March 3, 2026
+
+Completed the removal of the legacy Mongoose HTTP server code path from `main.c`. The UV (libuv) HTTP server is now the only code path, simplifying the codebase and eliminating confusion about threading models.
+
+### Changes Made
+
+**`src/main.c`** (~105 lines removed):
+- Removed `--uv` command line flag (no longer needed - UV is the only option)
+- Removed `use_uv_server` variable and conditional logic
+- Removed entire legacy Mongoose server code path (`else` branch)
+- Fixed indentation of remaining UV server code
+
+**Comment Updates**:
+- `src/net/http_server_uv.c` - Removed reference to "replaces mongoose-based implementation"
+- `include/buckets_net.h` - Changed comment from "Internal mongoose data" to "Internal server data"
+
+### Benefits
+- **Simpler codebase**: Single HTTP server implementation path
+- **No threading confusion**: Clear libuv event loop + thread pool model
+- **Reduced binary size**: ~105 lines of dead code removed
+- **Cleaner CLI**: No need to choose between server implementations
+
+### Server Startup (unchanged behavior)
+```bash
+# Start server (UV is now the only option)
+./bin/buckets server --port 9000
+./bin/buckets server --config config/node1.json
+```
+
+---
+
+## Previous Achievement: S3 User Metadata Headers (x-amz-meta-*)
 
 **Date**: February 27, 2026 (Night)
 
@@ -339,14 +372,14 @@ New libuv HTTP server processes request bodies incrementally as chunks arrive:
 - Streaming handler callbacks (`on_request_start`, `on_body_chunk`, `on_request_complete`, `on_request_error`)
 - `streaming_route` field in connection struct for tracking active streaming handlers
 - S3 streaming PUT handler (`s3_streaming.c`) with incremental BLAKE2b hashing
-- UV server integration in `main.c` with `--uv` flag
+- UV server integration in `main.c` (originally with `--uv` flag, now default)
 - Fixed keep-alive handling for streaming routes
 
 ### Usage
 
 ```bash
-# Start server with streaming support
-./bin/buckets server --uv --port 9000
+# Start server with streaming support (UV is now the default/only option)
+./bin/buckets server --port 9000
 
 # Upload large file (streaming - no timeout!)
 curl -X PUT --data-binary @bigfile.dat http://localhost:9000/my-bucket/bigfile.dat
@@ -389,7 +422,7 @@ Streaming upload complete: test-bucket/test1m.bin (1048576 bytes, ETag="...")
 - `third_party/llhttp/` - llhttp v9.2.1
 
 **Modified**:
-- `src/main.c` - Added `--uv` flag and UV server startup
+- `src/main.c` - Added UV server startup (--uv flag removed in March 2026, UV is now default)
 - `include/buckets_net.h` - Added UV server API exports
 
 ### Phase 4 Completion (Today)
@@ -403,9 +436,9 @@ Streaming upload complete: test-bucket/test1m.bin (1048576 bytes, ETag="...")
 **Files Modified:**
 - `src/s3/s3_streaming.c` - Added `s3_legacy_uv_handler()` wrapper
 - `src/net/uv_server.c` - Fixed header writing, improved `uv_http_response_end()`
-- `src/main.c` - Added `--uv` flag integration
+- `src/main.c` - Integrated UV server (--uv flag removed in March 2026)
 
-### Mongoose Removal Complete (Today)
+### Mongoose Removal Complete (February 2026)
 
 Successfully removed mongoose dependency and switched entirely to libuv-based HTTP server:
 
@@ -421,6 +454,11 @@ Successfully removed mongoose dependency and switched entirely to libuv-based HT
 - Unified HTTP stack (everything uses libuv)
 - Streaming uploads by default
 - Better memory efficiency for large transfers
+
+**Final Cleanup (March 3, 2026):**
+- Removed `--uv` flag from CLI (UV is now the only/default option)
+- Removed legacy server code path from `main.c` (~105 lines)
+- Updated comments to remove mongoose references
 
 ### Future Optimizations
 
