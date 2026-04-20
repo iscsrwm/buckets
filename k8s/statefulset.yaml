@@ -37,10 +37,49 @@ spec:
                 topologyKey: kubernetes.io/hostname
       
       initContainers:
-        # Format disks on first startup
+        # Fix data directory permissions (must run FIRST)
+        - name: fix-permissions
+          image: busybox:1.36
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Fixing permissions on /data..."
+              chown -R 1000:1000 /data
+              chmod -R 755 /data
+              echo "Permissions fixed"
+          securityContext:
+            runAsUser: 0  # Run as root to fix permissions
+          volumeMounts:
+            - name: data
+              mountPath: /data
+        
+        # Generate node-specific config from template
+        - name: generate-config
+          image: busybox:1.36
+          command:
+            - /bin/sh
+            - -c
+            - |
+              # Extract pod ordinal from hostname (buckets-0, buckets-1, etc)
+              POD_ORDINAL=$(echo $HOSTNAME | sed 's/.*-//')
+              echo "Generating config for pod ordinal: $POD_ORDINAL"
+              
+              # Copy template and substitute POD_ORDINAL
+              sed "s/\${POD_ORDINAL}/$POD_ORDINAL/g" /etc/buckets-template/config-template.json > /etc/buckets/config.json
+              
+              echo "Generated config:"
+              cat /etc/buckets/config.json
+          volumeMounts:
+            - name: config-template
+              mountPath: /etc/buckets-template
+            - name: config
+              mountPath: /etc/buckets
+        
+        # Format disks on first startup (runs AFTER config generation)
         - name: format-disks
           image: russellmy/buckets:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           command:
             - /bin/sh
             - -c
@@ -67,28 +106,6 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
-            - name: config
-              mountPath: /etc/buckets
-        
-        # Generate node-specific config from template
-        - name: generate-config
-          image: busybox:1.36
-          command:
-            - /bin/sh
-            - -c
-            - |
-              # Extract pod ordinal from hostname (buckets-0, buckets-1, etc)
-              POD_ORDINAL=$(echo $HOSTNAME | sed 's/.*-//')
-              echo "Generating config for pod ordinal: $POD_ORDINAL"
-              
-              # Copy template and substitute POD_ORDINAL
-              sed "s/\${POD_ORDINAL}/$POD_ORDINAL/g" /etc/buckets-template/config-template.json > /etc/buckets/config.json
-              
-              echo "Generated config:"
-              cat /etc/buckets/config.json
-          volumeMounts:
-            - name: config-template
-              mountPath: /etc/buckets-template
             - name: config
               mountPath: /etc/buckets
       

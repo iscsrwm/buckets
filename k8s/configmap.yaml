@@ -9,17 +9,25 @@ data:
   # Each StatefulSet pod will mount this and customize based on pod ordinal
   config-template.json: |
     {
-      "node_id": "node-${POD_ORDINAL}",
-      "listen_port": 9000,
-      "listen_address": "0.0.0.0",
-      "data_dir": "/data",
-      "disks": [
-        "/data/disk1",
-        "/data/disk2",
-        "/data/disk3",
-        "/data/disk4"
-      ],
+      "deployment_id": "buckets-k8s-cluster",
+      "node": {
+        "id": "node-${POD_ORDINAL}",
+        "address": "buckets-${POD_ORDINAL}.buckets-headless.buckets.svc.cluster.local",
+        "port": 9000,
+        "endpoint": "http://buckets-${POD_ORDINAL}.buckets-headless.buckets.svc.cluster.local:9000",
+        "data_dir": "/data"
+      },
+      "storage": {
+        "disks": [
+          "/data/disk1",
+          "/data/disk2",
+          "/data/disk3",
+          "/data/disk4"
+        ]
+      },
       "cluster": {
+        "enabled": true,
+        "deployment_id": "buckets-k8s-cluster",
         "nodes": [
           {
             "id": "node-0",
@@ -97,11 +105,17 @@ data:
             "data_shards": 8,
             "parity_shards": 4
           }
-        ]
+        ],
+        "sets": 2,
+        "disks_per_set": 12
       },
-      "placement": {
-        "hash_algorithm": "xxhash",
-        "cache_ttl_seconds": 300
+      "erasure": {
+        "enabled": true,
+        "data_shards": 8,
+        "parity_shards": 4
       },
-      "inline_threshold_bytes": 131072
+      "server": {
+        "bind_address": "0.0.0.0",
+        "bind_port": 9000
+      }
     }
