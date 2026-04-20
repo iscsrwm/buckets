@@ -18,8 +18,12 @@
 
 /* Maximum concurrent outgoing RPC calls per context.
  * This prevents thread pool exhaustion when many parallel operations
- * are making RPC calls simultaneously. */
-#define MAX_CONCURRENT_RPC_CALLS 16
+ * are making RPC calls simultaneously.
+ * 
+ * Tuned for high concurrency: With 50 concurrent uploads and 12 disks per
+ * erasure set, we need 50 * 12 = 600 concurrent RPC slots. Setting to 512
+ * provides good balance between concurrency and resource usage. */
+#define MAX_CONCURRENT_RPC_CALLS 512
 
 /* ===================================================================
  * RPC Context Structure

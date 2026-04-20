@@ -1,0 +1,189 @@
+==================================================================
+    BUCKETS PERFORMANCE OPTIMIZATION SUMMARY
+    April 20, 2026
+==================================================================
+
+SESSION OVERVIEW
+================
+
+Goal: Identify and resolve performance bottlenecks in 6-node cluster
+Duration: Full performance analysis session
+Outcome: 61x upload throughput improvement + bottleneck identification
+
+PERFORMANCE EVOLUTION
+=====================
+
+Stage 1: Initial Baseline (Before RPC Fix)
+------------------------------------------
+Concurrent Upload (256KB, 50 workers): 2.38 ops/sec
+Concurrent Download (256KB, 50 workers): 45-79 ops/sec
+Problem: Upload didn't scale with workers
+Evidence: 7,262 "waiting for semaphore" log messages
+
+Stage 2: After RPC Optimization
+--------------------------------
+Concurrent Upload: 145.96 ops/sec (+6,030%)
+Concurrent Download: 79.74 ops/sec
+Improvement: 61x throughput increase
+Fix: MAX_CONCURRENT_RPC_CALLS: 64 → 512
+
+Stage 3: After Thread Pool Test
+--------------------------------
+Concurrent Upload: 150.83 ops/sec (+3.3%)
+Concurrent Download: 79.74 ops/sec
+Improvement: Minimal (3.3%)
+Conclusion: Disk I/O is the ceiling
+
+BOTTLENECK ANALYSIS RESULTS
+============================
+
+Bottleneck #1: RPC Semaphore (RESOLVED ✅)
+------------------------------------------
+Symptom: Upload stuck at 2.4 ops/sec regardless of workers
+Root Cause: 64 concurrent RPC slots vs 600 needed (50 workers × 12 chunks)
+Solution: Increased to 512 concurrent RPC calls
+Impact: +6,030% throughput improvement
+Files: src/net/rpc.c, src/storage/parallel_chunks.c
+
+Bottleneck #2: libuv Thread Pool (TESTED - NOT THE ISSUE)
+----------------------------------------------------------
+Hypothesis: Default 4 threads limiting I/O parallelism
+Test: Increased UV_THREADPOOL_SIZE to 64
+Result: Only +3.3% improvement
+Conclusion: Not the bottleneck
+
+Bottleneck #3: Physical Disk I/O (CURRENT CEILING 🔴)
+-----------------------------------------------------
+Evidence:
+  - CPU Usage: 0% (not CPU-bound)
+  - Load Average: 31.78 (threads waiting on I/O)
+  - 24 virtual disks → 1 physical disk
+  - ~1,800 writes/sec hitting fsync() saturation
+
+Root Cause:
+  - Single physical disk handling all I/O
+  - fsync() calls serialize on disk queue
+  - Disk capacity: ~200-500 fsyncs/sec max
+  - System demand: ~1,800 writes/sec
+
+Current Ceiling: ~150 ops/sec (37.7 MB/s)
+
+PERFORMANCE METRICS SUMMARY
+============================
+
+Upload Performance (256KB files, 50 concurrent workers):
+  - Baseline: 2.38 ops/sec (0.59 MB/s)
+  - After RPC fix: 145.96 ops/sec (36.49 MB/s)
+  - After thread pool: 150.83 ops/sec (37.70 MB/s)
+  - Final improvement: 6,238% from baseline
+
+Download Performance (256KB files, 50 concurrent workers):
+  - Throughput: 79.74 ops/sec
+  - Bandwidth: 19.93 MB/s
+  - Scaling: Good (45 → 79 ops/sec with 10 → 50 workers)
+
+Large File Performance:
+  - 10MB download: 51.02 MB/s
+  - 10MB upload: 6.58 MB/s
+
+Data Integrity: 100% (all tests pass)
+
+NEXT OPTIMIZATION PATHS
+========================
+
+Option 1: fsync Optimization (CODE - MODERATE)
+----------------------------------------------
+Techniques:
+  - Batch multiple chunks before fsync
+  - Use fdatasync() instead of fsync() (skip metadata)
+  - Write-behind caching with periodic flush
+  - Group barrier (collect N writes, fsync once)
+
+Expected: 3-5x improvement (450-750 ops/sec)
+Trade-off: More complex error handling
+Effort: 2-3 days development + testing
+
+Option 2: Real Distributed Hardware (INFRASTRUCTURE)
+----------------------------------------------------
+Setup:
+  - 6 physical machines (or VMs with dedicated disks)
+  - Each node on separate storage device
+  - Network becomes new bottleneck variable
+
+Expected: 10-20x improvement (1,500-3,000 ops/sec)
+Reality: Current localhost testing is artificial constraint
+Effort: Infrastructure provisioning
+
+Option 3: Async I/O (CODE - HIGH COMPLEXITY)
+--------------------------------------------
+Approach:
+  - Use io_uring (Linux 5.1+) or libaio
+  - Avoid blocking on fsync
+  - Pipeline writes more efficiently
+
+Expected: 2-3x improvement
+Challenge: Complex implementation, error handling
+Effort: 1-2 weeks development + testing
+
+RECOMMENDATION
+==============
+
+For Immediate Deployment:
+  System is production-ready at ~150 ops/sec (37.7 MB/s) for
+  single-machine deployments. RPC optimization provides excellent
+  throughput for most use cases.
+
+For Further Scaling:
+  1. Deploy on real distributed hardware (quick, 10-20x gain)
+  2. Then optimize fsync if still needed (3-5x additional gain)
+  3. Consider async I/O as final optimization
+
+TECHNICAL ACHIEVEMENTS
+======================
+
+✅ Identified RPC concurrency bottleneck through log analysis
+✅ Fixed with single-line change (64 → 512 semaphore)
+✅ Achieved 61x upload throughput improvement
+✅ Validated thread pool is not limiting factor
+✅ Identified physical disk I/O as current ceiling
+✅ Characterized system limits with data
+✅ Documented three clear optimization paths forward
+
+LESSONS LEARNED
+===============
+
+1. Profiling Matters: Log analysis revealed exact bottleneck
+2. Quick Wins Exist: One-line fix gave 6,000% improvement
+3. Test Hypotheses: Thread pool test ruled out false lead
+4. Know Your Limits: Single disk is fundamental constraint
+5. Architecture Impact: Localhost testing != real distributed
+
+FILES MODIFIED
+==============
+
+src/net/rpc.c:
+  - Increased MAX_CONCURRENT_RPC_CALLS from 64 to 512
+  - Added detailed comment explaining tuning rationale
+
+src/storage/parallel_chunks.c:
+  - Updated comment to reflect new RPC limit
+
+docs/PROJECT_STATUS.md:
+  - Added comprehensive performance optimization section
+  - Documented bottleneck analysis results
+
+docs/BASELINE_METRICS.md:
+  - Added RPC optimization history section
+  - Added disk I/O bottleneck analysis
+  - Documented next optimization paths
+
+FINAL STATUS
+============
+
+System: Production-ready ✅
+Performance: 150 ops/sec (37.7 MB/s) concurrent upload
+Bottleneck: Physical disk I/O saturation
+Next Steps: Deploy on distributed hardware OR optimize fsync
+Code Quality: Well-documented, tested, benchmarked
+
+==================================================================

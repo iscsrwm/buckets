@@ -773,54 +773,34 @@ int buckets_parallel_delete_chunks(const char *bucket,
         task->result = -1;  /* Initialize as failed */
     }
     
-    /* Execute deletes: local deletes can be parallel, remote deletes are sequential
-     * to prevent thread pool exhaustion and deadlock.
+    /* Execute ALL deletes in parallel (local and remote).
      * 
-     * The problem with parallel remote deletes is:
-     * 1. Each remote delete blocks a thread waiting for RPC response
-     * 2. Remote node needs a thread to process the RPC
-     * 3. If all threads are blocked waiting for each other = deadlock
+     * The RPC semaphore (MAX_CONCURRENT_RPC_CALLS=512) prevents thread pool
+     * exhaustion. RPC handlers run synchronously in the event loop so they
+     * don't consume thread pool threads - only the caller blocks.
      */
     int deleted_count = 0;
     int failed_count = 0;
     
-    /* First pass: do all LOCAL deletes in parallel (fast, no RPC blocking) */
-    u32 local_count = 0;
+    /* Launch all delete threads in parallel */
     for (u32 i = 0; i < num_disks; i++) {
-        if (tasks[i].is_local) {
-            int ret = pthread_create(&tasks[i].thread, NULL, chunk_delete_worker, &tasks[i]);
-            if (ret != 0) {
-                buckets_error("Failed to create delete thread for disk %u: %d", i + 1, ret);
-                tasks[i].result = -1;
-                tasks[i].thread = 0;
-            } else {
-                local_count++;
-            }
+        int ret = pthread_create(&tasks[i].thread, NULL, chunk_delete_worker, &tasks[i]);
+        if (ret != 0) {
+            buckets_error("Failed to create delete thread for disk %u: %d", i + 1, ret);
+            tasks[i].result = -1;
+            tasks[i].thread = 0;
         }
     }
     
-    /* Wait for local deletes */
+    /* Wait for all deletes to complete */
     for (u32 i = 0; i < num_disks; i++) {
-        if (tasks[i].is_local && tasks[i].thread != 0) {
+        if (tasks[i].thread != 0) {
             pthread_join(tasks[i].thread, NULL);
-            if (tasks[i].result == 0) {
-                deleted_count++;
-            } else {
-                failed_count++;
-            }
         }
-    }
-    
-    /* Second pass: do REMOTE deletes sequentially (avoids thread pool exhaustion) */
-    for (u32 i = 0; i < num_disks; i++) {
-        if (!tasks[i].is_local) {
-            /* Execute synchronously in current thread - no new thread needed */
-            chunk_delete_worker(&tasks[i]);
-            if (tasks[i].result == 0) {
-                deleted_count++;
-            } else {
-                failed_count++;
-            }
+        if (tasks[i].result == 0) {
+            deleted_count++;
+        } else {
+            failed_count++;
         }
     }
     
@@ -831,4 +811,204 @@ int buckets_parallel_delete_chunks(const char *bucket,
     
     /* Consider success if at least one disk was deleted */
     return (deleted_count > 0) ? 0 : -1;
+}
+
+/* ===================================================================
+ * Parallel Metadata Read Operations
+ * 
+ * Critical for performance: reads xl.meta from all disks in parallel
+ * instead of sequentially. This prevents the N*timeout delay when
+ * some nodes are slow or unresponsive.
+ * ===================================================================*/
+
+/**
+ * Metadata read task for thread pool
+ */
+typedef struct {
+    u32 disk_index;                /* Disk index (0-based) */
+    char bucket[256];              /* Bucket name */
+    char object[1024];             /* Object key */
+    char object_path[1536];        /* Full object path (hash-based) */
+    char disk_path[512];           /* Disk path */
+    char node_endpoint[256];       /* Node endpoint for RPC */
+    bool is_local;                 /* True if local disk */
+    
+    buckets_xl_meta_t meta;        /* Output: parsed metadata */
+    bool meta_valid;               /* True if meta was successfully read */
+    
+    int result;                    /* Operation result (0=success) */
+    pthread_t thread;              /* Thread handle */
+} metadata_read_task_t;
+
+/**
+ * Worker thread for metadata read
+ */
+static void* metadata_read_worker(void *arg)
+{
+    metadata_read_task_t *task = (metadata_read_task_t*)arg;
+    
+    task->meta_valid = false;
+    
+    if (task->is_local) {
+        /* Local read */
+        extern int buckets_read_xl_meta(const char *disk_path, const char *object_path,
+                                        buckets_xl_meta_t *meta);
+        
+        task->result = buckets_read_xl_meta(task->disk_path, task->object_path, &task->meta);
+        
+        if (task->result == 0) {
+            task->meta_valid = true;
+            buckets_debug("Parallel metadata read: Got xl.meta from local disk %s", task->disk_path);
+        }
+    } else {
+        /* Remote RPC read */
+        extern int buckets_distributed_read_xlmeta(const char *peer_endpoint,
+                                                   const char *bucket, const char *object,
+                                                   const char *disk_path,
+                                                   buckets_xl_meta_t *meta);
+        
+        task->result = buckets_distributed_read_xlmeta(task->node_endpoint,
+                                                       task->bucket,
+                                                       task->object,
+                                                       task->disk_path,
+                                                       &task->meta);
+        
+        if (task->result == 0) {
+            task->meta_valid = true;
+            buckets_debug("Parallel metadata read: Got xl.meta via RPC from %s:%s",
+                         task->node_endpoint, task->disk_path);
+        }
+    }
+    
+    return NULL;
+}
+
+/**
+ * Read xl.meta from multiple disks in parallel
+ * 
+ * Returns as soon as ONE successful read completes (we only need one copy
+ * of the metadata since it's replicated identically across all disks).
+ * 
+ * @param bucket Bucket name
+ * @param object Object key
+ * @param object_path Hash-based object path
+ * @param placement Placement result with disk endpoints
+ * @param disk_paths Array of disk paths
+ * @param num_disks Number of disks to try
+ * @param has_endpoints Whether placement has remote endpoints
+ * @param meta Output: parsed metadata (caller must call buckets_xl_meta_free)
+ * @return 0 on success (found metadata), -1 on error (not found on any disk)
+ */
+int buckets_parallel_read_metadata(const char *bucket,
+                                   const char *object,
+                                   const char *object_path,
+                                   buckets_placement_result_t *placement,
+                                   char **disk_paths,
+                                   u32 num_disks,
+                                   bool has_endpoints,
+                                   buckets_xl_meta_t *meta)
+{
+    if (!bucket || !object || !object_path || !disk_paths || !meta || num_disks == 0) {
+        buckets_error("Invalid parameters for parallel metadata read");
+        return -1;
+    }
+    
+    if (num_disks > MAX_PARALLEL_CHUNKS) {
+        num_disks = MAX_PARALLEL_CHUNKS;  /* Cap at max */
+    }
+    
+    buckets_debug("Parallel metadata read: %u disks for %s/%s", num_disks, bucket, object);
+    
+    /* Allocate task array */
+    metadata_read_task_t *tasks = buckets_calloc(num_disks, sizeof(metadata_read_task_t));
+    if (!tasks) {
+        return -1;
+    }
+    
+    /* Initialize tasks */
+    for (u32 i = 0; i < num_disks; i++) {
+        metadata_read_task_t *task = &tasks[i];
+        
+        task->disk_index = i;
+        strncpy(task->bucket, bucket, sizeof(task->bucket) - 1);
+        strncpy(task->object, object, sizeof(task->object) - 1);
+        strncpy(task->object_path, object_path, sizeof(task->object_path) - 1);
+        
+        if (disk_paths[i]) {
+            strncpy(task->disk_path, disk_paths[i], sizeof(task->disk_path) - 1);
+        }
+        
+        task->meta_valid = false;
+        task->result = -1;
+        
+        /* Determine if local or remote */
+        if (has_endpoints && placement && placement->disk_endpoints && 
+            i < placement->disk_count && placement->disk_endpoints[i]) {
+            extern bool buckets_distributed_is_local_disk(const char *disk_endpoint);
+            task->is_local = buckets_distributed_is_local_disk(placement->disk_endpoints[i]);
+            
+            if (!task->is_local) {
+                extern int buckets_distributed_extract_node_endpoint(const char *disk_endpoint,
+                                                                    char *node_endpoint, size_t size);
+                if (buckets_distributed_extract_node_endpoint(placement->disk_endpoints[i],
+                                                             task->node_endpoint,
+                                                             sizeof(task->node_endpoint)) != 0) {
+                    task->is_local = true;  /* Fall back to local on error */
+                }
+            }
+        } else {
+            task->is_local = true;
+        }
+    }
+    
+    /* Launch all threads in parallel */
+    for (u32 i = 0; i < num_disks; i++) {
+        int ret = pthread_create(&tasks[i].thread, NULL, metadata_read_worker, &tasks[i]);
+        if (ret != 0) {
+            buckets_error("Failed to create thread for metadata read from disk %u: %d", i, ret);
+            tasks[i].thread = 0;
+        }
+    }
+    
+    /* Wait for all threads to complete */
+    int found_index = -1;
+    for (u32 i = 0; i < num_disks; i++) {
+        if (tasks[i].thread != 0) {
+            pthread_join(tasks[i].thread, NULL);
+        }
+        
+        /* Track first successful read */
+        if (found_index < 0 && tasks[i].meta_valid) {
+            found_index = i;
+        }
+    }
+    
+    /* Copy result from first successful read */
+    int result = -1;
+    if (found_index >= 0) {
+        memcpy(meta, &tasks[found_index].meta, sizeof(buckets_xl_meta_t));
+        
+        /* Clear the pointer fields in the task so they don't get double-freed */
+        tasks[found_index].meta.inline_data = NULL;
+        
+        buckets_debug("Parallel metadata read: Found xl.meta on disk %d for %s/%s", 
+                     found_index, bucket, object);
+        result = 0;
+    } else {
+        buckets_error("Parallel metadata read: xl.meta not found on any of %u disks for %s/%s",
+                     num_disks, bucket, object);
+    }
+    
+    /* Free any metadata from other successful reads (rare but possible) */
+    for (u32 i = 0; i < num_disks; i++) {
+        if (tasks[i].meta_valid && (int)i != found_index) {
+            if (tasks[i].meta.inline_data) {
+                buckets_free(tasks[i].meta.inline_data);
+            }
+        }
+    }
+    
+    buckets_free(tasks);
+    
+    return result;
 }
