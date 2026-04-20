@@ -84,8 +84,11 @@ spec:
             - /bin/sh
             - -c
             - |
-              # Check if already formatted
-              if [ -f /data/disk1/.buckets/format.json ]; then
+              # Check if ANY disk is already formatted
+              if [ -f /data/disk1/.buckets.sys/format.json ] || \
+                 [ -f /data/disk2/.buckets.sys/format.json ] || \
+                 [ -f /data/disk3/.buckets.sys/format.json ] || \
+                 [ -f /data/disk4/.buckets.sys/format.json ]; then
                 echo "Disks already formatted, skipping..."
                 exit 0
               fi
