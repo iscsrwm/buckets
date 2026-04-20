@@ -51,8 +51,14 @@ spec:
           securityContext:
             runAsUser: 0  # Run as root to fix permissions
           volumeMounts:
-            - name: data
-              mountPath: /data
+            - name: disk1
+              mountPath: /data/disk1
+            - name: disk2
+              mountPath: /data/disk2
+            - name: disk3
+              mountPath: /data/disk3
+            - name: disk4
+              mountPath: /data/disk4
         
         # Generate node-specific config from template
         - name: generate-config
@@ -107,8 +113,14 @@ spec:
             - name: UV_THREADPOOL_SIZE
               value: "64"
           volumeMounts:
-            - name: data
-              mountPath: /data
+            - name: disk1
+              mountPath: /data/disk1
+            - name: disk2
+              mountPath: /data/disk2
+            - name: disk3
+              mountPath: /data/disk3
+            - name: disk4
+              mountPath: /data/disk4
             - name: config
               mountPath: /etc/buckets
       
@@ -142,8 +154,14 @@ spec:
             - name: UV_THREADPOOL_SIZE
               value: "64"
           volumeMounts:
-            - name: data
-              mountPath: /data
+            - name: disk1
+              mountPath: /data/disk1
+            - name: disk2
+              mountPath: /data/disk2
+            - name: disk3
+              mountPath: /data/disk3
+            - name: disk4
+              mountPath: /data/disk4
             - name: config
               mountPath: /etc/buckets
           livenessProbe:
@@ -175,13 +193,37 @@ spec:
         - name: config
           emptyDir: {}
   
-  # Persistent storage for each pod
+  # Persistent storage for each pod - 4 separate disks per pod
   volumeClaimTemplates:
     - metadata:
-        name: data
+        name: disk1
       spec:
         accessModes: ["ReadWriteOnce"]
         storageClassName: cinder # Adjust based on your cluster
         resources:
           requests:
             storage: 20Gi  # Adjust based on needs
+    - metadata:
+        name: disk2
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: cinder
+        resources:
+          requests:
+            storage: 20Gi
+    - metadata:
+        name: disk3
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: cinder
+        resources:
+          requests:
+            storage: 20Gi
+    - metadata:
+        name: disk4
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: cinder
+        resources:
+          requests:
+            storage: 20Gi
