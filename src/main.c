@@ -18,6 +18,18 @@
 #include "buckets_registry.h"
 #include "buckets_placement.h"
 
+/* Global config pointer for distributed operations */
+static buckets_config_t *g_global_config = NULL;
+
+/**
+ * Get global configuration
+ * Used by distributed listing to find all cluster nodes
+ */
+buckets_config_t* buckets_get_global_config(void)
+{
+    return g_global_config;
+}
+
 static void print_banner(void) {
     printf("\n");
     printf(" ____             _        _       \n");
@@ -37,6 +49,7 @@ static void print_usage(const char *progname) {
     printf("Commands:\n");
     printf("  server [options]    Start S3 API server\n");
     printf("  format [options]    Format disks for cluster operation\n");
+    printf("  creds <subcommand>  Manage S3 credentials\n");
     printf("  version             Print version information\n");
     printf("  help                Show this help message\n");
     printf("\n");
@@ -48,11 +61,20 @@ static void print_usage(const char *progname) {
     printf("  --config <file>     Configuration file with disk paths (required)\n");
     printf("  --force             Force formatting even if disks already formatted\n");
     printf("\n");
+    printf("Credential Commands:\n");
+    printf("  creds list          List all credentials (shows access keys only)\n");
+    printf("  creds create        Create new credentials\n");
+    printf("  creds delete <key>  Delete credential by access key\n");
+    printf("  creds enable <key>  Enable a credential\n");
+    printf("  creds disable <key> Disable a credential\n");
+    printf("\n");
     printf("Examples:\n");
     printf("  %s server                           # Start on default port 9000\n", progname);
     printf("  %s server --port 8080               # Start on port 8080\n", progname);
     printf("  %s server --config config/node1.json  # Start with config file\n", progname);
     printf("  %s format --config config/node1.json  # Format disks for node1\n", progname);
+    printf("  %s creds list                       # List all credentials\n", progname);
+    printf("  %s creds create                     # Create new credential\n", progname);
     printf("\n");
 }
 
@@ -272,7 +294,10 @@ int main(int argc, char *argv[]) {
      * With 6 nodes making concurrent RPCs, we need more threads to
      * prevent deadlock. 32 threads should handle typical workloads. */
     if (getenv("UV_THREADPOOL_SIZE") == NULL) {
-        setenv("UV_THREADPOOL_SIZE", "32", 1);
+        /* Need many threads to handle concurrent RPC calls without deadlock.
+         * With 6 nodes, each request can trigger 12 parallel chunk operations,
+         * and each of those may require RPC calls. 128 threads provides headroom. */
+        setenv("UV_THREADPOOL_SIZE", "128", 1);
     }
 
     /* Initialize logging first */
@@ -355,6 +380,9 @@ int main(int argc, char *argv[]) {
                 ret = 1;
                 goto cleanup;
             }
+            
+            /* Store global config for distributed operations */
+            g_global_config = config;
             
             /* Use configuration values */
             port = config->server.bind_port;
@@ -529,6 +557,19 @@ int main(int argc, char *argv[]) {
             }
             buckets_info("Storage layer initialized");
         }
+        
+        /* Initialize credential system */
+        const char *data_dir = config ? config->node.data_dir : "/tmp/buckets-data";
+        buckets_info("Initializing credential system...");
+        if (buckets_credentials_init(data_dir) != BUCKETS_OK) {
+            buckets_error("Failed to initialize credential system");
+            /* Continue anyway - auth will be disabled */
+            buckets_s3_auth_set_enabled(false);
+        } else {
+            buckets_info("Credential system initialized (%d keys)", buckets_credentials_count());
+            buckets_s3_auth_init(true);
+        }
+        
         buckets_info("Press Ctrl+C to stop");
         
         const char *bind_addr = config ? config->server.bind_address : "0.0.0.0";
@@ -602,6 +643,10 @@ int main(int argc, char *argv[]) {
         uv_http_server_free(uv_server);
         s3_streaming_cleanup();
         
+        /* Cleanup credentials */
+        buckets_info("Cleaning up credential system...");
+        buckets_credentials_cleanup();
+        
         if (config) {
             buckets_info("Cleaning up storage layer...");
             buckets_storage_cleanup();
@@ -662,6 +707,142 @@ int main(int argc, char *argv[]) {
         } else {
             buckets_error("Disk formatting failed");
         }
+        
+    } else if (strcmp(command, "creds") == 0) {
+        /* Credential management commands */
+        const char *data_dir = "/tmp/buckets-data";  /* Default data dir */
+        
+        /* Check for --data-dir option */
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--data-dir") == 0 && i + 1 < argc) {
+                data_dir = argv[++i];
+            }
+        }
+        
+        /* Initialize credential system */
+        if (buckets_credentials_init(data_dir) != BUCKETS_OK) {
+            fprintf(stderr, "Error: Failed to initialize credential system\n");
+            ret = 1;
+            goto cleanup;
+        }
+        
+        if (argc < 3) {
+            fprintf(stderr, "Error: Missing subcommand for creds\n\n");
+            printf("Usage: %s creds <subcommand> [options]\n\n", argv[0]);
+            printf("Subcommands:\n");
+            printf("  list              List all credentials\n");
+            printf("  create [--name <name>] [--policy <policy>]\n");
+            printf("                    Create new credential\n");
+            printf("  delete <key>      Delete credential by access key\n");
+            printf("  enable <key>      Enable a credential\n");
+            printf("  disable <key>     Disable a credential\n");
+            printf("\n");
+            printf("Options:\n");
+            printf("  --data-dir <dir>  Data directory (default: /tmp/buckets-data)\n");
+            printf("  --name <name>     Name/description for new credential\n");
+            printf("  --policy <policy> Policy: readwrite, readonly, writeonly (default: readwrite)\n");
+            printf("\n");
+            buckets_credentials_cleanup();
+            ret = 1;
+            goto cleanup;
+        }
+        
+        const char *subcmd = argv[2];
+        
+        if (strcmp(subcmd, "list") == 0) {
+            /* List all credentials */
+            char *json = buckets_credentials_list();
+            if (json) {
+                printf("%s\n", json);
+                buckets_free(json);
+            } else {
+                fprintf(stderr, "Error: Failed to list credentials\n");
+                ret = 1;
+            }
+            
+        } else if (strcmp(subcmd, "create") == 0) {
+            /* Create new credential */
+            const char *name = NULL;
+            const char *policy = "readwrite";
+            
+            for (int i = 3; i < argc; i++) {
+                if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) {
+                    name = argv[++i];
+                } else if (strcmp(argv[i], "--policy") == 0 && i + 1 < argc) {
+                    policy = argv[++i];
+                }
+            }
+            
+            char access_key[64];
+            char secret_key[64];
+            
+            if (buckets_credentials_create(name, policy, access_key, sizeof(access_key),
+                                            secret_key, sizeof(secret_key)) == BUCKETS_OK) {
+                printf("{\n");
+                printf("  \"access_key\": \"%s\",\n", access_key);
+                printf("  \"secret_key\": \"%s\",\n", secret_key);
+                printf("  \"name\": \"%s\",\n", name ? name : "");
+                printf("  \"policy\": \"%s\"\n", policy);
+                printf("}\n");
+                printf("\n");
+                printf("IMPORTANT: Save the secret key now! It cannot be retrieved later.\n");
+            } else {
+                fprintf(stderr, "Error: Failed to create credential\n");
+                ret = 1;
+            }
+            
+        } else if (strcmp(subcmd, "delete") == 0) {
+            if (argc < 4) {
+                fprintf(stderr, "Error: Missing access key\n");
+                fprintf(stderr, "Usage: %s creds delete <access_key>\n", argv[0]);
+                ret = 1;
+            } else {
+                const char *access_key = argv[3];
+                if (buckets_credentials_delete(access_key) == BUCKETS_OK) {
+                    printf("Deleted credential: %s\n", access_key);
+                } else {
+                    fprintf(stderr, "Error: Failed to delete credential (not found?)\n");
+                    ret = 1;
+                }
+            }
+            
+        } else if (strcmp(subcmd, "enable") == 0) {
+            if (argc < 4) {
+                fprintf(stderr, "Error: Missing access key\n");
+                fprintf(stderr, "Usage: %s creds enable <access_key>\n", argv[0]);
+                ret = 1;
+            } else {
+                const char *access_key = argv[3];
+                if (buckets_credentials_set_enabled(access_key, true) == BUCKETS_OK) {
+                    printf("Enabled credential: %s\n", access_key);
+                } else {
+                    fprintf(stderr, "Error: Failed to enable credential (not found?)\n");
+                    ret = 1;
+                }
+            }
+            
+        } else if (strcmp(subcmd, "disable") == 0) {
+            if (argc < 4) {
+                fprintf(stderr, "Error: Missing access key\n");
+                fprintf(stderr, "Usage: %s creds disable <access_key>\n", argv[0]);
+                ret = 1;
+            } else {
+                const char *access_key = argv[3];
+                if (buckets_credentials_set_enabled(access_key, false) == BUCKETS_OK) {
+                    printf("Disabled credential: %s\n", access_key);
+                } else {
+                    fprintf(stderr, "Error: Failed to disable credential (not found?)\n");
+                    ret = 1;
+                }
+            }
+            
+        } else {
+            fprintf(stderr, "Error: Unknown subcommand: %s\n", subcmd);
+            fprintf(stderr, "Use '%s creds' for help\n", argv[0]);
+            ret = 1;
+        }
+        
+        buckets_credentials_cleanup();
         
     } else {
         fprintf(stderr, "Unknown command: %s\n\n", command);

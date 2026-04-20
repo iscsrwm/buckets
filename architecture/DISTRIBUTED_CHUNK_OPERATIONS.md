@@ -9,34 +9,35 @@
 
 This document describes how Buckets implements **parallel cross-node chunk distribution** for erasure-coded objects. When an erasure set spans multiple nodes, chunks are written and read **concurrently** via threaded RPC calls to remote nodes, maximizing throughput and minimizing latency.
 
-## Performance Benchmarks (February 27, 2026)
+## Performance Benchmarks (March 6, 2026)
 
-### Throughput by File Size
+> **Note**: Previous benchmarks from February 27, 2026 were invalid for PUT operations
+> due to missing `Expect: 100-continue` response. The numbers below reflect actual
+> performance with authenticated S3 clients (boto3, mc, AWS CLI).
 
-| Size | Upload Speed | Download Speed | Integrity |
-|------|--------------|----------------|-----------|
-| 1MB | 10.37 MB/s | 51.65 MB/s | PASS |
-| 5MB | 4.25 MB/s | 121.95 MB/s | PASS |
-| 10MB | 8.23 MB/s | 166.66 MB/s | PASS |
-| 25MB | 18.68 MB/s | 179.85 MB/s | PASS |
-| 50MB | 32.65 MB/s | 193.79 MB/s | PASS |
+### Concurrent Workload (50 workers, authenticated)
 
-### Operations Per Second
+| Workload | Throughput | Avg Rate |
+|----------|------------|----------|
+| GET-only | 394 ops/s | 410/s |
+| PUT-only | 383 ops/s | 404/s |
+| Mixed | 446 ops/s | 451/s |
 
-| Size | PUT | GET | HEAD |
-|------|-----|-----|------|
-| 1KB | 54.52 | 113.94 | 94.24 |
-| 64KB | 49.86 | 82.86 | 95.99 |
-| 256KB | 10.27 | 61.79 | 70.19 |
-| 1MB | 10.37 | 51.65 | 62.45 |
-| 4MB | 0.86 | 28.42 | 36.96 |
+### Operations Per Second by Size (single client, authenticated)
+
+| Size | PUT ops/s | GET ops/s |
+|------|-----------|-----------|
+| 1KB | 140 | 563 |
+| 64KB | 101 | 503 |
+| 256KB | 13 | 162 |
+| 1MB | 11 | 68 |
 
 ### Key Findings
 
-1. **Small objects (≤64KB)** use inline storage, achieving ~50 PUT ops/s and ~100 GET ops/s
-2. **Large objects (≥256KB)** trigger erasure coding with 12-chunk distribution
-3. **Download scales linearly** with file size, reaching ~194 MB/s for 50MB files
-4. **Upload has fixed overhead** of ~80-100ms for erasure encoding + parallel RPC setup
+1. **Small objects (1KB-64KB)**: Best throughput, 100-140 PUT ops/s, 500+ GET ops/s
+2. **Large objects (256KB+)**: Erasure coding overhead, 11-13 PUT ops/s, 68-162 GET ops/s
+3. **GET faster than PUT**: Parallel chunk reads with decoding faster than encoding + writes
+4. **Authentication overhead minimal**: ~1-2ms per request
 5. **100% data integrity** verified across all test sizes
 
 ## Implementation Status

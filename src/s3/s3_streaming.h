@@ -48,6 +48,7 @@ typedef struct {
     /* Content type and metadata */
     char content_type[128];
     char etag[65];                 /* Computed MD5/BLAKE2b */
+    char version_id[37];           /* Version ID if versioning enabled */
     
     /* User metadata (x-amz-meta-*) */
     char *user_meta_keys[32];      /* Keys without x-amz-meta- prefix */
@@ -81,6 +82,13 @@ typedef struct {
     bool headers_sent;
     bool completed;
     bool aborted;
+    
+    /* AWS chunked encoding state */
+    bool aws_chunked;              /* Using aws-chunked transfer encoding */
+    size_t aws_chunk_remaining;    /* Bytes remaining in current AWS chunk */
+    char aws_chunk_header[128];    /* Buffer for parsing chunk header */
+    size_t aws_chunk_header_len;   /* Bytes in header buffer */
+    int aws_chunk_state;           /* 0=header, 1=data, 2=trailer */
 } s3_stream_upload_t;
 
 /**

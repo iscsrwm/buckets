@@ -661,3 +661,219 @@ int buckets_distributed_delete_object(const char *bucket, const char *object)
 
 /* Note: Sequential RPC delete removed - now using buckets_parallel_delete_chunks() 
  * from parallel_chunks.c for concurrent shard deletion across all disks. */
+
+/* ===================================================================
+ * Distributed List Operations
+ * ===================================================================*/
+
+/**
+ * List objects from all cluster nodes
+ * 
+ * Queries each node's storage.listObjects RPC and merges results.
+ * Deduplicates by bucket+object key.
+ * 
+ * @param bucket Bucket name to list
+ * @param prefix Object prefix filter (optional, can be NULL)
+ * @param max_keys Maximum number of keys to return
+ * @param objects Output array of object info (caller must free)
+ * @param count Output number of objects found
+ * @return 0 on success, error code on failure
+ */
+int buckets_distributed_list_objects(const char *bucket, const char *prefix,
+                                      size_t max_keys,
+                                      cJSON **objects_array, size_t *count)
+{
+    if (!bucket || !objects_array || !count) {
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    *objects_array = cJSON_CreateArray();
+    *count = 0;
+    
+    if (max_keys == 0) max_keys = 1000;
+    
+    /* Get cluster config to find all node endpoints */
+    extern buckets_config_t* buckets_get_global_config(void);
+    buckets_config_t *config = buckets_get_global_config();
+    
+    if (!config || !config->cluster.enabled || config->cluster.node_count == 0) {
+        /* No cluster config - just do local listing */
+        buckets_debug("No cluster config, listing local only");
+        return 0;
+    }
+    
+    /* Track seen objects for deduplication */
+    /* Simple approach: array of bucket/object strings */
+    char **seen_keys = buckets_calloc(max_keys, sizeof(char*));
+    size_t seen_count = 0;
+    
+    /* Query each node */
+    for (int node_idx = 0; node_idx < config->cluster.node_count && *count < max_keys; node_idx++) {
+        buckets_cluster_node_t *node = &config->cluster.nodes[node_idx];
+        
+        if (!node->endpoint || node->endpoint[0] == '\0') {
+            continue;
+        }
+        
+        buckets_debug("Querying node %s for objects in %s", node->endpoint, bucket);
+        
+        /* Build RPC params */
+        cJSON *params = cJSON_CreateObject();
+        cJSON_AddStringToObject(params, "bucket", bucket);
+        if (prefix) {
+            cJSON_AddStringToObject(params, "prefix", prefix);
+        }
+        cJSON_AddNumberToObject(params, "max_keys", (double)(max_keys - *count));
+        
+        /* Make RPC call */
+        buckets_rpc_response_t *response = NULL;
+        int ret = buckets_rpc_call(g_rpc_ctx, node->endpoint, "storage.listObjects",
+                                   params, &response, 5000);  /* 5 second timeout */
+        cJSON_Delete(params);
+        
+        if (ret != BUCKETS_OK || !response || !response->result) {
+            buckets_debug("RPC to %s failed or no result", node->endpoint);
+            if (response) buckets_rpc_response_free(response);
+            continue;
+        }
+        
+        /* Parse response */
+        cJSON *success = cJSON_GetObjectItem(response->result, "success");
+        cJSON *objects = cJSON_GetObjectItem(response->result, "objects");
+        
+        if (!success || !cJSON_IsTrue(success) || !objects || !cJSON_IsArray(objects)) {
+            buckets_debug("Invalid response from %s", node->endpoint);
+            buckets_rpc_response_free(response);
+            continue;
+        }
+        
+        /* Add objects to result, deduplicating */
+        cJSON *obj = NULL;
+        cJSON_ArrayForEach(obj, objects) {
+            if (*count >= max_keys) break;
+            
+            cJSON *obj_bucket = cJSON_GetObjectItem(obj, "bucket");
+            cJSON *obj_object = cJSON_GetObjectItem(obj, "object");
+            
+            if (!obj_bucket || !cJSON_IsString(obj_bucket) ||
+                !obj_object || !cJSON_IsString(obj_object)) {
+                continue;
+            }
+            
+            /* Build dedup key */
+            size_t key_len = strlen(obj_bucket->valuestring) + strlen(obj_object->valuestring) + 2;
+            char *dedup_key = buckets_malloc(key_len);
+            snprintf(dedup_key, key_len, "%s/%s", obj_bucket->valuestring, obj_object->valuestring);
+            
+            /* Check if already seen */
+            bool is_dup = false;
+            for (size_t i = 0; i < seen_count; i++) {
+                if (strcmp(seen_keys[i], dedup_key) == 0) {
+                    is_dup = true;
+                    break;
+                }
+            }
+            
+            if (is_dup) {
+                buckets_free(dedup_key);
+                continue;
+            }
+            
+            /* Add to seen list */
+            if (seen_count < max_keys) {
+                seen_keys[seen_count++] = dedup_key;
+            } else {
+                buckets_free(dedup_key);
+            }
+            
+            /* Clone and add to result */
+            cJSON *obj_copy = cJSON_Duplicate(obj, true);
+            cJSON_AddItemToArray(*objects_array, obj_copy);
+            (*count)++;
+        }
+        
+        buckets_rpc_response_free(response);
+    }
+    
+    /* Free seen keys */
+    for (size_t i = 0; i < seen_count; i++) {
+        buckets_free(seen_keys[i]);
+    }
+    buckets_free(seen_keys);
+    
+    buckets_info("Distributed list: bucket=%s prefix=%s found=%zu from %d nodes",
+                 bucket, prefix ? prefix : "(none)", *count, config->cluster.node_count);
+    
+    return BUCKETS_OK;
+}
+
+/**
+ * Create bucket directory on all cluster nodes
+ * 
+ * @param bucket Bucket name
+ * @return 0 on success (at least one node succeeded), error code on failure
+ */
+int buckets_distributed_create_bucket(const char *bucket)
+{
+    if (!bucket || bucket[0] == '\0') {
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    /* Get cluster config to find all node endpoints */
+    extern buckets_config_t* buckets_get_global_config(void);
+    buckets_config_t *config = buckets_get_global_config();
+    
+    if (!config || !config->cluster.enabled || config->cluster.node_count == 0) {
+        /* No cluster config - bucket was already created locally */
+        buckets_debug("No cluster config, skipping distributed bucket creation");
+        return BUCKETS_OK;
+    }
+    
+    int nodes_succeeded = 0;
+    int total_disks_created = 0;
+    
+    /* Query each node to create bucket directory */
+    for (int node_idx = 0; node_idx < config->cluster.node_count; node_idx++) {
+        buckets_cluster_node_t *node = &config->cluster.nodes[node_idx];
+        
+        if (!node->endpoint || node->endpoint[0] == '\0') {
+            continue;
+        }
+        
+        buckets_debug("Creating bucket dir on node %s for %s", node->endpoint, bucket);
+        
+        /* Build RPC params */
+        cJSON *params = cJSON_CreateObject();
+        cJSON_AddStringToObject(params, "bucket", bucket);
+        
+        /* Make RPC call */
+        buckets_rpc_response_t *response = NULL;
+        int ret = buckets_rpc_call(g_rpc_ctx, node->endpoint, "storage.createBucketDir",
+                                   params, &response, 5000);  /* 5 second timeout */
+        cJSON_Delete(params);
+        
+        if (ret != BUCKETS_OK || !response || !response->result) {
+            buckets_warn("RPC createBucketDir to %s failed", node->endpoint);
+            if (response) buckets_rpc_response_free(response);
+            continue;
+        }
+        
+        /* Parse response */
+        cJSON *success = cJSON_GetObjectItem(response->result, "success");
+        cJSON *disks_created = cJSON_GetObjectItem(response->result, "disks_created");
+        
+        if (success && cJSON_IsTrue(success)) {
+            nodes_succeeded++;
+            if (disks_created && cJSON_IsNumber(disks_created)) {
+                total_disks_created += (int)disks_created->valuedouble;
+            }
+        }
+        
+        buckets_rpc_response_free(response);
+    }
+    
+    buckets_info("Distributed bucket creation: bucket=%s, nodes=%d/%d, disks=%d",
+                 bucket, nodes_succeeded, config->cluster.node_count, total_disks_created);
+    
+    return (nodes_succeeded > 0) ? BUCKETS_OK : BUCKETS_ERR_IO;
+}

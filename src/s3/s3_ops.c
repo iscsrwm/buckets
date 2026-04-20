@@ -222,42 +222,58 @@ int buckets_s3_put_object(buckets_s3_request_t *req, buckets_s3_response_t *res)
     buckets_info("S3 PUT: body_len=%zu, body_ptr=%p, user_meta_count=%d", 
                  size, (void*)data, req->user_meta_count);
     
-    int ret;
+    /* Check if bucket has versioning enabled */
+    bool versioning_enabled = false;
+    bool versioning_suspended = false;
+    extern int buckets_get_bucket_versioning(const char *bucket, bool *enabled, bool *suspended);
+    buckets_get_bucket_versioning(req->bucket, &versioning_enabled, &versioning_suspended);
     
-    /* Check if we have user metadata */
-    if (req->user_meta_count > 0) {
-        /* Use put_object_with_metadata for user metadata support */
-        buckets_xl_meta_t meta;
-        memset(&meta, 0, sizeof(meta));
-        
-        /* Set content type */
-        if (content_type) {
-            meta.meta.content_type = buckets_strdup(content_type);
-        }
-        
-        /* Copy user metadata */
-        for (int i = 0; i < req->user_meta_count; i++) {
-            buckets_add_user_metadata(&meta, req->user_meta_keys[i], req->user_meta_values[i]);
-            buckets_info("S3 PUT: Adding user metadata: %s = %s", 
-                        req->user_meta_keys[i], req->user_meta_values[i]);
-        }
-        
-        ret = buckets_put_object_with_metadata(req->bucket, req->key, data, size, &meta, false, NULL);
-        
-        /* Free metadata strings we allocated */
-        if (meta.meta.content_type) {
-            buckets_free(meta.meta.content_type);
-        }
-        for (u32 i = 0; i < meta.meta.user_count; i++) {
-            buckets_free(meta.meta.user_keys[i]);
-            buckets_free(meta.meta.user_values[i]);
-        }
-        if (meta.meta.user_keys) buckets_free(meta.meta.user_keys);
-        if (meta.meta.user_values) buckets_free(meta.meta.user_values);
-    } else {
-        /* No user metadata - use simple put */
-        ret = buckets_put_object(req->bucket, req->key, data, size, content_type);
+    int ret;
+    char version_id[37] = {0};
+    
+    /* Build metadata structure */
+    buckets_xl_meta_t meta;
+    memset(&meta, 0, sizeof(meta));
+    
+    /* Set content type */
+    if (content_type) {
+        meta.meta.content_type = buckets_strdup(content_type);
     }
+    
+    /* Copy user metadata if present */
+    for (int i = 0; i < req->user_meta_count; i++) {
+        buckets_add_user_metadata(&meta, req->user_meta_keys[i], req->user_meta_values[i]);
+        buckets_info("S3 PUT: Adding user metadata: %s = %s", 
+                    req->user_meta_keys[i], req->user_meta_values[i]);
+    }
+    
+    if (versioning_enabled) {
+        /* Versioning is enabled - create a new version */
+        ret = buckets_put_object_versioned(req->bucket, req->key, data, size, &meta, version_id);
+        if (ret == 0) {
+            /* Copy version ID to response */
+            snprintf(res->version_id, sizeof(res->version_id), "%s", version_id);
+            buckets_info("S3 PUT: Created version %s for %s/%s", version_id, req->bucket, req->key);
+        }
+    } else {
+        /* Versioning disabled or suspended - overwrite object */
+        if (req->user_meta_count > 0 || content_type) {
+            ret = buckets_put_object_with_metadata(req->bucket, req->key, data, size, &meta, false, NULL);
+        } else {
+            ret = buckets_put_object(req->bucket, req->key, data, size, content_type);
+        }
+    }
+    
+    /* Free metadata strings we allocated */
+    if (meta.meta.content_type) {
+        buckets_free(meta.meta.content_type);
+    }
+    for (u32 i = 0; i < meta.meta.user_count; i++) {
+        buckets_free(meta.meta.user_keys[i]);
+        buckets_free(meta.meta.user_values[i]);
+    }
+    if (meta.meta.user_keys) buckets_free(meta.meta.user_keys);
+    if (meta.meta.user_values) buckets_free(meta.meta.user_values);
     
     if (ret != 0) {
         buckets_error("Failed to write object to distributed storage: %s/%s", 
@@ -279,8 +295,13 @@ int buckets_s3_put_object(buckets_s3_request_t *req, buckets_s3_response_t *res)
     /* Generate success response */
     buckets_s3_xml_success(res, "PutObjectResult");
     
-    buckets_info("PUT object: %s/%s (%zu bytes, ETag: %s) - written to distributed storage",
-                 req->bucket, req->key, req->body_len, res->etag);
+    if (versioning_enabled && version_id[0] != '\0') {
+        buckets_info("PUT object: %s/%s (%zu bytes, ETag: %s, VersionId: %s) - versioned",
+                     req->bucket, req->key, req->body_len, res->etag, version_id);
+    } else {
+        buckets_info("PUT object: %s/%s (%zu bytes, ETag: %s) - written to distributed storage",
+                     req->bucket, req->key, req->body_len, res->etag);
+    }
     
     return BUCKETS_OK;
 }
@@ -437,17 +458,28 @@ int buckets_s3_head_object(buckets_s3_request_t *req, buckets_s3_response_t *res
         return ret;
     }
     
-    /* Free body if allocated */
+    /* Preserve content_length before freeing body - this is the object size
+     * that HEAD should return in the Content-Length header */
+    i64 content_length = res->content_length;
+    if (content_length == 0 && res->body_len > 0) {
+        /* Fallback: use body_len if content_length wasn't set */
+        content_length = (i64)res->body_len;
+    }
+    
+    /* Free body if allocated - HEAD doesn't return body */
     if (res->body) {
         buckets_free(res->body);
         res->body = NULL;
-        res->body_len = 0;
     }
     
-    /* Change status to 200 if it was set by GET */
+    /* Set body_len to 0 (no body for HEAD) but preserve content_length */
+    res->body_len = 0;
+    res->content_length = content_length;
+    
+    /* Log success */
     if (res->status_code == 200) {
-        buckets_debug("HEAD object: %s/%s (ETag: %s)",
-                      req->bucket, req->key, res->etag);
+        buckets_debug("HEAD object: %s/%s (ETag: %s, Size: %lld)",
+                      req->bucket, req->key, res->etag, (long long)res->content_length);
     }
     
     return BUCKETS_OK;
@@ -508,7 +540,7 @@ int buckets_s3_put_bucket(buckets_s3_request_t *req, buckets_s3_response_t *res)
         }
     }
     
-    /* Create bucket directory (try multi-disk first) */
+    /* Create bucket directory locally first (try multi-disk, then single-disk) */
     snprintf(bucket_path, sizeof(bucket_path), "%s/disk1/%s", data_dir, req->bucket);
     if (mkdir(bucket_path, 0755) != 0 && errno != EEXIST) {
         /* Multi-disk failed, try single-disk mode */
@@ -521,7 +553,14 @@ int buckets_s3_put_bucket(buckets_s3_request_t *req, buckets_s3_response_t *res)
         }
     }
     
-    buckets_info("Created bucket: %s", req->bucket);
+    /* Distribute bucket creation to all cluster nodes */
+    extern int buckets_distributed_create_bucket(const char *bucket);
+    int dist_ret = buckets_distributed_create_bucket(req->bucket);
+    if (dist_ret != 0) {
+        buckets_warn("Distributed bucket creation partially failed: %s (local succeeded)", req->bucket);
+    }
+    
+    buckets_info("Created bucket: %s (distributed)", req->bucket);
     
     /* Return 200 OK with empty body */
     res->status_code = 200;

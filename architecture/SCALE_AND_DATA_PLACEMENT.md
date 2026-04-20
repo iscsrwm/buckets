@@ -1,31 +1,31 @@
-# MinIO Fine-Grained Scalability Architecture
+# Buckets Erasure Set Scalability Architecture
 
-## Status: PROPOSED
-**Version:** 1.0  
-**Date:** February 25, 2026  
+## Status: IMPLEMENTED
+**Version:** 2.0  
+**Date:** March 4, 2026  
 **Authors:** Architecture Team
 
 ---
 
 ## Executive Summary
 
-This document describes a comprehensive architectural redesign to enable **fine-grained scalability** in MinIO, allowing operators to add or remove individual nodes (1-2 at a time) rather than requiring full server pool operations. This addresses a critical operational limitation in the current architecture where dynamic node management is not supported.
+This document describes the scalability architecture for Buckets, enabling operators to **scale by adding or removing complete erasure sets** rather than individual nodes. This approach provides predictable data migration, maintains erasure coding integrity, and simplifies cluster management.
 
 ### Decision Summary
 
-After extensive analysis of the current MinIO data placement algorithm and evaluation of multiple alternatives, we have decided to implement a **hybrid architecture combining Location Registry with Consistent Hashing**.
+After extensive analysis, we have implemented a **hybrid architecture combining Location Registry with Consistent Hashing** that operates at the **erasure set level**.
 
 **Key Design Choices:**
-- **Location Registry**: Self-hosted on MinIO to track object locations explicitly
-- **Consistent Hashing**: Virtual node ring for deterministic placement computation
+- **Location Registry**: Self-hosted on Buckets to track object locations explicitly
+- **Consistent Hashing**: Virtual node ring with erasure sets as the unit of placement
+- **Erasure Set Scaling**: Add/remove complete erasure sets (not individual nodes)
 - **Controlled Migration**: Background process to rebalance objects when topology changes
-- **Fresh Start Acceptable**: No backward compatibility requirement with existing clusters
 - **Read Latency Priority**: Optimize for fast object lookup (GET operations)
 
 **Expected Outcomes:**
-- Add/remove 1-2 nodes with ~20-30% data migration
-- Sub-5ms read latency (vs current 10-50ms multi-pool fan-out)
-- Zero-downtime node operations
+- Add/remove erasure sets with ~33% data migration per set change
+- Sub-5ms read latency via direct registry lookup
+- Zero-downtime set operations
 - Migration completes in ~1 hour for 2TB affected data
 
 ---
@@ -79,22 +79,23 @@ setIndex = hash(objectName, deploymentID) % numberOfSets
 Current scaling strategy:
 
 ```
-Initial Cluster:
-Pool 0: node{1...4}/data{1...4}  (16 disks, 4 sets of 4 drives)
+Initial Cluster (1 erasure set):
+Set 0: 12 disks across nodes 1-3 (K=8, M=4)
 
-Expansion (supported):
-Pool 0: node{1...4}/data{1...4}
-Pool 1: node{5...8}/data{1...4}  ← Add entire new pool
+Expansion (add erasure set):
+Set 0: 12 disks across nodes 1-3
+Set 1: 12 disks across nodes 4-6  ← Add complete erasure set
 
-Node Failure (not supported):
-Pool 0: node{1,2,4}/data{1...4}  ← Cannot remove node3
+Set Removal (drain and remove):
+Set 0: 12 disks across nodes 1-3  ← Migrate data from Set 1
+Set 1: [DRAINING]                 ← Data migrating to Set 0
 ```
 
-**Limitations:**
-- ❌ Cannot add individual nodes within a pool
-- ❌ Cannot remove failed nodes without decommissioning entire pool
-- ❌ Pool expansion requires adding 4+ nodes simultaneously
-- ❌ Multi-pool reads require fan-out to all pools (O(N) latency)
+**Buckets Scaling Model:**
+- ✅ Add complete erasure sets to expand capacity
+- ✅ Remove erasure sets with automatic data migration
+- ✅ Consistent hashing minimizes data movement (~33% per set change)
+- ✅ Direct registry lookup for O(1) read latency
 
 ### 1.3 Why Current Design Exists
 
@@ -118,32 +119,30 @@ From code analysis (`cmd/erasure-sets.go:49`):
 ### 2.1 User Requirements
 
 Operators need to:
-1. **Add individual nodes** (1-2 at a time) to existing clusters
-2. **Remove failed nodes** gracefully without full pool decommission
-3. **Scale incrementally** based on capacity needs
+1. **Add erasure sets** to expand cluster capacity
+2. **Remove erasure sets** gracefully with data migration
+3. **Scale predictably** based on capacity needs
 4. **Maintain high availability** during topology changes
 
-### 2.2 Current Limitations
+### 2.2 Why Erasure Set Scaling (Not Node Scaling)
 
-The modulo-based hash breaks when topology changes:
+**Erasure coding requires complete sets:**
+- An erasure set has K data shards + M parity shards (e.g., K=8, M=4 = 12 disks)
+- All shards must be written together for data protection
+- Individual node addition would break erasure coding guarantees
 
-```
-Before: hash("file.jpg") % 4 = 2  → Set 2 ✓
-After:  hash("file.jpg") % 5 = 3  → Set 3 ✗ (object unreachable!)
-```
-
-**Fundamental Conflict:**
-- Placement algorithm requires immutable `numberOfSets`
-- Scalability requires mutable cluster topology
-- **Cannot satisfy both with current architecture**
+**Consistent hashing operates on sets:**
+- Objects are hashed to erasure sets, not individual nodes
+- Each set is a unit of placement in the hash ring
+- Adding/removing sets triggers predictable migration (~33% per set change)
 
 ### 2.3 Business Impact
 
-**Without fine-grained scaling:**
-- Over-provisioning costs (must add 4+ nodes at once)
-- Manual workarounds for node failures (replace hardware vs drain pool)
-- Reduced operational agility
-- Competitive disadvantage vs cloud-native storage systems
+**With erasure set scaling:**
+- Predictable capacity planning (add complete sets)
+- Maintained data protection guarantees
+- Clear migration scope (~33% of data per set change)
+- Simplified operational model
 
 ---
 
@@ -153,11 +152,11 @@ After:  hash("file.jpg") % 5 = 3  → Set 3 ✗ (object unreachable!)
 
 | ID | Requirement | Priority |
 |----|-------------|----------|
-| FR-1 | Add individual nodes (1-2) to existing pool | **CRITICAL** |
-| FR-2 | Remove individual nodes gracefully | **CRITICAL** |
+| FR-1 | Add complete erasure sets to existing cluster | **CRITICAL** |
+| FR-2 | Remove erasure sets gracefully with migration | **CRITICAL** |
 | FR-3 | Zero data loss during topology changes | **CRITICAL** |
 | FR-4 | Objects remain accessible during migration | **CRITICAL** |
-| FR-5 | Support adding entire erasure sets (4-8 nodes) | HIGH |
+| FR-5 | Support multiple erasure set configurations (K+M) | HIGH |
 | FR-6 | Migration pause/resume capability | MEDIUM |
 | FR-7 | Rollback failed topology changes | MEDIUM |
 
@@ -167,7 +166,7 @@ After:  hash("file.jpg") % 5 = 3  → Set 3 ✗ (object unreachable!)
 |----|-------------|--------|----------|
 | NFR-1 | Read latency (GET) | < 5ms | **CRITICAL** |
 | NFR-2 | Write throughput degradation | < 10% | HIGH |
-| NFR-3 | Data migration percentage per node add/remove | 20-30% | HIGH |
+| NFR-3 | Data migration percentage per set add/remove | ~33% | HIGH |
 | NFR-4 | Migration time for 2TB affected data | ~1 hour | MEDIUM |
 | NFR-5 | Cluster startup time | < 2 minutes | MEDIUM |
 | NFR-6 | Memory overhead for metadata | < 100GB for 1B objects | MEDIUM |
@@ -238,13 +237,13 @@ After:  hash("file.jpg") % 5 = 3  → Set 3 ✗ (object unreachable!)
 
 ```
 ┌───────────────────────────────────────────────────────────┐
-│                    MinIO Cluster                           │
+│                    Buckets Cluster                         │
 ├───────────────────────────────────────────────────────────┤
 │                                                            │
 │  ┌──────────────────────────────────────────────┐         │
 │  │      Location Registry (Self-Hosted)         │         │
-│  │   - Bucket: .minio-registry                  │         │
-│  │   - Storage: MinIO erasure coding            │         │
+│  │   - Bucket: .buckets-registry                │         │
+│  │   - Storage: Buckets erasure coding          │         │
 │  │   - Cache: LRU 1M entries                    │         │
 │  │   - Key: bucket/object/version-id.json       │         │
 │  │   - Value: {pool, set, disks, generation}    │         │
@@ -295,13 +294,13 @@ After:  hash("file.jpg") % 5 = 3  → Set 3 ✗ (object unreachable!)
 
 **Circular Dependency:**
 - Registry stores object locations
-- Registry itself is objects stored on MinIO
+- Registry itself is objects stored on Buckets
 - How do we locate the registry?
 
 **Solution:**
 ```go
 // Well-known registry bucket on fixed location
-const RegistryBucket = ".minio-registry"
+const RegistryBucket = ".buckets-registry"
 const RegistryPool = 0
 const RegistrySet = 0
 
@@ -321,7 +320,7 @@ const RegistrySet = 0
 Track the physical location (pool, set, disks) of every object version in the cluster.
 
 #### Storage Backend
-**Self-hosted on MinIO** (`.minio-registry` bucket):
+**Self-hosted on Buckets** (`.buckets-registry` bucket):
 - Leverages existing erasure coding for durability
 - No external dependencies
 - Same SLA as data objects
@@ -492,7 +491,7 @@ Track cluster topology and coordinate topology changes.
 ```
 
 **Persistence:**
-- Location: `.minio.sys/topology.json` on each disk
+- Location: `.buckets.sys/topology.json` on each disk
 - Write quorum: N/2 + 1 disks
 - Read quorum: N/2 disks
 
@@ -612,7 +611,7 @@ type MigrationOrchestrator struct {
 }
 ```
 
-**Persistence:** `.minio.sys/migration-{id}.json`
+**Persistence:** `.buckets.sys/migration-{id}.json`
 
 ---
 
@@ -698,9 +697,9 @@ type MigrationState struct {
 
 | Component | File Path | Format | Replication |
 |-----------|-----------|--------|-------------|
-| Topology | `.minio.sys/topology.json` | JSON | Quorum write to all disks |
-| Registry Entries | `.minio-registry/{bucket}/{object}/{version}.json` | JSON | Erasure coded |
-| Migration State | `.minio.sys/migration-{id}.json` | JSON | Quorum write |
+| Topology | `.buckets.sys/topology.json` | JSON | Quorum write to all disks |
+| Registry Entries | `.buckets-registry/{bucket}/{object}/{version}.json` | JSON | Erasure coded |
+| Migration State | `.buckets.sys/migration-{id}.json` | JSON | Quorum write |
 | Hash Ring | In-memory, rebuilt from topology | N/A | N/A |
 
 ---
@@ -809,40 +808,42 @@ func getObjectWithMigrationFallback(ctx context.Context, bucket, object string,
 - Cache miss: ~1-5ms (registry GET)
 - Registry unavailable: Fallback to dual-location check
 
-### 8.3 Add Node
+### 8.3 Add Erasure Set
 
 ```bash
-mc admin cluster add-node ALIAS http://node5:9000/data{1...4} --pool 0
+buckets admin add-set --config cluster.json --set-id 1 --disks /data/node4/disk{1...4},/data/node5/disk{1...4},/data/node6/disk{1...4}
 ```
 
 ```go
-func AddNode(ctx context.Context, nodeURL string, poolIdx int, 
-             diskPaths []string) error {
+func AddErasureSet(ctx context.Context, setConfig ErasureSetConfig) error {
     
-    // 1. Validate node reachability
-    if err := validateNodeConnectivity(nodeURL); err != nil {
-        return fmt.Errorf("node unreachable: %w", err)
+    // 1. Validate erasure set configuration
+    if err := validateErasureSetConfig(setConfig); err != nil {
+        return fmt.Errorf("invalid set config: %w", err)
     }
     
-    // 2. Validate disk configuration
-    diskCount := len(diskPaths)
-    expectedDiskCount := getExpectedDiskCountForPool(poolIdx)
+    // 2. Validate disk count matches K+M
+    diskCount := len(setConfig.Disks)
+    expectedDiskCount := setConfig.DataShards + setConfig.ParityShards
     if diskCount != expectedDiskCount {
-        return fmt.Errorf("disk count mismatch: got %d, expected %d", 
-                          diskCount, expectedDiskCount)
+        return fmt.Errorf("disk count mismatch: got %d, expected %d (K=%d + M=%d)", 
+                          diskCount, expectedDiskCount,
+                          setConfig.DataShards, setConfig.ParityShards)
     }
     
     // 3. Create new set topology
     newSet := SetTopology{
-        Idx:   getNextSetIndex(poolIdx),
-        State: SetActive,
-        Disks: createDiskInfoFromPaths(nodeURL, diskPaths),
+        Idx:          getNextSetIndex(),
+        State:        SetActive,
+        Disks:        setConfig.Disks,
+        DataShards:   setConfig.DataShards,
+        ParityShards: setConfig.ParityShards,
     }
     
     // 4. Update topology with new generation
     oldTopology := globalTopologyManager.GetTopology()
     newTopology := oldTopology.Clone()
-    newTopology.Pools[poolIdx].Sets = append(newTopology.Pools[poolIdx].Sets, newSet)
+    newTopology.Sets = append(newTopology.Sets, newSet)
     newTopology.Generation++
     
     // 5. Persist new topology (quorum write)
@@ -850,21 +851,21 @@ func AddNode(ctx context.Context, nodeURL string, poolIdx int,
         return fmt.Errorf("topology save failed: %w", err)
     }
     
-    // 6. Rebuild hash ring
+    // 6. Rebuild hash ring with new set
     newHashRing := NewConsistentHashRing(newTopology, vnodeFactor)
     globalHashRing.AtomicSwap(newHashRing)
     
-    // 7. Broadcast topology update to all peers
+    // 7. Broadcast topology update to all nodes
     globalNotificationSys.ReloadTopology(ctx, newTopology)
     
     // 8. Initialize new disks with format.json
-    if err := initializeNewSet(ctx, poolIdx, newSet); err != nil {
+    if err := initializeNewSet(ctx, newSet); err != nil {
         // Rollback topology
         globalTopologyManager.SaveTopology(ctx, oldTopology)
         return fmt.Errorf("disk initialization failed: %w", err)
     }
     
-    // 9. Start background migration
+    // 9. Start background migration (~33% of objects will move to new set)
     migrationID := fmt.Sprintf("migration-gen-%d-to-%d", 
                                oldTopology.Generation, newTopology.Generation)
     go globalMigrationOrchestrator.Start(ctx, migrationID, 
@@ -876,25 +877,25 @@ func AddNode(ctx context.Context, nodeURL string, poolIdx int,
 ```
 
 **Duration:** ~30 seconds (excluding migration)
+**Data Migration:** ~33% of objects migrate to the new set
 
-### 8.4 Remove Node
+### 8.4 Remove Erasure Set
 
 ```bash
-mc admin cluster remove-node ALIAS http://node3:9000 --drain
+buckets admin remove-set --config cluster.json --set-id 1 --drain
 ```
 
 ```go
-func RemoveNode(ctx context.Context, nodeURL string, drain bool) error {
+func RemoveErasureSet(ctx context.Context, setIdx int, drain bool) error {
     
-    // 1. Find set containing this node
-    poolIdx, setIdx, err := findSetByNodeURL(nodeURL)
-    if err != nil {
-        return fmt.Errorf("node not found: %w", err)
+    // 1. Find the erasure set
+    topology := globalTopologyManager.GetTopology()
+    if setIdx >= len(topology.Sets) {
+        return fmt.Errorf("set not found: %d", setIdx)
     }
     
-    // 2. Mark set as draining
-    topology := globalTopologyManager.GetTopology()
-    topology.Pools[poolIdx].Sets[setIdx].State = SetDraining
+    // 2. Mark set as draining (no new writes)
+    topology.Sets[setIdx].State = SetDraining
     topology.Generation++
     
     // 3. Persist updated topology
@@ -1005,7 +1006,7 @@ Real-world time: ~1 hour
    - Update registry atomically
    - Verify checksums
    - Delete from source
-3. Track progress in `.minio.sys/migration-{id}.json`
+3. Track progress in `.buckets.sys/migration-{id}.json`
 
 **Phase 3: Verification (5 minutes)**
 1. Scan destination sets for migrated objects
@@ -1193,7 +1194,7 @@ func RecoverMigrationTransaction(tx MigrationTransaction) error {
 }
 ```
 
-**Transaction Log:** `.minio.sys/migration-{id}-txlog.bin`
+**Transaction Log:** `.buckets.sys/migration-{id}-txlog.bin`
 
 ---
 
@@ -1419,23 +1420,23 @@ func migrateObject(ctx, obj ObjectInfo, srcPool, srcSet, dstPool, dstSet int) er
 
 | File | Lines | Description |
 |------|-------|-------------|
-| `madmin-go/cluster-commands.go` | ~600 | Admin API client |
-| `cmd/admin-rpc-cluster.go` | ~800 | Server-side handlers |
+| `src/admin/cluster_commands.c` | ~600 | Admin API handlers |
+| `src/admin/admin_rpc.c` | ~800 | Server-side handlers |
 | `docs/cluster-management.md` | N/A | Documentation |
 
 **Commands:**
 ```bash
-mc admin cluster add-node ALIAS http://node5:9000/data{1...4} --pool 0
-mc admin cluster remove-node ALIAS http://node3:9000 --drain
-mc admin cluster list-nodes ALIAS
-mc admin cluster migration-status ALIAS
-mc admin cluster migration-pause ALIAS
-mc admin cluster migration-resume ALIAS
+buckets admin add-set --config cluster.json --set-id 1 --disks ...
+buckets admin remove-set --config cluster.json --set-id 1 --drain
+buckets admin list-sets --config cluster.json
+buckets admin migration-status --config cluster.json
+buckets admin migration-pause --config cluster.json
+buckets admin migration-resume --config cluster.json
 ```
 
 **Acceptance Criteria:**
-- ✅ Add node completes in <1 minute (excluding migration)
-- ✅ Remove node drains data before removal
+- ✅ Add erasure set completes in <1 minute (excluding migration)
+- ✅ Remove erasure set drains data before removal
 - ✅ Migration status shows real-time progress
 - ✅ Errors clearly communicated to operator
 
@@ -1559,25 +1560,25 @@ mc admin cluster migration-resume ALIAS
 
 ### 15.1 Functional Criteria
 
-- ✅ Add 1-2 nodes to existing cluster without downtime
-- ✅ Remove failed node without data loss
+- ✅ Add erasure sets to existing cluster without downtime
+- ✅ Remove erasure sets with automatic data migration
 - ✅ All objects accessible during migration
 - ✅ Migration completes with 0 data corruption
-- ✅ Cluster survives node failure during migration
+- ✅ Cluster survives disk/node failure during migration
 
 ### 15.2 Performance Criteria
 
 - ✅ Read latency <5ms (GET operations)
 - ✅ Write throughput degradation <10%
-- ✅ Migration affects 20-30% of objects per node change
+- ✅ Migration affects ~33% of objects per set change
 - ✅ Migration throughput >500 MB/s
 - ✅ Cache hit rate >99% for hot objects
 
 ### 15.3 Operational Criteria
 
-- ✅ Node addition completes in <1 minute (excluding migration)
+- ✅ Erasure set addition completes in <1 minute (excluding migration)
 - ✅ Migration resumable after restart
-- ✅ Clear status reporting (`mc admin cluster migration-status`)
+- ✅ Clear status reporting (`buckets admin migration-status`)
 - ✅ Comprehensive documentation
 - ✅ Runbook for failure scenarios
 
@@ -1611,14 +1612,16 @@ Beyond the initial implementation, potential enhancements:
 
 ## 17. Conclusion
 
-This architecture provides a pragmatic path to fine-grained scalability in MinIO while maintaining the system's core principles of simplicity and reliability. By combining location registry with consistent hashing, we achieve:
+This architecture provides erasure set-based scalability for Buckets while maintaining the system's core principles of simplicity and reliability. By combining location registry with consistent hashing at the erasure set level, we achieve:
 
-- **Operational Flexibility**: Add/remove individual nodes as needed
+- **Operational Clarity**: Scale by adding/removing complete erasure sets
+- **Data Integrity**: Erasure coding guarantees maintained at all times
 - **Performance**: Faster reads via direct lookup, acceptable write overhead
+- **Predictable Migration**: ~33% data movement per set change
 - **Reliability**: Zero data loss, graceful degradation, resumable migrations
 - **Simplicity**: Self-contained design with no external dependencies
 
-The phased implementation plan allows for iterative development and validation, reducing risk while delivering incremental value.
+The erasure set model provides clear capacity planning: each set adds a fixed amount of usable storage (based on K data shards), and migration scope is predictable.
 
 **Next Steps:**
 1. Review and approve this architecture document

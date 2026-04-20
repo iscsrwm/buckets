@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <openssl/evp.h>
+#include <openssl/md5.h>
 
 #include "buckets.h"
 #include "buckets_net.h"
@@ -151,14 +153,22 @@ static void send_error_response(uv_http_conn_t *conn, int status, const char *me
 }
 
 /* Send success response for PUT */
-static void send_put_success(uv_http_conn_t *conn, const char *etag)
+static void send_put_success(uv_http_conn_t *conn, const char *etag, const char *version_id)
 {
-    const char *headers[] = {
-        "ETag", etag,
-        NULL
-    };
-    
-    uv_http_response_start(conn, 200, headers, 2, 0);
+    if (version_id && version_id[0] != '\0') {
+        const char *headers[] = {
+            "ETag", etag,
+            "x-amz-version-id", version_id,
+            NULL
+        };
+        uv_http_response_start(conn, 200, headers, 4, 0);
+    } else {
+        const char *headers[] = {
+            "ETag", etag,
+            NULL
+        };
+        uv_http_response_start(conn, 200, headers, 2, 0);
+    }
     uv_http_response_end(conn);  /* Send terminating chunk for chunked encoding */
 }
 
@@ -195,14 +205,14 @@ s3_stream_upload_t* s3_stream_upload_create(uv_http_conn_t *conn,
         return NULL;
     }
     
-    /* Initialize hash context for ETag computation */
-    upload->hash_ctx = buckets_malloc(sizeof(buckets_blake2b_ctx_t));
+    /* Initialize hash context for ETag computation (MD5 for S3 compatibility) */
+    upload->hash_ctx = EVP_MD_CTX_new();
     if (!upload->hash_ctx) {
         buckets_free(upload->chunk_buffer);
         buckets_free(upload);
         return NULL;
     }
-    buckets_blake2b_init((buckets_blake2b_ctx_t*)upload->hash_ctx, 32);
+    EVP_DigestInit_ex((EVP_MD_CTX*)upload->hash_ctx, EVP_md5(), NULL);
     
     /* Default EC config - will be updated based on cluster */
     upload->ec_k = 2;
@@ -223,7 +233,7 @@ void s3_stream_upload_free(s3_stream_upload_t *upload)
     }
     
     if (upload->hash_ctx) {
-        buckets_free(upload->hash_ctx);
+        EVP_MD_CTX_free((EVP_MD_CTX*)upload->hash_ctx);
     }
     
     /* Free accumulated data chunks */
@@ -298,21 +308,16 @@ static int flush_chunk_buffer(s3_stream_upload_t *upload)
     return 0;
 }
 
-int s3_stream_upload_process(s3_stream_upload_t *upload,
-                              const void *data, size_t len)
+/* Process raw data (non-chunked) */
+static int process_raw_data(s3_stream_upload_t *upload,
+                             const uint8_t *src, size_t len)
 {
-    if (!upload || !data || upload->aborted) {
-        return -1;
-    }
-    
-    const uint8_t *src = (const uint8_t*)data;
-    size_t remaining = len;
-    
-    /* Update hash */
-    buckets_blake2b_update((buckets_blake2b_ctx_t*)upload->hash_ctx, data, len);
+    /* Update hash (MD5 for S3-compatible ETag) */
+    EVP_DigestUpdate((EVP_MD_CTX*)upload->hash_ctx, src, len);
     
     upload->bytes_received += len;
     
+    size_t remaining = len;
     while (remaining > 0) {
         /* Fill chunk buffer */
         size_t space = upload->chunk_buffer_capacity - upload->chunk_buffer_len;
@@ -334,6 +339,129 @@ int s3_stream_upload_process(s3_stream_upload_t *upload,
     return 0;
 }
 
+/* Process AWS chunked encoded data
+ * Format: <hex-size>;chunk-signature=<sig>\r\n<data>\r\n...0;chunk-signature=<sig>\r\n\r\n
+ * States: 0=reading header, 1=reading data, 2=reading trailer (\r\n after data)
+ */
+static int process_aws_chunked(s3_stream_upload_t *upload,
+                                const uint8_t *src, size_t len)
+{
+    size_t remaining = len;
+    
+    while (remaining > 0) {
+        switch (upload->aws_chunk_state) {
+            case 0: {
+                /* State 0: Reading chunk header (e.g., "1a;chunk-signature=...\r\n") */
+                while (remaining > 0 && upload->aws_chunk_state == 0) {
+                    char c = (char)*src++;
+                    remaining--;
+                    
+                    /* Check for header overflow */
+                    if (upload->aws_chunk_header_len >= sizeof(upload->aws_chunk_header) - 1) {
+                        buckets_error("AWS chunk header too long");
+                        return -1;
+                    }
+                    
+                    upload->aws_chunk_header[upload->aws_chunk_header_len++] = c;
+                    upload->aws_chunk_header[upload->aws_chunk_header_len] = '\0';
+                    
+                    /* Check for end of header (\r\n) */
+                    if (upload->aws_chunk_header_len >= 2 &&
+                        upload->aws_chunk_header[upload->aws_chunk_header_len - 2] == '\r' &&
+                        upload->aws_chunk_header[upload->aws_chunk_header_len - 1] == '\n') {
+                        
+                        /* Parse chunk size (hex before semicolon) */
+                        char *semi = strchr(upload->aws_chunk_header, ';');
+                        if (semi) {
+                            *semi = '\0';
+                        } else {
+                            /* No signature - just size followed by \r\n */
+                            upload->aws_chunk_header[upload->aws_chunk_header_len - 2] = '\0';
+                        }
+                        
+                        upload->aws_chunk_remaining = (size_t)strtoull(upload->aws_chunk_header, NULL, 16);
+                        
+                        buckets_debug("AWS chunk: size=%zu", upload->aws_chunk_remaining);
+                        
+                        /* Reset header buffer for next chunk */
+                        upload->aws_chunk_header_len = 0;
+                        
+                        if (upload->aws_chunk_remaining == 0) {
+                            /* Final chunk - done processing */
+                            buckets_debug("AWS chunked: final chunk received");
+                            return 0;
+                        }
+                        
+                        /* Move to data state */
+                        upload->aws_chunk_state = 1;
+                    }
+                }
+                break;
+            }
+            
+            case 1: {
+                /* State 1: Reading chunk data */
+                size_t to_read = (remaining < upload->aws_chunk_remaining) 
+                                  ? remaining : upload->aws_chunk_remaining;
+                
+                if (to_read > 0) {
+                    int ret = process_raw_data(upload, src, to_read);
+                    if (ret != 0) {
+                        return ret;
+                    }
+                    
+                    src += to_read;
+                    remaining -= to_read;
+                    upload->aws_chunk_remaining -= to_read;
+                }
+                
+                /* If chunk data complete, move to trailer state */
+                if (upload->aws_chunk_remaining == 0) {
+                    upload->aws_chunk_state = 2;
+                }
+                break;
+            }
+            
+            case 2: {
+                /* State 2: Reading trailer (\r\n after chunk data) */
+                /* Skip \r if present */
+                if (remaining > 0 && *src == '\r') {
+                    src++;
+                    remaining--;
+                }
+                /* Skip \n if present */
+                if (remaining > 0 && *src == '\n') {
+                    src++;
+                    remaining--;
+                }
+                /* Go back to header state for next chunk */
+                upload->aws_chunk_state = 0;
+                break;
+            }
+        }
+    }
+    
+    return 0;
+}
+
+int s3_stream_upload_process(s3_stream_upload_t *upload,
+                              const void *data, size_t len)
+{
+    if (!upload || !data || upload->aborted) {
+        return -1;
+    }
+    
+    const uint8_t *src = (const uint8_t*)data;
+    
+    if (upload->aws_chunked) {
+        /* Decode AWS chunked encoding */
+        return process_aws_chunked(upload, src, len);
+    } else {
+        /* Process raw data directly */
+        return process_raw_data(upload, src, len);
+    }
+}
+
 int s3_stream_upload_complete(s3_stream_upload_t *upload)
 {
     if (!upload || upload->aborted) {
@@ -347,11 +475,12 @@ int s3_stream_upload_complete(s3_stream_upload_t *upload)
         }
     }
     
-    /* Finalize hash */
-    uint8_t hash[32];
-    buckets_blake2b_final((buckets_blake2b_ctx_t*)upload->hash_ctx, hash, sizeof(hash));
+    /* Finalize MD5 hash for S3-compatible ETag */
+    uint8_t hash[MD5_DIGEST_LENGTH];
+    unsigned int hash_len = 0;
+    EVP_DigestFinal_ex((EVP_MD_CTX*)upload->hash_ctx, hash, &hash_len);
     
-    /* Format ETag */
+    /* Format ETag as MD5 hex string */
     snprintf(upload->etag, sizeof(upload->etag), "\"%02x%02x%02x%02x%02x%02x%02x%02x"
              "%02x%02x%02x%02x%02x%02x%02x%02x\"",
              hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
@@ -374,48 +503,64 @@ int s3_stream_upload_complete(s3_stream_upload_t *upload)
         offset += chunk_size;
     }
     
+    /* Check if bucket has versioning enabled */
+    bool versioning_enabled = false;
+    bool versioning_suspended = false;
+    extern int buckets_get_bucket_versioning(const char *bucket, bool *enabled, bool *suspended);
+    buckets_get_bucket_versioning(upload->bucket, &versioning_enabled, &versioning_suspended);
+    
     /* Write to storage using existing storage layer */
     int ret;
     
-    /* Check if we have user metadata */
-    if (upload->user_meta_count > 0) {
-        /* Use put_object_with_metadata for user metadata support */
-        buckets_xl_meta_t meta;
-        memset(&meta, 0, sizeof(meta));
-        
-        /* Set content type */
-        if (upload->content_type[0]) {
-            meta.meta.content_type = buckets_strdup(upload->content_type);
-        }
-        
-        /* Copy user metadata */
-        for (int i = 0; i < upload->user_meta_count; i++) {
-            buckets_add_user_metadata(&meta, upload->user_meta_keys[i], 
-                                      upload->user_meta_values[i]);
-            buckets_info("Streaming PUT: Adding user metadata: %s = %s", 
-                        upload->user_meta_keys[i], upload->user_meta_values[i]);
-        }
-        
-        ret = buckets_put_object_with_metadata(upload->bucket, upload->key, 
-                                                object_data, total_size, 
-                                                &meta, false, NULL);
-        
-        /* Free metadata strings */
-        if (meta.meta.content_type) {
-            buckets_free(meta.meta.content_type);
-        }
-        for (u32 i = 0; i < meta.meta.user_count; i++) {
-            buckets_free(meta.meta.user_keys[i]);
-            buckets_free(meta.meta.user_values[i]);
-        }
-        if (meta.meta.user_keys) buckets_free(meta.meta.user_keys);
-        if (meta.meta.user_values) buckets_free(meta.meta.user_values);
-    } else {
-        /* No user metadata - use simple put */
-        ret = buckets_put_object(upload->bucket, upload->key,
-                                  object_data, total_size,
-                                  upload->content_type[0] ? upload->content_type : NULL);
+    /* Build metadata structure */
+    buckets_xl_meta_t meta;
+    memset(&meta, 0, sizeof(meta));
+    
+    /* Set content type */
+    if (upload->content_type[0]) {
+        meta.meta.content_type = buckets_strdup(upload->content_type);
     }
+    
+    /* Copy user metadata */
+    for (int i = 0; i < upload->user_meta_count; i++) {
+        buckets_add_user_metadata(&meta, upload->user_meta_keys[i], 
+                                  upload->user_meta_values[i]);
+        buckets_info("Streaming PUT: Adding user metadata: %s = %s", 
+                    upload->user_meta_keys[i], upload->user_meta_values[i]);
+    }
+    
+    if (versioning_enabled) {
+        /* Versioning is enabled - create a new version */
+        ret = buckets_put_object_versioned(upload->bucket, upload->key, 
+                                            object_data, total_size, 
+                                            &meta, upload->version_id);
+        if (ret == 0) {
+            buckets_info("Streaming PUT: Created version %s for %s/%s", 
+                        upload->version_id, upload->bucket, upload->key);
+        }
+    } else {
+        /* Versioning disabled or suspended - overwrite object */
+        if (upload->user_meta_count > 0 || upload->content_type[0]) {
+            ret = buckets_put_object_with_metadata(upload->bucket, upload->key, 
+                                                    object_data, total_size, 
+                                                    &meta, false, NULL);
+        } else {
+            ret = buckets_put_object(upload->bucket, upload->key,
+                                      object_data, total_size,
+                                      upload->content_type[0] ? upload->content_type : NULL);
+        }
+    }
+    
+    /* Free metadata strings */
+    if (meta.meta.content_type) {
+        buckets_free(meta.meta.content_type);
+    }
+    for (u32 i = 0; i < meta.meta.user_count; i++) {
+        buckets_free(meta.meta.user_keys[i]);
+        buckets_free(meta.meta.user_values[i]);
+    }
+    if (meta.meta.user_keys) buckets_free(meta.meta.user_keys);
+    if (meta.meta.user_values) buckets_free(meta.meta.user_values);
     
     buckets_free(object_data);
     
@@ -426,8 +571,13 @@ int s3_stream_upload_complete(s3_stream_upload_t *upload)
     
     upload->completed = true;
     
-    buckets_info("Streaming upload complete: %s/%s (%zu bytes, ETag=%s, user_meta=%d)",
-                upload->bucket, upload->key, total_size, upload->etag, upload->user_meta_count);
+    if (versioning_enabled && upload->version_id[0] != '\0') {
+        buckets_info("Streaming upload complete: %s/%s (%zu bytes, ETag=%s, VersionId=%s)",
+                    upload->bucket, upload->key, total_size, upload->etag, upload->version_id);
+    } else {
+        buckets_info("Streaming upload complete: %s/%s (%zu bytes, ETag=%s, user_meta=%d)",
+                    upload->bucket, upload->key, total_size, upload->etag, upload->user_meta_count);
+    }
     
     return 0;
 }
@@ -494,6 +644,49 @@ int s3_stream_on_request_start(uv_stream_request_t *req, void *user_data)
         strncpy(upload->content_type, ct, sizeof(upload->content_type) - 1);
     }
     
+    /* Check for AWS chunked encoding
+     * AWS chunked encoding can be detected by:
+     * 1. Content-Encoding: aws-chunked header
+     * 2. x-amz-decoded-content-length header (mc/aws-sdk use this)
+     * 3. x-amz-content-sha256: STREAMING-AWS4-HMAC-SHA256-PAYLOAD
+     */
+    const char *content_encoding = get_header(conn, "Content-Encoding");
+    const char *decoded_len_str = get_header(conn, "x-amz-decoded-content-length");
+    const char *content_sha256 = get_header(conn, "x-amz-content-sha256");
+    
+    buckets_debug("Streaming PUT headers: Content-Encoding=%s, x-amz-decoded-content-length=%s, x-amz-content-sha256=%s",
+                 content_encoding ? content_encoding : "(null)",
+                 decoded_len_str ? decoded_len_str : "(null)",
+                 content_sha256 ? content_sha256 : "(null)");
+    
+    /* Detect AWS chunked by any of these indicators */
+    bool is_aws_chunked = false;
+    if (content_encoding && strstr(content_encoding, "aws-chunked")) {
+        is_aws_chunked = true;
+    } else if (decoded_len_str != NULL) {
+        /* x-amz-decoded-content-length implies AWS chunked encoding */
+        is_aws_chunked = true;
+    } else if (content_sha256 && strstr(content_sha256, "STREAMING-AWS4-HMAC-SHA256-PAYLOAD")) {
+        /* Streaming signature mode indicates AWS chunked */
+        is_aws_chunked = true;
+    }
+    
+    if (is_aws_chunked) {
+        upload->aws_chunked = true;
+        upload->aws_chunk_state = 0;  /* Start in header-parsing state */
+        upload->aws_chunk_remaining = 0;
+        upload->aws_chunk_header_len = 0;
+        
+        /* Use decoded content length for hash computation if available */
+        if (decoded_len_str) {
+            size_t decoded_len = (size_t)strtoull(decoded_len_str, NULL, 10);
+            buckets_info("AWS chunked upload: decoded length = %zu", decoded_len);
+            upload->content_length = decoded_len;
+        }
+        
+        buckets_info("Streaming PUT: AWS chunked encoding detected");
+    }
+    
     /* Parse x-amz-meta-* headers using external iterator */
     extern int uv_http_iterate_headers_with_prefix(void *conn_ptr, const char *prefix,
                                                     void (*callback)(const char *name, const char *value, void *user_data),
@@ -537,11 +730,18 @@ int s3_stream_on_request_complete(uv_stream_request_t *req, void *user_data)
         return -1;
     }
     
+    /* Complete the upload synchronously in the event loop.
+     * 
+     * NOTE: This works because buckets_get_bucket_versioning() has been optimized
+     * to return immediately on cache miss (defaulting to "disabled"). The cache
+     * is populated when PUT bucket versioning is called. This avoids blocking
+     * I/O in the event loop while still supporting versioned buckets.
+     */
     int ret = s3_stream_upload_complete(upload);
     
     if (ret == 0) {
-        /* Send success response */
-        send_put_success(req->conn, upload->etag);
+        /* Send success response with version ID if available */
+        send_put_success(req->conn, upload->etag, upload->version_id);
     } else {
         send_error_response(req->conn, 500, "Upload failed");
     }

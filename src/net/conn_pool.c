@@ -484,7 +484,7 @@ int buckets_conn_send_request(buckets_connection_t *conn,
     
     /* Set send timeout to prevent blocking forever on large sends */
     struct timeval send_timeout;
-    send_timeout.tv_sec = 30;  /* 30 second timeout for sends (reduced from 120) */
+    send_timeout.tv_sec = 5;  /* 5 second timeout for sends */
     send_timeout.tv_usec = 0;
     if (setsockopt(conn->fd, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout)) < 0) {
         buckets_warn("Failed to set send timeout: %s", strerror(errno));
@@ -522,7 +522,7 @@ int buckets_conn_send_request(buckets_connection_t *conn,
     
     /* Set receive timeout to prevent hanging */
     struct timeval timeout;
-    timeout.tv_sec = 30;  /* 30 second timeout for receives (reduced from 120) */
+    timeout.tv_sec = 5;  /* 5 second timeout for receives */
     timeout.tv_usec = 0;
     if (setsockopt(conn->fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
         buckets_warn("Failed to set recv timeout: %s", strerror(errno));

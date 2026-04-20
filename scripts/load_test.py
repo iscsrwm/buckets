@@ -5,6 +5,8 @@ Tests throughput and resilience while keeping disk usage bounded
 """
 
 import argparse
+import hashlib
+import hmac
 import os
 import random
 import string
@@ -12,7 +14,8 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import List
+from datetime import datetime
+from typing import List, Dict, Optional
 import urllib.request
 import urllib.error
 
@@ -25,6 +28,84 @@ NODES = [
     "127.0.0.1:9005",
     "127.0.0.1:9006",
 ]
+
+# AWS Signature V4 credentials
+AWS_ACCESS_KEY = "minioadmin"
+AWS_SECRET_KEY = "minioadmin"
+AWS_REGION = "us-east-1"
+AWS_SERVICE = "s3"
+
+
+def sign(key: bytes, msg: str) -> bytes:
+    """HMAC-SHA256 sign"""
+    return hmac.new(key, msg.encode('utf-8'), hashlib.sha256).digest()
+
+
+def get_signature_key(secret_key: str, date_stamp: str, region: str, service: str) -> bytes:
+    """Derive the signing key"""
+    k_date = sign(('AWS4' + secret_key).encode('utf-8'), date_stamp)
+    k_region = sign(k_date, region)
+    k_service = sign(k_region, service)
+    k_signing = sign(k_service, 'aws4_request')
+    return k_signing
+
+
+def aws_sign_request(method: str, host: str, uri: str, headers: Dict[str, str], 
+                     payload: bytes = b'') -> Dict[str, str]:
+    """Sign a request with AWS Signature V4"""
+    
+    # Create timestamp
+    t = datetime.utcnow()
+    amz_date = t.strftime('%Y%m%dT%H%M%SZ')
+    date_stamp = t.strftime('%Y%m%d')
+    
+    # Calculate payload hash
+    payload_hash = hashlib.sha256(payload).hexdigest()
+    
+    # Add required headers
+    headers['host'] = host
+    headers['x-amz-date'] = amz_date
+    headers['x-amz-content-sha256'] = payload_hash
+    
+    # Create canonical headers (must be sorted)
+    signed_header_names = sorted(headers.keys())
+    canonical_headers = ''.join(f"{k}:{headers[k]}\n" for k in signed_header_names)
+    signed_headers = ';'.join(signed_header_names)
+    
+    # Create canonical request
+    canonical_request = '\n'.join([
+        method,
+        uri,
+        '',  # query string (empty)
+        canonical_headers,
+        signed_headers,
+        payload_hash
+    ])
+    
+    # Create string to sign
+    algorithm = 'AWS4-HMAC-SHA256'
+    credential_scope = f"{date_stamp}/{AWS_REGION}/{AWS_SERVICE}/aws4_request"
+    string_to_sign = '\n'.join([
+        algorithm,
+        amz_date,
+        credential_scope,
+        hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()
+    ])
+    
+    # Calculate signature
+    signing_key = get_signature_key(AWS_SECRET_KEY, date_stamp, AWS_REGION, AWS_SERVICE)
+    signature = hmac.new(signing_key, string_to_sign.encode('utf-8'), hashlib.sha256).hexdigest()
+    
+    # Create authorization header
+    authorization = (
+        f"{algorithm} "
+        f"Credential={AWS_ACCESS_KEY}/{credential_scope}, "
+        f"SignedHeaders={signed_headers}, "
+        f"Signature={signature}"
+    )
+    
+    headers['Authorization'] = authorization
+    return headers
 
 @dataclass
 class Stats:
@@ -67,10 +148,15 @@ def random_key(prefix: str = "obj") -> str:
 def do_put(bucket: str, key: str, data: bytes, timeout: int = 30) -> bool:
     """PUT an object, returns True on success"""
     node = get_node()
-    url = f"http://{node}/{bucket}/{key}"
+    uri = f"/{bucket}/{key}"
+    url = f"http://{node}{uri}"
     try:
+        headers = {'content-type': 'application/octet-stream'}
+        signed_headers = aws_sign_request('PUT', node, uri, headers, data)
+        
         req = urllib.request.Request(url, data=data, method='PUT')
-        req.add_header('Content-Type', 'application/octet-stream')
+        for k, v in signed_headers.items():
+            req.add_header(k, v)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status in (200, 201)
     except Exception as e:
@@ -79,9 +165,15 @@ def do_put(bucket: str, key: str, data: bytes, timeout: int = 30) -> bool:
 def do_get(bucket: str, key: str, timeout: int = 30) -> bool:
     """GET an object, returns True on success"""
     node = get_node()
-    url = f"http://{node}/{bucket}/{key}"
+    uri = f"/{bucket}/{key}"
+    url = f"http://{node}{uri}"
     try:
+        headers = {}
+        signed_headers = aws_sign_request('GET', node, uri, headers, b'')
+        
         req = urllib.request.Request(url, method='GET')
+        for k, v in signed_headers.items():
+            req.add_header(k, v)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             _ = resp.read()
             return resp.status == 200
@@ -91,9 +183,15 @@ def do_get(bucket: str, key: str, timeout: int = 30) -> bool:
 def do_delete(bucket: str, key: str, timeout: int = 30) -> bool:
     """DELETE an object, returns True on success"""
     node = get_node()
-    url = f"http://{node}/{bucket}/{key}"
+    uri = f"/{bucket}/{key}"
+    url = f"http://{node}{uri}"
     try:
+        headers = {}
+        signed_headers = aws_sign_request('DELETE', node, uri, headers, b'')
+        
         req = urllib.request.Request(url, method='DELETE')
+        for k, v in signed_headers.items():
+            req.add_header(k, v)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status in (200, 204)
     except urllib.error.HTTPError as e:
@@ -104,9 +202,15 @@ def do_delete(bucket: str, key: str, timeout: int = 30) -> bool:
 def create_bucket(bucket: str):
     """Create bucket on all nodes"""
     for node in NODES:
-        url = f"http://{node}/{bucket}"
+        uri = f"/{bucket}"
+        url = f"http://{node}{uri}"
         try:
+            headers = {}
+            signed_headers = aws_sign_request('PUT', node, uri, headers, b'')
+            
             req = urllib.request.Request(url, method='PUT')
+            for k, v in signed_headers.items():
+                req.add_header(k, v)
             urllib.request.urlopen(req, timeout=5)
         except Exception:
             pass  # Bucket may already exist
@@ -114,9 +218,16 @@ def create_bucket(bucket: str):
 def cleanup_bucket(bucket: str):
     """Delete all objects in bucket"""
     node = NODES[0]
-    url = f"http://{node}/{bucket}"
+    uri = f"/{bucket}"
+    url = f"http://{node}{uri}"
     try:
-        with urllib.request.urlopen(url, timeout=30) as resp:
+        headers = {}
+        signed_headers = aws_sign_request('GET', node, uri, headers, b'')
+        
+        req = urllib.request.Request(url, method='GET')
+        for k, v in signed_headers.items():
+            req.add_header(k, v)
+        with urllib.request.urlopen(req, timeout=30) as resp:
             content = resp.read().decode('utf-8')
             import re
             keys = re.findall(r'<Key>([^<]+)</Key>', content)

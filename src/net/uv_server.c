@@ -15,6 +15,26 @@
 #include "uv_server_internal.h"
 
 /* ===================================================================
+ * Stream Validation Macro
+ * ===================================================================*/
+
+/* Validates TCP stream before uv_write to prevent assertion failures.
+ * Returns true if stream is valid for writing. */
+static inline bool is_stream_valid_for_write(uv_http_conn_t *conn) {
+    if (!conn) return false;
+    if (conn->state == CONN_STATE_CLOSING) return false;
+    
+    uv_stream_t *stream = (uv_stream_t*)&conn->tcp;
+    if (stream->type != UV_TCP) {
+        buckets_error("Invalid stream type %d (expected UV_TCP=%d)", stream->type, UV_TCP);
+        return false;
+    }
+    if (uv_is_closing((uv_handle_t*)&conn->tcp)) return false;
+    
+    return true;
+}
+
+/* ===================================================================
  * Forward Declarations
  * ===================================================================*/
 
@@ -26,6 +46,7 @@ static void on_handle_close(uv_handle_t *handle);
 static void on_timeout(uv_timer_t *timer);
 static void on_shutdown_async(uv_async_t *handle);
 static void* server_thread_main(void *arg);
+static int safe_uv_write(uv_http_conn_t *conn, char *write_buf, size_t write_len) __attribute__((unused));
 
 static void process_request(uv_http_conn_t *conn);
 static void setup_parser_callbacks(llhttp_settings_t *settings);
@@ -861,6 +882,11 @@ static int tls_flush_write_bio(uv_http_conn_t *conn)
         int n = BIO_read(conn->write_bio, buf, sizeof(buf));
         if (n <= 0) break;
         
+        /* Validate stream before write */
+        if (!is_stream_valid_for_write(conn)) {
+            return -1;
+        }
+        
         /* Write to TCP */
         char *write_buf = buckets_malloc(n);
         memcpy(write_buf, buf, n);
@@ -1194,6 +1220,19 @@ int on_headers_complete(llhttp_t *parser)
         conn->keep_alive = (parser->http_major == 1 && parser->http_minor == 1);
     }
     
+    /* Handle Expect: 100-continue - send 100 Continue immediately */
+    const char *expect = uv_http_get_header(conn, "Expect");
+    if (expect && strcasecmp(expect, "100-continue") == 0) {
+        /* Send 100 Continue response to tell client to proceed with body */
+        static const char continue_response[] = "HTTP/1.1 100 Continue\r\n\r\n";
+        uv_buf_t buf = uv_buf_init((char*)continue_response, sizeof(continue_response) - 1);
+        
+        /* Synchronous write - must complete before body arrives */
+        uv_write_t *req = buckets_malloc(sizeof(uv_write_t));
+        req->data = NULL;  /* No buffer to free */
+        uv_write(req, (uv_stream_t*)&conn->tcp, &buf, 1, on_write_complete);
+    }
+    
     conn->state = CONN_STATE_READING_BODY;
     
     /* Reset timeout for body */
@@ -1464,9 +1503,12 @@ static void send_buffered_response(uv_http_conn_t *conn, uv_async_work_t *async)
                           async->response_headers[i+1]);
     }
     
-    /* Add Content-Length header */
+    /* Add Content-Length header.
+     * Use content_length if set (for HEAD requests that have no body but need 
+     * to report object size), otherwise fall back to response_body_len. */
+    size_t content_len = async->content_length > 0 ? async->content_length : async->response_body_len;
     offset += snprintf(header_buf + offset, sizeof(header_buf) - offset,
-                      "Content-Length: %zu\r\n", async->response_body_len);
+                      "Content-Length: %zu\r\n", content_len);
     
     /* Add Connection header */
     offset += snprintf(header_buf + offset, sizeof(header_buf) - offset,
@@ -1505,7 +1547,19 @@ static void send_buffered_response(uv_http_conn_t *conn, uv_async_work_t *async)
     }
     req->data = write_buf;
     
-    int ret = uv_write(req, (uv_stream_t*)&conn->tcp, &buf, 1, on_write_complete);
+    /* Debug: check stream type before write */
+    uv_stream_t *stream = (uv_stream_t*)&conn->tcp;
+    if (stream->type != UV_TCP) {
+        buckets_error("send_buffered_response: invalid stream type %d (expected UV_TCP=%d)", 
+                     stream->type, UV_TCP);
+        buckets_free(write_buf);
+        buckets_free(req);
+        conn->pending_final_write = false;
+        uv_http_conn_close(conn);
+        return;
+    }
+    
+    int ret = uv_write(req, stream, &buf, 1, on_write_complete);
     if (ret != 0) {
         buckets_free(write_buf);
         buckets_free(req);
@@ -1810,6 +1864,11 @@ int uv_http_response_start(uv_http_conn_t *conn, int status,
     /* End headers */
     offset += snprintf(header_buf + offset, sizeof(header_buf) - offset, "\r\n");
     
+    /* Validate stream before write */
+    if (!is_stream_valid_for_write(conn)) {
+        return BUCKETS_ERR_IO;
+    }
+    
     /* Write headers directly (not chunked) */
     char *write_buf = buckets_malloc(offset);
     if (!write_buf) return BUCKETS_ERR_NOMEM;
@@ -1832,9 +1891,9 @@ int uv_http_response_write(uv_http_conn_t *conn, const void *data, size_t len)
 {
     if (len == 0) return BUCKETS_OK;
     
-    /* Check if connection is still valid for writing */
-    if (conn->state == CONN_STATE_CLOSING || uv_is_closing((uv_handle_t*)&conn->tcp)) {
-        buckets_debug("Connection closing, skipping response write");
+    /* Validate stream before write */
+    if (!is_stream_valid_for_write(conn)) {
+        buckets_debug("Connection invalid, skipping response write");
         return BUCKETS_ERR_IO;
     }
     
@@ -1927,6 +1986,11 @@ int uv_http_response_end(uv_http_conn_t *conn)
     }
     
     if (conn->response_chunked && conn->response_started) {
+        /* Validate stream before write */
+        if (!is_stream_valid_for_write(conn)) {
+            return BUCKETS_ERR_IO;
+        }
+        
         /* Send terminating chunk for chunked encoding: "0\r\n\r\n" */
         const char *terminator = "0\r\n\r\n";
         size_t terminator_len = 5;
@@ -1948,6 +2012,60 @@ int uv_http_response_end(uv_http_conn_t *conn)
         return uv_write(req, (uv_stream_t*)&conn->tcp, &buf, 1, on_write_complete);
     }
     return BUCKETS_OK;
+}
+
+/**
+ * Safe wrapper for uv_write that validates stream type.
+ * Takes ownership of write_buf (will free on error).
+ * Returns 0 on success, -1 on error.
+ */
+static int safe_uv_write(uv_http_conn_t *conn, char *write_buf, size_t write_len)
+{
+    if (!conn || !write_buf || write_len == 0) {
+        if (write_buf) buckets_free(write_buf);
+        return -1;
+    }
+    
+    /* Check connection state */
+    if (conn->state == CONN_STATE_CLOSING) {
+        buckets_debug("safe_uv_write: connection is closing");
+        buckets_free(write_buf);
+        return -1;
+    }
+    
+    /* Validate stream type before write */
+    uv_stream_t *stream = (uv_stream_t*)&conn->tcp;
+    if (stream->type != UV_TCP) {
+        buckets_error("safe_uv_write: invalid stream type %d (expected UV_TCP=%d)", 
+                     stream->type, UV_TCP);
+        buckets_free(write_buf);
+        return -1;
+    }
+    
+    /* Check if handle is closing */
+    if (uv_is_closing((uv_handle_t*)&conn->tcp)) {
+        buckets_debug("safe_uv_write: handle is closing");
+        buckets_free(write_buf);
+        return -1;
+    }
+    
+    uv_buf_t buf = uv_buf_init(write_buf, write_len);
+    uv_write_t *req = buckets_malloc(sizeof(uv_write_t));
+    if (!req) {
+        buckets_free(write_buf);
+        return -1;
+    }
+    req->data = write_buf;
+    
+    int ret = uv_write(req, stream, &buf, 1, on_write_complete);
+    if (ret != 0) {
+        buckets_free(write_buf);
+        buckets_free(req);
+        buckets_error("safe_uv_write: uv_write failed: %s", uv_strerror(ret));
+        return -1;
+    }
+    
+    return 0;
 }
 
 static void on_write_complete(uv_write_t *req, int status)

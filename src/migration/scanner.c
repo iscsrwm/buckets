@@ -157,9 +157,8 @@ static int scan_directory(disk_scanner_ctx_t *ctx, const char *dir_path,
             continue;
         }
         
-        /* Skip .minio.sys and .buckets.sys */
-        if (strcmp(entry->d_name, ".minio.sys") == 0 ||
-            strcmp(entry->d_name, ".buckets.sys") == 0) {
+        /* Skip .buckets.sys system directory */
+        if (strcmp(entry->d_name, ".buckets.sys") == 0) {
             continue;
         }
         
@@ -219,7 +218,6 @@ static int scan_disk_buckets(disk_scanner_ctx_t *ctx)
     while ((entry = readdir(dir)) != NULL) {
         /* Skip special entries */
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0 ||
-            strcmp(entry->d_name, ".minio.sys") == 0 ||
             strcmp(entry->d_name, ".buckets.sys") == 0) {
             continue;
         }

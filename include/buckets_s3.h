@@ -56,6 +56,7 @@ typedef struct {
     char signature[512];
     char signed_headers[512];
     char date[64];             /* x-amz-date */
+    char region[64];           /* Region from credential scope */
     
     /* Query parameters */
     char **query_params_keys;
@@ -177,16 +178,165 @@ int buckets_s3_verify_signature(buckets_s3_request_t *req,
                                  const char *secret_key);
 
 /**
- * Get secret key for access key
+ * Get secret key for access key (legacy - use buckets_credentials_get_secret)
  * 
  * Looks up the secret key for the given access key.
- * In production, this would query a key store.
  * 
  * @param access_key Access key ID
  * @param secret_key Output: secret key buffer (128 bytes)
  * @return BUCKETS_OK if found
  */
 int buckets_s3_get_secret_key(const char *access_key, char *secret_key);
+
+/**
+ * Initialize authentication system
+ * 
+ * @param enabled Enable authentication checking
+ * @return BUCKETS_OK on success
+ */
+int buckets_s3_auth_init(bool enabled);
+
+/**
+ * Check if authentication is enabled
+ * 
+ * @return true if authentication is enabled
+ */
+bool buckets_s3_auth_enabled(void);
+
+/**
+ * Enable/disable authentication
+ * 
+ * @param enabled Enable or disable authentication
+ */
+void buckets_s3_auth_set_enabled(bool enabled);
+
+/**
+ * Parse Authorization header
+ * 
+ * Extracts access key, signature, and other fields from Authorization header.
+ * 
+ * @param auth_header Authorization header value
+ * @param req S3 request to populate
+ * @param date_out Output: date from credential scope
+ * @param date_len Size of date_out buffer
+ * @param region_out Output: region from credential scope
+ * @param region_len Size of region_out buffer
+ * @return BUCKETS_OK on success
+ */
+int buckets_s3_parse_auth_header(const char *auth_header, buckets_s3_request_t *req,
+                                  char *date_out, size_t date_len,
+                                  char *region_out, size_t region_len);
+
+/**
+ * Check if request has authentication credentials
+ * 
+ * @param req S3 request
+ * @return true if request has access key and signature
+ */
+bool buckets_s3_has_auth(buckets_s3_request_t *req);
+
+/* ===================================================================
+ * Credential Management
+ * ===================================================================*/
+
+/**
+ * Initialize credential system
+ * 
+ * Loads credentials from disk or creates defaults.
+ * 
+ * @param data_dir Data directory for credential storage
+ * @return BUCKETS_OK on success
+ */
+int buckets_credentials_init(const char *data_dir);
+
+/**
+ * Cleanup credential system
+ */
+void buckets_credentials_cleanup(void);
+
+/**
+ * Get secret key for access key
+ * 
+ * @param access_key Access key ID
+ * @param secret_key Output: secret key buffer
+ * @param secret_len Size of secret_key buffer
+ * @return BUCKETS_OK if found
+ */
+int buckets_credentials_get_secret(const char *access_key, char *secret_key, size_t secret_len);
+
+/**
+ * Validate access key exists and is enabled
+ * 
+ * @param access_key Access key ID
+ * @return BUCKETS_OK if valid
+ */
+int buckets_credentials_validate(const char *access_key);
+
+/**
+ * Update last_used timestamp for access key
+ * 
+ * @param access_key Access key ID
+ */
+void buckets_credentials_touch(const char *access_key);
+
+/**
+ * Get policy for access key
+ * 
+ * @param access_key Access key ID
+ * @param policy Output: policy buffer
+ * @param policy_len Size of policy buffer
+ * @return BUCKETS_OK if found
+ */
+int buckets_credentials_get_policy(const char *access_key, char *policy, size_t policy_len);
+
+/**
+ * Create new credential with generated keys
+ * 
+ * @param name Human-readable name (optional)
+ * @param policy Policy: "readwrite", "readonly", "writeonly" (optional, default "readwrite")
+ * @param access_key_out Output: generated access key (min 21 bytes)
+ * @param access_key_len Size of access_key_out buffer
+ * @param secret_key_out Output: generated secret key (min 41 bytes)
+ * @param secret_key_len Size of secret_key_out buffer
+ * @return BUCKETS_OK on success
+ */
+int buckets_credentials_create(const char *name, const char *policy,
+                                char *access_key_out, size_t access_key_len,
+                                char *secret_key_out, size_t secret_key_len);
+
+/**
+ * Delete credential by access key
+ * 
+ * @param access_key Access key ID to delete
+ * @return BUCKETS_OK on success
+ */
+int buckets_credentials_delete(const char *access_key);
+
+/**
+ * Enable/disable credential
+ * 
+ * @param access_key Access key ID
+ * @param enabled True to enable, false to disable
+ * @return BUCKETS_OK on success
+ */
+int buckets_credentials_set_enabled(const char *access_key, bool enabled);
+
+/**
+ * List all credentials as JSON
+ * 
+ * Returns JSON with credential info (excluding secret keys).
+ * Caller must free returned string.
+ * 
+ * @return JSON string or NULL on error
+ */
+char* buckets_credentials_list(void);
+
+/**
+ * Get credential count
+ * 
+ * @return Number of credentials
+ */
+int buckets_credentials_count(void);
 
 /* ===================================================================
  * S3 Object Operations
@@ -529,6 +679,109 @@ int buckets_s3_abort_multipart_upload(buckets_s3_request_t *req,
  */
 int buckets_s3_list_parts(buckets_s3_request_t *req,
                           buckets_s3_response_t *res);
+
+/* ===================================================================
+ * Versioning Operations (Week 41)
+ * ===================================================================*/
+
+/**
+ * PUT bucket versioning
+ * 
+ * PUT /{bucket}?versioning
+ * 
+ * Enables or suspends versioning for a bucket. Once versioning is enabled,
+ * it cannot be disabled - only suspended. When enabled, every PUT creates
+ * a new version; when suspended, PUTs still create versions but with "null"
+ * version ID.
+ * 
+ * @param req S3 request (bucket, body contains VersioningConfiguration XML)
+ * @param res Output: S3 response
+ * @return BUCKETS_OK on success
+ */
+int buckets_s3_put_bucket_versioning(buckets_s3_request_t *req,
+                                      buckets_s3_response_t *res);
+
+/**
+ * GET bucket versioning
+ * 
+ * GET /{bucket}?versioning
+ * 
+ * Returns the versioning status of a bucket.
+ * 
+ * @param req S3 request (bucket)
+ * @param res Output: S3 response with VersioningConfiguration XML
+ * @return BUCKETS_OK on success
+ */
+int buckets_s3_get_bucket_versioning(buckets_s3_request_t *req,
+                                      buckets_s3_response_t *res);
+
+/**
+ * GET object version
+ * 
+ * GET /{bucket}/{key}?versionId={id}
+ * 
+ * Retrieves a specific version of an object. If the version is a
+ * delete marker, returns 404 with x-amz-delete-marker header.
+ * 
+ * @param req S3 request (bucket, key, versionId in query params)
+ * @param res Output: S3 response
+ * @return BUCKETS_OK on success
+ */
+int buckets_s3_get_object_version(buckets_s3_request_t *req,
+                                   buckets_s3_response_t *res);
+
+/**
+ * DELETE object versioned
+ * 
+ * DELETE /{bucket}/{key}?versionId={id}  - Hard delete specific version
+ * DELETE /{bucket}/{key}                  - Create delete marker (if versioned)
+ * 
+ * With versionId: permanently deletes that specific version.
+ * Without versionId (and versioning enabled): creates a delete marker,
+ * making the object appear deleted while preserving all versions.
+ * 
+ * @param req S3 request (bucket, key, optional versionId)
+ * @param res Output: S3 response with version ID
+ * @return BUCKETS_OK on success
+ */
+int buckets_s3_delete_object_versioned(buckets_s3_request_t *req,
+                                        buckets_s3_response_t *res);
+
+/**
+ * LIST object versions
+ * 
+ * GET /{bucket}?versions
+ * 
+ * Lists all versions and delete markers for objects in a bucket.
+ * Supports prefix, delimiter, key-marker, version-id-marker, and max-keys.
+ * 
+ * @param req S3 request (bucket, query params for filtering)
+ * @param res Output: S3 response with ListVersionsResult XML
+ * @return BUCKETS_OK on success
+ */
+int buckets_s3_list_object_versions(buckets_s3_request_t *req,
+                                     buckets_s3_response_t *res);
+
+/**
+ * Check if request has versionId parameter
+ */
+bool buckets_s3_has_version_id(buckets_s3_request_t *req);
+
+/**
+ * Check if request is for bucket versioning configuration
+ */
+bool buckets_s3_is_versioning_request(buckets_s3_request_t *req);
+
+/**
+ * Check if request is for list versions
+ */
+bool buckets_s3_is_list_versions_request(buckets_s3_request_t *req);
+
+/**
+ * Get/set bucket versioning status
+ */
+int buckets_get_bucket_versioning(const char *bucket, bool *enabled, bool *suspended);
+int buckets_set_bucket_versioning(const char *bucket, bool enabled);
 
 #ifdef __cplusplus
 }

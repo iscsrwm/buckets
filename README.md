@@ -4,7 +4,7 @@
 
 # Buckets
 
-A high-performance, S3-compatible object storage system written in C with support for fine-grained scalability.
+A high-performance, S3-compatible object storage system written in C with erasure set scalability.
 
 ## Overview
 
@@ -233,36 +233,28 @@ Benchmarks run on a **6-node cluster** with K=8, M=4 erasure coding (24 disks to
 > virtually no network latency. Real-world distributed deployments will have additional latency
 > from network I/O, but the throughput characteristics should scale similarly.
 
-### Single Node Performance
+**Last Updated**: March 6, 2026
 
-| Object Size | PUT (req/s) | GET (req/s) | Latency |
-|-------------|-------------|-------------|---------|
-| 1KB | **8,630** | **9,861** | 5-6ms |
-| 64KB | **5,582** | **4,167** | 9-12ms |
-| 1MB | **1,648** | **388** | 12-52ms |
+### Concurrent Workload Performance (50 workers, 20 seconds)
 
-### 6-Node Cluster Performance
+| Workload | Total Ops | Throughput | Avg Rate | Peak Rate |
+|----------|-----------|------------|----------|-----------|
+| **GET-only** | 10,216 | 394 ops/s | 410/s | 1,640/s |
+| **PUT-only** | 7,945 | 383 ops/s | 404/s | 980/s |
+| **Mixed (50/50)** | 9,411 | 446 ops/s | 451/s | 700/s |
 
-| Test | Total Throughput | Concurrent Connections | Failed |
-|------|------------------|------------------------|--------|
-| Parallel (25/node) | **37,157 req/s** | 150 | 0 |
-| High Concurrency (100/node) | **37,430 req/s** | 600 | 0 |
-| Sustained (10K requests) | **10,766 req/s** | 100 | 0 |
+### Performance by Object Size (Sequential, Single Client)
 
-### Per-Node Throughput (High Concurrency)
-
-| Node | Port | Requests/sec |
-|------|------|--------------|
-| Node 1 | 9001 | 6,127 |
-| Node 2 | 9002 | 5,762 |
-| Node 3 | 9003 | 7,482 |
-| Node 4 | 9004 | 6,543 |
-| Node 5 | 9005 | 5,655 |
-| Node 6 | 9006 | 5,861 |
+| Object Size | PUT ops/s | GET ops/s | PUT Latency | GET Latency |
+|-------------|-----------|-----------|-------------|-------------|
+| **1KB** | 140 | 563 | 7ms | 2ms |
+| **64KB** | 101 | 503 | 10ms | 2ms |
+| **256KB** | 13 | 162 | 75ms | 6ms |
+| **1MB** | 11 | 68 | 95ms | 15ms |
 
 ### Data Integrity
 
-All operations verified with MD5 checksums:
+All operations verified with MD5 checksums (authenticated requests):
 
 | Object Size | PUT | GET | Integrity |
 |-------------|-----|-----|-----------|
@@ -273,12 +265,11 @@ All operations verified with MD5 checksums:
 
 ### Key Observations
 
-- **Zero failures** across all test scenarios (600 concurrent connections)
-- **~37,000 req/s** aggregate cluster throughput with 6 nodes
+- **Zero failures** across all authenticated test scenarios
+- **~400 ops/s** concurrent throughput with 50 workers per workload
 - **Sub-10ms latency** for small objects (1KB-64KB)
-- **Linear scaling** with node count
 - **100% data integrity** verified across all object sizes
-- **All nodes healthy** after sustained load testing
+- **AWS SDK compatible**: Works with boto3, mc client, AWS CLI
 
 ### Internal Performance
 

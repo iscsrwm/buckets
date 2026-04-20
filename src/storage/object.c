@@ -49,8 +49,8 @@ int buckets_get_data_dir(char *data_dir, size_t size)
 }
 
 /* Helper: Record object location in registry */
-static void record_object_location(const char *bucket, const char *object, size_t size,
-                                   buckets_placement_result_t *placement)
+void record_object_location(const char *bucket, const char *object, size_t size,
+                            buckets_placement_result_t *placement)
 {
     /* Don't record registry's own objects to prevent infinite recursion */
     if (strcmp(bucket, ".buckets-registry") == 0) {
@@ -282,6 +282,8 @@ int buckets_put_object(const char *bucket, const char *object,
     buckets_xl_meta_t meta = {0};
     meta.version = 1;
     strcpy(meta.format, "xl");
+    meta.bucket = buckets_strdup(bucket);    /* For listing */
+    meta.object = buckets_strdup(object);    /* For listing */
     meta.stat.size = size;
     buckets_get_iso8601_time(meta.stat.modTime);
 
@@ -296,8 +298,37 @@ int buckets_put_object(const char *bucket, const char *object,
         /* Encode as base64 */
         meta.inline_data = base64_encode((const u8*)data, size);
         
-        /* Write xl.meta only */
-        result = buckets_write_xl_meta(disk_path, object_path, &meta);
+        /* Check if we have placement for distributed write */
+        bool has_endpoints = (placement && placement->disk_endpoints && 
+                             placement->disk_endpoints[0] && 
+                             placement->disk_endpoints[0][0] != '\0');
+        
+        if (has_endpoints && placement->disk_count > 0) {
+            /* Distributed inline: replicate xl.meta to all disks in the set */
+            buckets_info("Distributed inline write: replicating xl.meta to %u disks", 
+                        placement->disk_count);
+            
+            extern int buckets_parallel_write_metadata(const char *bucket,
+                                                       const char *object,
+                                                       const char *object_path,
+                                                       buckets_placement_result_t *placement,
+                                                       char **disk_paths,
+                                                       const buckets_xl_meta_t *base_meta,
+                                                       u32 num_disks,
+                                                       bool has_endpoints);
+            
+            /* Ensure object directory exists on primary disk (others created by RPC) */
+            extern int buckets_create_object_dir(const char *disk_path, const char *object_path);
+            buckets_create_object_dir(disk_path, object_path);
+            
+            result = buckets_parallel_write_metadata(bucket, object, object_path,
+                                                     placement, placement->disk_paths,
+                                                     &meta, placement->disk_count, 
+                                                     has_endpoints);
+        } else {
+            /* Local-only inline: write xl.meta to single disk */
+            result = buckets_write_xl_meta(disk_path, object_path, &meta);
+        }
         
         /* Record in registry if write succeeded */
         if (result == 0) {
@@ -566,11 +597,15 @@ int buckets_get_object(const char *bucket, const char *object,
     int set_disk_count = 0;
     bool registry_hit = false;
     
-    /* Skip registry lookup for the registry bucket itself to avoid infinite recursion:
-     * buckets_registry_lookup() calls buckets_get_object() for cache misses,
-     * which would call buckets_registry_lookup() again, causing stack overflow.
+    /* Skip registry lookup for system buckets to avoid infinite recursion and deadlock:
+     * - .buckets-registry: buckets_registry_lookup() calls buckets_get_object() for cache misses
+     * - .buckets.sys: versioning check calls buckets_get_object() which would call registry
+     * 
+     * Both can cause deadlock when called from the event loop thread because the
+     * registry lookup makes blocking RPC calls to other nodes.
      */
-    bool skip_registry = (strcmp(bucket, BUCKETS_REGISTRY_BUCKET) == 0);
+    bool skip_registry = (strcmp(bucket, BUCKETS_REGISTRY_BUCKET) == 0 ||
+                          strcmp(bucket, ".buckets.sys") == 0);
     
     if (!skip_registry && buckets_registry_lookup(bucket, object, NULL, &location) == 0) {
         buckets_debug("Registry hit: pool=%u, set=%u, disks=%u",

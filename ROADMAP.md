@@ -2,7 +2,7 @@
 
 ## Overview
 
-This roadmap tracks the development of Buckets from initial C foundation through full S3-compatible object storage with fine-grained scalability.
+This roadmap tracks the development of Buckets from initial C foundation through full S3-compatible object storage with erasure set scalability.
 
 **Total Estimated Timeline**: 6-9 months (52 weeks)  
 **Current Phase**: Phase 9 - S3 API Layer  
@@ -93,7 +93,7 @@ This roadmap tracks the development of Buckets from initial C foundation through
 ### Week 7: Hash Ring & Consistent Hashing ✅ COMPLETE
 - [x] Virtual node ring structure (150 vnodes per physical node)
 - [x] Binary search on sorted ring (O(log N))
-- [x] Add/remove physical nodes with automatic vnode distribution
+- [x] Add/remove erasure sets with automatic vnode distribution
 - [x] N-replica lookup for replication strategies
 - [x] Distribution statistics (min/max/avg per node)
 - [x] Jump Consistent Hash (stateless alternative)
@@ -448,13 +448,27 @@ This roadmap tracks the development of Buckets from initial C foundation through
 - [x] libuv HTTP server migration ✅
 - [x] s3cmd client compatibility ✅
 
-### Performance Benchmarks (February 27, 2026)
-| Size | PUT ops/s | GET ops/s | Upload MB/s | Download MB/s |
-|------|-----------|-----------|-------------|---------------|
-| 1KB | 54.52 | 113.94 | 0.05 | 0.11 |
-| 64KB | 49.86 | 82.86 | 3.11 | 5.17 |
-| 1MB | 10.37 | 51.65 | 10.37 | 51.65 |
-| 50MB | - | - | 32.65 | 193.79 |
+### Performance Benchmarks (March 6, 2026)
+
+> **Note**: Previous benchmarks from February 27, 2026 were invalid for PUT operations
+> due to missing `Expect: 100-continue` response. The fix was applied March 6, 2026.
+
+**Concurrent Workload (50 workers, authenticated)**
+
+| Workload | Throughput | Avg Rate |
+|----------|------------|----------|
+| GET-only | 394 ops/s | 410/s |
+| PUT-only | 383 ops/s | 404/s |
+| Mixed | 446 ops/s | 451/s |
+
+**Sequential Performance by Size**
+
+| Size | PUT ops/s | GET ops/s |
+|------|-----------|-----------|
+| 1KB | 140 | 563 |
+| 64KB | 101 | 503 |
+| 256KB | 13 | 162 |
+| 1MB | 11 | 68 |
 
 ### Advanced Features (Week 41-42)
 - [ ] Object versioning (Week 41)
@@ -482,10 +496,10 @@ This roadmap tracks the development of Buckets from initial C foundation through
 **Goal**: Cluster management interface
 
 ### Topology Commands
-- [ ] `add-node` - Add node to cluster
-- [ ] `remove-node` - Remove node from cluster
-- [ ] `list-nodes` - List all cluster nodes
-- [ ] `node-info` - Node details
+- [ ] `add-set` - Add erasure set to cluster
+- [ ] `remove-set` - Remove erasure set from cluster
+- [ ] `list-sets` - List all erasure sets
+- [ ] `set-info` - Erasure set details
 
 ### Migration Commands
 - [ ] `migration-status` - Show progress
@@ -597,14 +611,14 @@ This roadmap tracks the development of Buckets from initial C foundation through
 ### Scalability Targets
 - **Node Addition**: <1 minute (excluding migration)
 - **Migration Impact**: <20% throughput degradation
-- **Data Movement**: ~20% per node change
+- **Data Movement**: ~33% per erasure set change
 - **Cluster Size**: Support 100+ nodes
 
 ### Reliability Targets
 - **Availability**: 99.99%
 - **Data Durability**: 99.999999999% (11 nines)
 - **Zero Data Loss**: During all topology changes
-- **MTTR**: <5 minutes for single node failure
+- **MTTR**: <5 minutes for disk failure recovery
 
 ---
 

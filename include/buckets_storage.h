@@ -44,6 +44,10 @@ typedef struct {
     u32 version;                        /* Format version */
     char format[8];                     /* "xl" */
     
+    /* Object identity (for listing) */
+    char *bucket;                       /* Bucket name */
+    char *object;                       /* Object key */
+    
     /* Object statistics */
     struct {
         size_t size;                    /* Object size (bytes) */

@@ -659,6 +659,12 @@ int buckets_s3_complete_multipart_upload(buckets_s3_request_t *req, buckets_s3_r
     
     buckets_info("⏱️  CompleteMultipart: ETag calculated: %s", etag);
     
+    /* Check if bucket has versioning enabled */
+    bool versioning_enabled = false;
+    bool versioning_suspended = false;
+    extern int buckets_get_bucket_versioning(const char *bucket, bool *enabled, bool *suspended);
+    buckets_get_bucket_versioning(req->bucket, &versioning_enabled, &versioning_suspended);
+    
     /* Write object using storage layer (creates xl.meta and registers in registry) */
     extern int buckets_put_object(const char *bucket, const char *object,
                                    const void *data, size_t size,
@@ -666,18 +672,33 @@ int buckets_s3_complete_multipart_upload(buckets_s3_request_t *req, buckets_s3_r
     
     buckets_info("⏱️  CompleteMultipart: Calling buckets_put_object for %zu bytes...", total_size);
     
-    int ret = buckets_put_object(req->bucket, req->key, final_data, total_size, NULL);
+    int ret;
+    char version_id[37] = {0};
+    
+    if (versioning_enabled) {
+        /* Versioning is enabled - create a new version */
+        ret = buckets_put_object_versioned(req->bucket, req->key, final_data, total_size, NULL, version_id);
+        if (ret == 0) {
+            snprintf(res->version_id, sizeof(res->version_id), "%s", version_id);
+            buckets_info("⏱️  CompleteMultipart: Created version %s for %s/%s", 
+                        version_id, req->bucket, req->key);
+        }
+    } else {
+        /* Versioning disabled - overwrite object */
+        ret = buckets_put_object(req->bucket, req->key, final_data, total_size, NULL);
+    }
+    
     buckets_free(final_data);
     
     if (ret != 0) {
-        buckets_error("⏱️  CompleteMultipart FAILED: buckets_put_object returned %d for %s/%s", 
+        buckets_error("⏱️  CompleteMultipart FAILED: put_object returned %d for %s/%s", 
                      ret, req->bucket, req->key);
         return buckets_s3_xml_error(res, "InternalError",
                                      "Failed to write completed object",
                                      req->key);
     }
     
-    buckets_info("⏱️  CompleteMultipart: buckets_put_object succeeded");
+    buckets_info("⏱️  CompleteMultipart: put_object succeeded");
     
     /* For multipart uploads, append "-{part_count}" to indicate it's a multipart object */
     char multipart_etag[48];  /* 32 (MD5) + 1 (dash) + 5 (digits) + 1 (null) = 39, round to 48 */
@@ -688,8 +709,13 @@ int buckets_s3_complete_multipart_upload(buckets_s3_request_t *req, buckets_s3_r
     get_multipart_dir(req->bucket, upload_id, upload_dir, sizeof(upload_dir));
     remove_directory(upload_dir);
     
-    buckets_info("⏱️  CompleteMultipart SUCCESS: %s/%s (etag=%s, parts=%d, size=%zu)",
-                 req->bucket, req->key, multipart_etag, part_count, total_size);
+    if (versioning_enabled && version_id[0] != '\0') {
+        buckets_info("⏱️  CompleteMultipart SUCCESS: %s/%s (etag=%s, parts=%d, size=%zu, versionId=%s)",
+                     req->bucket, req->key, multipart_etag, part_count, total_size, version_id);
+    } else {
+        buckets_info("⏱️  CompleteMultipart SUCCESS: %s/%s (etag=%s, parts=%d, size=%zu)",
+                     req->bucket, req->key, multipart_etag, part_count, total_size);
+    }
     
     /* Generate XML response */
     char xml_body[4096];

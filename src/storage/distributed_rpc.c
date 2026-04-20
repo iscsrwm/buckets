@@ -8,6 +8,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <time.h>
+#include <sys/stat.h>
+#include <errno.h>
 
 #include "buckets.h"
 #include "buckets_net.h"
@@ -578,6 +582,291 @@ static int rpc_handler_delete_chunk(const char *method, cJSON *params, cJSON **r
 }
 
 /* ===================================================================
+ * RPC Method: storage.createBucketDir
+ * 
+ * Creates bucket directory on local disks.
+ * Called when creating a bucket in distributed mode.
+ * 
+ * Request params:
+ * {
+ *   "bucket": "my-bucket"
+ * }
+ * 
+ * Response result:
+ * {
+ *   "success": true,
+ *   "disks_created": 4
+ * }
+ * ===================================================================*/
+
+static int rpc_handler_create_bucket_dir(const char *method, cJSON *params, cJSON **result,
+                                         int *error_code, char *error_message,
+                                         void *user_data)
+{
+    (void)method;
+    (void)user_data;
+    
+    *error_code = 0;
+    error_message[0] = '\0';
+    
+    /* Parse parameters */
+    cJSON *bucket_json = cJSON_GetObjectItem(params, "bucket");
+    
+    if (!bucket_json || !cJSON_IsString(bucket_json)) {
+        *error_code = -1;
+        snprintf(error_message, 256, "Missing required parameter: bucket");
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    const char *bucket = bucket_json->valuestring;
+    
+    /* Get storage data directory */
+    extern const buckets_storage_config_t* buckets_storage_get_config(void);
+    const buckets_storage_config_t *storage_config = buckets_storage_get_config();
+    if (!storage_config || !storage_config->data_dir) {
+        *error_code = -1;
+        snprintf(error_message, 256, "Storage not configured");
+        return BUCKETS_ERR_INIT;
+    }
+    const char *base_dir = storage_config->data_dir;
+    
+    /* Create bucket directory on all local disks */
+    int disks_created = 0;
+    for (int disk_num = 1; disk_num <= 4; disk_num++) {
+        char bucket_path[PATH_MAX];
+        snprintf(bucket_path, sizeof(bucket_path), "%s/disk%d/%s", base_dir, disk_num, bucket);
+        
+        struct stat st;
+        if (stat(bucket_path, &st) == 0) {
+            /* Directory already exists */
+            disks_created++;
+            continue;
+        }
+        
+        if (mkdir(bucket_path, 0755) == 0) {
+            disks_created++;
+            buckets_debug("Created bucket dir: %s", bucket_path);
+        } else if (errno == EEXIST) {
+            disks_created++;
+        } else {
+            buckets_warn("Failed to create bucket dir: %s (%s)", bucket_path, strerror(errno));
+        }
+    }
+    
+    /* Create result */
+    *result = cJSON_CreateObject();
+    cJSON_AddBoolToObject(*result, "success", disks_created > 0);
+    cJSON_AddNumberToObject(*result, "disks_created", disks_created);
+    
+    buckets_info("RPC createBucketDir: bucket=%s, disks_created=%d", bucket, disks_created);
+    
+    return BUCKETS_OK;
+}
+
+/* ===================================================================
+ * RPC Method: storage.listObjects
+ * 
+ * Lists objects from local disks matching bucket/prefix.
+ * Returns objects stored on THIS node only.
+ * 
+ * Request params:
+ * {
+ *   "bucket": "my-bucket",
+ *   "prefix": "folder/",    (optional)
+ *   "max_keys": 1000        (optional, default 1000)
+ * }
+ * 
+ * Response result:
+ * {
+ *   "success": true,
+ *   "objects": [
+ *     {"bucket": "my-bucket", "object": "file1.txt", "size": 1234, "mod_time": "2026-03-06T12:00:00Z"},
+ *     ...
+ *   ]
+ * }
+ * ===================================================================*/
+
+static int rpc_handler_list_objects(const char *method, cJSON *params, cJSON **result,
+                                     int *error_code, char *error_message,
+                                     void *user_data)
+{
+    (void)method;
+    (void)user_data;
+    
+    *error_code = 0;
+    error_message[0] = '\0';
+    
+    /* Parse parameters */
+    cJSON *bucket_json = cJSON_GetObjectItem(params, "bucket");
+    cJSON *prefix_json = cJSON_GetObjectItem(params, "prefix");
+    cJSON *max_keys_json = cJSON_GetObjectItem(params, "max_keys");
+    
+    if (!bucket_json || !cJSON_IsString(bucket_json)) {
+        *error_code = -1;
+        snprintf(error_message, 256, "Missing required parameter: bucket");
+        return BUCKETS_ERR_INVALID_ARG;
+    }
+    
+    const char *bucket = bucket_json->valuestring;
+    const char *prefix = (prefix_json && cJSON_IsString(prefix_json)) ? prefix_json->valuestring : NULL;
+    int max_keys = (max_keys_json && cJSON_IsNumber(max_keys_json)) ? max_keys_json->valueint : 1000;
+    
+    /* Get storage data directory */
+    extern const buckets_storage_config_t* buckets_storage_get_config(void);
+    const buckets_storage_config_t *storage_config = buckets_storage_get_config();
+    if (!storage_config || !storage_config->data_dir) {
+        *error_code = -1;
+        snprintf(error_message, 256, "Storage not configured");
+        return BUCKETS_ERR_INIT;
+    }
+    const char *base_dir = storage_config->data_dir;
+    
+    /* Create result array */
+    cJSON *objects_array = cJSON_CreateArray();
+    int found = 0;
+    
+    /* Scan all local disks (disk1, disk2, disk3, disk4) */
+    for (int disk_num = 1; disk_num <= 4 && found < max_keys; disk_num++) {
+        char disk_path[PATH_MAX];
+        snprintf(disk_path, sizeof(disk_path), "%s/disk%d", base_dir, disk_num);
+        
+        DIR *disk_dir = opendir(disk_path);
+        if (!disk_dir) continue;
+        
+        /* Scan hash prefix directories (00-ff) */
+        struct dirent *prefix_entry;
+        while ((prefix_entry = readdir(disk_dir)) != NULL && found < max_keys) {
+            if (prefix_entry->d_name[0] == '.') continue;
+            if (strlen(prefix_entry->d_name) != 2) continue;
+            
+            /* Check if it's a hex prefix */
+            char c1 = prefix_entry->d_name[0];
+            char c2 = prefix_entry->d_name[1];
+            bool is_hex = ((c1 >= '0' && c1 <= '9') || (c1 >= 'a' && c1 <= 'f')) &&
+                          ((c2 >= '0' && c2 <= '9') || (c2 >= 'a' && c2 <= 'f'));
+            if (!is_hex) continue;
+            
+            /* Scan hash directories */
+            char hash_prefix_path[PATH_MAX];
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+            snprintf(hash_prefix_path, sizeof(hash_prefix_path), "%s/%s", 
+                     disk_path, prefix_entry->d_name);
+#pragma GCC diagnostic pop
+            
+            DIR *hash_dir = opendir(hash_prefix_path);
+            if (!hash_dir) continue;
+            
+            struct dirent *hash_entry;
+            while ((hash_entry = readdir(hash_dir)) != NULL && found < max_keys) {
+                if (hash_entry->d_name[0] == '.') continue;
+                
+                /* Read xl.meta */
+                char meta_path[PATH_MAX * 2];
+                snprintf(meta_path, sizeof(meta_path), "%s/%s/xl.meta", 
+                         hash_prefix_path, hash_entry->d_name);
+                
+                FILE *f = fopen(meta_path, "r");
+                if (!f) continue;
+                
+                fseek(f, 0, SEEK_END);
+                long file_size = ftell(f);
+                fseek(f, 0, SEEK_SET);
+                
+                if (file_size <= 0 || file_size > 1024 * 1024) {
+                    fclose(f);
+                    continue;
+                }
+                
+                char *meta_content = buckets_malloc(file_size + 1);
+                if (!meta_content) {
+                    fclose(f);
+                    continue;
+                }
+                
+                size_t read_size = fread(meta_content, 1, file_size, f);
+                fclose(f);
+                meta_content[read_size] = '\0';
+                
+                /* Parse xl.meta JSON */
+                cJSON *meta_json = cJSON_Parse(meta_content);
+                buckets_free(meta_content);
+                if (!meta_json) continue;
+                
+                /* Get bucket and object from xl.meta */
+                cJSON *meta_bucket = cJSON_GetObjectItem(meta_json, "bucket");
+                cJSON *meta_object = cJSON_GetObjectItem(meta_json, "object");
+                
+                if (!meta_bucket || !cJSON_IsString(meta_bucket) ||
+                    !meta_object || !cJSON_IsString(meta_object)) {
+                    cJSON_Delete(meta_json);
+                    continue;
+                }
+                
+                /* Check bucket match */
+                if (strcmp(meta_bucket->valuestring, bucket) != 0) {
+                    cJSON_Delete(meta_json);
+                    continue;
+                }
+                
+                /* Skip internal buckets */
+                if (meta_bucket->valuestring[0] == '.') {
+                    cJSON_Delete(meta_json);
+                    continue;
+                }
+                
+                /* Check prefix match */
+                if (prefix && strncmp(meta_object->valuestring, prefix, strlen(prefix)) != 0) {
+                    cJSON_Delete(meta_json);
+                    continue;
+                }
+                
+                /* Get size and mod_time from stat */
+                size_t obj_size = 0;
+                const char *mod_time = "";
+                cJSON *stat = cJSON_GetObjectItem(meta_json, "stat");
+                if (stat) {
+                    cJSON *size_json = cJSON_GetObjectItem(stat, "size");
+                    if (size_json && cJSON_IsNumber(size_json)) {
+                        obj_size = (size_t)size_json->valuedouble;
+                    }
+                    cJSON *mod_time_json = cJSON_GetObjectItem(stat, "modTime");
+                    if (mod_time_json && cJSON_IsString(mod_time_json)) {
+                        mod_time = mod_time_json->valuestring;
+                    }
+                }
+                
+                /* Add to results */
+                cJSON *obj_entry = cJSON_CreateObject();
+                cJSON_AddStringToObject(obj_entry, "bucket", meta_bucket->valuestring);
+                cJSON_AddStringToObject(obj_entry, "object", meta_object->valuestring);
+                cJSON_AddNumberToObject(obj_entry, "size", (double)obj_size);
+                cJSON_AddStringToObject(obj_entry, "mod_time", mod_time);
+                cJSON_AddItemToArray(objects_array, obj_entry);
+                found++;
+                
+                cJSON_Delete(meta_json);
+            }
+            
+            closedir(hash_dir);
+        }
+        
+        closedir(disk_dir);
+    }
+    
+    /* Build success response */
+    *result = cJSON_CreateObject();
+    cJSON_AddBoolToObject(*result, "success", true);
+    cJSON_AddItemToObject(*result, "objects", objects_array);
+    cJSON_AddNumberToObject(*result, "count", found);
+    
+    buckets_debug("RPC listObjects: bucket=%s prefix=%s found=%d",
+                  bucket, prefix ? prefix : "(none)", found);
+    
+    return BUCKETS_OK;
+}
+
+/* ===================================================================
  * Initialization
  * ===================================================================*/
 
@@ -627,6 +916,22 @@ int buckets_distributed_rpc_init(buckets_rpc_context_t *rpc_ctx)
                                        rpc_handler_delete_chunk, NULL);
     if (ret != BUCKETS_OK) {
         buckets_error("Failed to register storage.deleteChunk handler");
+        return ret;
+    }
+    
+    /* Register listObjects handler */
+    ret = buckets_rpc_register_handler(rpc_ctx, "storage.listObjects",
+                                       rpc_handler_list_objects, NULL);
+    if (ret != BUCKETS_OK) {
+        buckets_error("Failed to register storage.listObjects handler");
+        return ret;
+    }
+    
+    /* Register createBucketDir handler */
+    ret = buckets_rpc_register_handler(rpc_ctx, "storage.createBucketDir",
+                                       rpc_handler_create_bucket_dir, NULL);
+    if (ret != BUCKETS_OK) {
+        buckets_error("Failed to register storage.createBucketDir handler");
         return ret;
     }
     

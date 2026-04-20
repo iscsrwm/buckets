@@ -1,6 +1,6 @@
 # Buckets 6-Node Cluster Load Test Results
 
-**Date**: March 3, 2026  
+**Date**: March 6, 2026  
 **Version**: 0.1.0-alpha  
 **Test Environment**: localhost (6 nodes on ports 9001-9006)
 
@@ -15,146 +15,98 @@
 
 ## Test Tools
 
-- **Apache Benchmark (ab)**: Used for HTTP load testing
-- **Test files**: 1KB, 64KB, 1MB random binary data
+- **boto3**: AWS SDK for Python with S3v4 signatures
+- **Test files**: 1KB, 64KB, 256KB, 1MB random binary data
 
 ---
 
-## Single Node Performance
+## Current Results (March 6, 2026)
 
-Tests run against a single node (port 9001) with varying object sizes.
+> **Note**: Previous results from March 3, 2026 were invalid due to a missing `Expect: 100-continue` 
+> response which caused boto3/AWS SDK clients to wait 1 second before sending request bodies.
+> This has been fixed and the results below reflect actual performance.
 
-### PUT Operations
+### Concurrent Workload Performance (50 workers, 20 seconds)
 
-| Object Size | Requests | Concurrency | Requests/sec | Latency (mean) | Failed |
-|-------------|----------|-------------|--------------|----------------|--------|
-| 1KB | 1,000 | 50 | **8,630** | 5.8ms | 0 |
-| 64KB | 500 | 50 | **5,582** | 9.0ms | 0 |
-| 1MB | 200 | 20 | **1,648** | 12.1ms | 0 |
+| Workload | Total Ops | Throughput | Avg Rate | Peak Rate |
+|----------|-----------|------------|----------|-----------|
+| **GET-only** | 10,216 | 394 ops/s | 410/s | 1,640/s |
+| **PUT-only** | 7,945 | 383 ops/s | 404/s | 980/s |
+| **Mixed (50/50)** | 9,411 | 446 ops/s | 451/s | 700/s |
 
-### GET Operations
+### Performance by Object Size (Sequential, Single Client)
 
-| Object Size | Requests | Concurrency | Requests/sec | Latency (mean) | Transfer Rate | Failed |
-|-------------|----------|-------------|--------------|----------------|---------------|--------|
-| 1KB | 1,000 | 50 | **9,861** | 5.1ms | 9.6 MB/s | 0 |
-| 64KB | 500 | 50 | **4,167** | 12.0ms | 261.2 MB/s | 0 |
-| 1MB | 200 | 20 | **388** | 51.6ms | 387.6 MB/s | 0 |
+| Object Size | PUT ops/s | GET ops/s |
+|-------------|-----------|-----------|
+| **1KB** | 140 | 563 |
+| **64KB** | 101 | 503 |
+| **256KB** | 13 | 162 |
+| **1MB** | 11 | 68 |
 
----
+### Single Operation Latency (Authenticated)
 
-## Multi-Node Cluster Performance
-
-### Parallel Load (All 6 Nodes)
-
-Each node receiving 500 requests with 25 concurrent connections (1KB objects):
-
-| Node | Port | Requests/sec |
-|------|------|--------------|
-| Node 1 | 9001 | 6,340 |
-| Node 2 | 9002 | 5,420 |
-| Node 3 | 9003 | 5,523 |
-| Node 4 | 9004 | 7,781 |
-| Node 5 | 9005 | 5,307 |
-| Node 6 | 9006 | 6,786 |
-| **Total** | - | **37,157** |
-
-### High Concurrency Test (100 concurrent per node)
-
-Each node receiving 1,000 requests with 100 concurrent connections (1KB objects):
-
-| Node | Port | Requests/sec | Failed |
-|------|------|--------------|--------|
-| Node 1 | 9001 | 6,127 | 0 |
-| Node 2 | 9002 | 5,762 | 0 |
-| Node 3 | 9003 | 7,482 | 0 |
-| Node 4 | 9004 | 6,543 | 0 |
-| Node 5 | 9005 | 5,655 | 0 |
-| Node 6 | 9006 | 5,861 | 0 |
-| **Total** | - | **37,430** | **0** |
-
-**Total concurrent connections**: 600
+| Operation | Latency |
+|-----------|---------|
+| PUT 1KB | 7-10ms |
+| GET 1KB | 2-3ms |
+| HEAD | 1-2ms |
+| DELETE | 10-15ms |
 
 ---
 
-## Sustained Load Test
+## Bug Fix: HTTP 100-Continue Support
 
-Single node under sustained high load:
+**Issue**: Prior to March 6, 2026, the server did not respond to `Expect: 100-continue` headers.
+This caused AWS SDKs (boto3, AWS CLI, mc client) to wait 1 second before sending request bodies.
 
-| Metric | Value |
-|--------|-------|
-| Total Requests | 10,000 |
-| Concurrency | 100 |
-| Object Size | 1KB |
-| **Requests/sec** | **10,766** |
-| Mean Latency | 9.3ms |
-| Failed Requests | **0** |
+**Impact**: PUT operations took ~1000ms instead of ~10ms.
 
----
+**Fix**: Server now responds with `HTTP/1.1 100 Continue` when clients send `Expect: 100-continue`.
 
-## Post-Test Health Check
-
-All nodes remained healthy after load testing:
-
-| Node | Port | Status |
-|------|------|--------|
-| Node 1 | 9001 | HTTP 200 |
-| Node 2 | 9002 | HTTP 200 |
-| Node 3 | 9003 | HTTP 200 |
-| Node 4 | 9004 | HTTP 200 |
-| Node 5 | 9005 | HTTP 200 |
-| Node 6 | 9006 | HTTP 200 |
+| Metric | Before Fix | After Fix | Improvement |
+|--------|------------|-----------|-------------|
+| Single PUT latency | ~1000ms | ~7ms | **143x faster** |
+| PUT throughput | ~1 ops/s | ~140 ops/s | **140x faster** |
 
 ---
 
 ## Data Integrity Verification
 
-Comprehensive data integrity testing confirmed correct operation of the distributed
-erasure-coded storage system.
-
-### Test Results
+All operations verified with MD5 checksums using authenticated requests:
 
 | Object Size | PUT | GET | MD5 Match |
 |-------------|-----|-----|-----------|
-| 1KB | OK | OK | PASS |
-| 64KB | OK | OK | PASS |
-| 256KB | OK | OK | PASS |
-| 1MB | OK | OK | PASS |
+| 1KB | OK | OK | **PASS** |
+| 64KB | OK | OK | **PASS** |
+| 256KB | OK | OK | **PASS** |
+| 1MB | OK | OK | **PASS** |
 
 ### Verification Method
 
 1. Generate random binary data with `dd if=/dev/urandom`
 2. Compute MD5 hash of original data
-3. PUT object to cluster via S3 API
-4. GET object from cluster via S3 API
+3. PUT object to cluster via authenticated S3 API
+4. GET object from cluster via authenticated S3 API
 5. Compute MD5 hash of retrieved data
 6. Compare hashes - must match exactly
-
-### Distributed Storage Validation
-
-- Objects are split into 8 data + 4 parity chunks (K=8, M=4)
-- Chunks are distributed across nodes in the same erasure set
-- Each chunk verified to exist on correct disk path
-- GET reconstructs data from available chunks
-- **Data integrity preserved** through erasure coding pipeline
 
 ---
 
 ## Key Findings
 
-1. **Zero failures** across all test scenarios
-2. **High single-node throughput**: 8,630 PUT/sec, 9,861 GET/sec (1KB objects)
-3. **Excellent cluster scalability**: 37,430 req/sec with 600 concurrent connections
-4. **Stable under sustained load**: 10,766 req/sec maintained over 10,000 requests
-5. **All nodes healthy** after intensive testing
-6. **Low latency**: Sub-10ms mean latency for small objects
-7. **Data integrity verified**: MD5 checksums match for all object sizes (1KB, 64KB, 256KB, 1MB)
+1. **PUT performance restored**: 140 ops/s single-client, 383 ops/s concurrent (was ~1 ops/s)
+2. **GET performance strong**: 563 ops/s single-client, 394 ops/s concurrent
+3. **Mixed workloads efficient**: 446 ops/s with 50% GET / 50% PUT mix
+4. **Low latency**: 7-10ms PUT, 2-3ms GET for 1KB objects
+5. **Data integrity verified**: MD5 checksums match for all object sizes
+6. **Zero failures** in all authenticated tests
 
 ## Performance Characteristics
 
-- **PUT throughput** scales inversely with object size (as expected due to I/O)
-- **GET throughput** benefits from erasure-coded parallel reads
-- **Cluster throughput** scales linearly with node count
-- **No degradation** under high concurrency (600 connections)
+- **Small objects (1KB-64KB)**: Best throughput, inline storage path
+- **Large objects (256KB+)**: Erasure coding overhead reduces throughput
+- **GET faster than PUT**: Reads benefit from parallel chunk retrieval
+- **Authentication overhead minimal**: ~1-2ms per request
 
 ---
 
@@ -166,14 +118,46 @@ for i in 1 2 3 4 5 6; do
   ./bin/buckets server --config config/6node-unified-node$i.json &
 done
 
-# PUT load test
-ab -n 1000 -c 50 -p /tmp/test-1kb.bin -T "application/octet-stream" \
-  "http://localhost:9001/loadtest-bucket/obj-"
+# Configure mc client
+mc alias set buckets http://localhost:9001 minioadmin minioadmin
 
-# GET load test  
-ab -n 1000 -c 50 "http://localhost:9001/loadtest-bucket/object-key"
+# PUT test with mc
+mc cp test-file.bin buckets/test-bucket/
 
-# Sustained load test
-ab -n 10000 -c 100 -p /tmp/test-1kb.bin -T "application/octet-stream" \
-  "http://localhost:9001/loadtest-bucket/sustained-"
+# Python benchmark
+python3 scripts/full_benchmark.py
 ```
+
+---
+
+## Historical Results (March 3, 2026) - INVALID
+
+> **WARNING**: The results below were measured before the `100-continue` fix and represent
+> artificially high numbers due to unsigned/unauthenticated requests bypassing the streaming
+> upload path. Real-world S3 clients (boto3, AWS SDKs, mc) use `Expect: 100-continue` and
+> would have experienced ~1 ops/s PUT performance until the March 6, 2026 fix.
+
+The following historical data is preserved for reference but should not be used for comparison:
+
+<details>
+<summary>Click to expand invalid historical results</summary>
+
+### Single Node Performance (Unsigned Requests Only)
+
+| Object Size | PUT (req/s) | GET (req/s) |
+|-------------|-------------|-------------|
+| 1KB | 8,630 | 9,861 |
+| 64KB | 5,582 | 4,167 |
+| 1MB | 1,648 | 388 |
+
+### Cluster Performance (Unsigned Requests Only)
+
+| Test | Total Throughput | Connections |
+|------|------------------|-------------|
+| Parallel | 37,157 req/s | 150 |
+| High Concurrency | 37,430 req/s | 600 |
+
+These numbers were achieved using Apache Benchmark (`ab`) which does not use AWS authentication
+or `Expect: 100-continue`, thus bypassing the performance issue that affected real S3 clients.
+
+</details>

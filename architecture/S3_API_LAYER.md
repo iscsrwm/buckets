@@ -15,17 +15,24 @@
 - libuv-based async HTTP server
 - s3cmd client compatibility verified
 
-### Performance Benchmarks
+### Performance Benchmarks (March 6, 2026)
 
-| Operation | Small Objects (≤64KB) | Large Objects (≥256KB) |
-|-----------|----------------------|------------------------|
-| PUT | ~50 ops/s, 18ms latency | ~10 ops/s, 97ms latency |
-| GET | ~100 ops/s, 10ms latency | ~50 ops/s, 16-35ms latency |
-| HEAD | ~100 ops/s, 10ms latency | ~60 ops/s, 14-27ms latency |
-| DELETE | ~1 ops/s (needs optimization) | ~1 ops/s |
+**Concurrent Workload (50 workers, authenticated)**
 
-**Download Throughput**: Up to 194 MB/s for 50MB files  
-**Upload Throughput**: Up to 32 MB/s for 50MB files
+| Workload | Throughput | Avg Rate |
+|----------|------------|----------|
+| GET-only | 394 ops/s | 410/s |
+| PUT-only | 383 ops/s | 404/s |
+| Mixed | 446 ops/s | 451/s |
+
+**Sequential by Object Size (single client)**
+
+| Size | PUT ops/s | GET ops/s | PUT latency | GET latency |
+|------|-----------|-----------|-------------|-------------|
+| 1KB | 140 | 563 | 7ms | 2ms |
+| 64KB | 101 | 503 | 10ms | 2ms |
+| 256KB | 13 | 162 | 75ms | 6ms |
+| 1MB | 11 | 68 | 95ms | 15ms |
 
 ---
 

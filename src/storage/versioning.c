@@ -21,11 +21,59 @@
 #include "buckets.h"
 #include "buckets_storage.h"
 #include "buckets_io.h"
+#include "buckets_erasure.h"
 
 /* Version directory structure */
 #define VERSION_DIR_NAME "versions"
 #define LATEST_LINK_NAME ".latest"
 #define DELETE_MARKER_SUFFIX ".delete"
+
+/**
+ * Base64 decode for inline versioned data
+ * (Local copy to avoid dependency on object.c internal function)
+ */
+static u8* base64_decode_version(const char *encoded, size_t *decoded_size)
+{
+    static const u8 base64_table[256] = {
+        ['A'] = 0,  ['B'] = 1,  ['C'] = 2,  ['D'] = 3,  ['E'] = 4,
+        ['F'] = 5,  ['G'] = 6,  ['H'] = 7,  ['I'] = 8,  ['J'] = 9,
+        ['K'] = 10, ['L'] = 11, ['M'] = 12, ['N'] = 13, ['O'] = 14,
+        ['P'] = 15, ['Q'] = 16, ['R'] = 17, ['S'] = 18, ['T'] = 19,
+        ['U'] = 20, ['V'] = 21, ['W'] = 22, ['X'] = 23, ['Y'] = 24,
+        ['Z'] = 25, ['a'] = 26, ['b'] = 27, ['c'] = 28, ['d'] = 29,
+        ['e'] = 30, ['f'] = 31, ['g'] = 32, ['h'] = 33, ['i'] = 34,
+        ['j'] = 35, ['k'] = 36, ['l'] = 37, ['m'] = 38, ['n'] = 39,
+        ['o'] = 40, ['p'] = 41, ['q'] = 42, ['r'] = 43, ['s'] = 44,
+        ['t'] = 45, ['u'] = 46, ['v'] = 47, ['w'] = 48, ['x'] = 49,
+        ['y'] = 50, ['z'] = 51, ['0'] = 52, ['1'] = 53, ['2'] = 54,
+        ['3'] = 55, ['4'] = 56, ['5'] = 57, ['6'] = 58, ['7'] = 59,
+        ['8'] = 60, ['9'] = 61, ['+'] = 62, ['/'] = 63
+    };
+    
+    size_t len = strlen(encoded);
+    size_t padding = 0;
+    if (len > 0 && encoded[len-1] == '=') padding++;
+    if (len > 1 && encoded[len-2] == '=') padding++;
+    
+    *decoded_size = (len * 3) / 4 - padding;
+    u8 *decoded = buckets_malloc(*decoded_size);
+    
+    size_t i = 0, j = 0;
+    while (i < len) {
+        u32 sextet_a = encoded[i] == '=' ? 0 : base64_table[(u8)encoded[i]]; i++;
+        u32 sextet_b = encoded[i] == '=' ? 0 : base64_table[(u8)encoded[i]]; i++;
+        u32 sextet_c = encoded[i] == '=' ? 0 : base64_table[(u8)encoded[i]]; i++;
+        u32 sextet_d = encoded[i] == '=' ? 0 : base64_table[(u8)encoded[i]]; i++;
+        
+        u32 triple = (sextet_a << 18) + (sextet_b << 12) + (sextet_c << 6) + sextet_d;
+        
+        if (j < *decoded_size) decoded[j++] = (triple >> 16) & 0xFF;
+        if (j < *decoded_size) decoded[j++] = (triple >> 8) & 0xFF;
+        if (j < *decoded_size) decoded[j++] = triple & 0xFF;
+    }
+    
+    return decoded;
+}
 
 /**
  * Get versions directory path for an object
@@ -411,12 +459,122 @@ int buckets_get_object_by_version(const char *bucket, const char *object,
         return -1;
     }
     
-    /* TODO: Read object data from version directory */
-    /* For now, this is a simplified implementation */
+    /* Check if inline data */
+    if (meta.inline_data) {
+        buckets_debug("Reading inline versioned object: %s/%s version=%s",
+                      bucket, object, target_version);
+        
+        /* Decode base64 inline data */
+        *data = base64_decode_version(meta.inline_data, size);
+        if (!*data) {
+            buckets_error("Failed to decode inline data for version %s", target_version);
+            buckets_xl_meta_free(&meta);
+            return -1;
+        }
+        
+        buckets_info("Read inline versioned object: %s/%s version=%s size=%zu",
+                     bucket, object, target_version, *size);
+        buckets_xl_meta_free(&meta);
+        return 0;
+    }
     
-    buckets_warn("Version-specific data retrieval not yet fully implemented");
+    /* Read erasure-coded chunks from version directory */
+    u32 k = meta.erasure.data;
+    u32 m = meta.erasure.parity;
+    size_t chunk_size = meta.erasure.blockSize;
+    u32 total_chunks = k + m;
+    
+    if (k == 0 || m == 0 || chunk_size == 0) {
+        buckets_error("Invalid erasure parameters in version xl.meta: k=%u, m=%u, blockSize=%zu",
+                      k, m, chunk_size);
+        buckets_xl_meta_free(&meta);
+        return -1;
+    }
+    
+    buckets_debug("Reading erasure-coded versioned object: k=%u, m=%u, chunk_size=%zu",
+                  k, m, chunk_size);
+    
+    /* Construct full version path for chunk reads */
+    char full_version_path[PATH_MAX * 2];
+    snprintf(full_version_path, sizeof(full_version_path), "%s/%s",
+             disk_path, version_path);
+    
+    /* Allocate chunk arrays */
+    u8 *chunks[total_chunks];
+    u32 available_chunks = 0;
+    
+    for (u32 i = 0; i < total_chunks; i++) {
+        chunks[i] = NULL;
+    }
+    
+    /* Read chunks from version directory */
+    for (u32 i = 0; i < total_chunks; i++) {
+        char chunk_path[PATH_MAX * 2];
+        snprintf(chunk_path, sizeof(chunk_path), "%s/part.%u", full_version_path, i + 1);
+        
+        void *chunk_data = NULL;
+        size_t chunk_len = 0;
+        
+        if (buckets_atomic_read(chunk_path, &chunk_data, &chunk_len) == 0) {
+            chunks[i] = chunk_data;
+            available_chunks++;
+            buckets_debug("Read version chunk %u: %zu bytes", i + 1, chunk_len);
+        } else {
+            buckets_debug("Version chunk %u not available", i + 1);
+        }
+    }
+    
+    /* Check if we have enough chunks to reconstruct (need at least K) */
+    if (available_chunks < k) {
+        buckets_error("Not enough version chunks: %u/%u (need at least %u)",
+                      available_chunks, total_chunks, k);
+        goto cleanup_version_read;
+    }
+    
+    buckets_debug("Have %u/%u version chunks (need %u for reconstruction)",
+                  available_chunks, total_chunks, k);
+    
+    /* Allocate output buffer */
+    *data = buckets_malloc(meta.stat.size);
+    *size = meta.stat.size;
+    
+    /* Initialize erasure context and decode */
+    buckets_ec_ctx_t ec_ctx;
+    if (buckets_ec_init(&ec_ctx, k, m) != 0) {
+        buckets_error("Failed to initialize erasure context for version decode");
+        buckets_free(*data);
+        *data = NULL;
+        goto cleanup_version_read;
+    }
+    
+    if (buckets_ec_decode(&ec_ctx, chunks, chunk_size, *data, meta.stat.size) != 0) {
+        buckets_error("Failed to decode versioned object");
+        buckets_ec_free(&ec_ctx);
+        buckets_free(*data);
+        *data = NULL;
+        goto cleanup_version_read;
+    }
+    
+    buckets_ec_free(&ec_ctx);
+    buckets_info("Read versioned object: %s/%s version=%s size=%zu",
+                 bucket, object, target_version, *size);
+    
+    /* Success - cleanup and return */
+    for (u32 i = 0; i < total_chunks; i++) {
+        if (chunks[i]) {
+            buckets_free(chunks[i]);
+        }
+    }
     buckets_xl_meta_free(&meta);
+    return 0;
     
+cleanup_version_read:
+    for (u32 i = 0; i < total_chunks; i++) {
+        if (chunks[i]) {
+            buckets_free(chunks[i]);
+        }
+    }
+    buckets_xl_meta_free(&meta);
     return -1;
 }
 
@@ -515,6 +673,67 @@ int buckets_list_versions(const char *bucket, const char *object,
 }
 
 /**
+ * Recursively delete a directory and all its contents
+ * 
+ * @param path Directory path to delete
+ * @return 0 on success, -1 on error
+ */
+static int remove_directory_recursive(const char *path)
+{
+    DIR *dir = opendir(path);
+    if (!dir) {
+        if (errno == ENOENT) {
+            return 0;  /* Already gone */
+        }
+        buckets_error("Failed to open directory for deletion: %s", path);
+        return -1;
+    }
+    
+    struct dirent *entry;
+    int result = 0;
+    
+    while ((entry = readdir(dir)) != NULL) {
+        /* Skip . and .. */
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        
+        char full_path[PATH_MAX * 2];
+        snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
+        
+        struct stat st;
+        if (lstat(full_path, &st) != 0) {
+            buckets_warn("Failed to stat: %s", full_path);
+            result = -1;
+            continue;
+        }
+        
+        if (S_ISDIR(st.st_mode)) {
+            /* Recurse into subdirectory */
+            if (remove_directory_recursive(full_path) != 0) {
+                result = -1;
+            }
+        } else {
+            /* Remove file or symlink */
+            if (unlink(full_path) != 0) {
+                buckets_warn("Failed to unlink: %s (%s)", full_path, strerror(errno));
+                result = -1;
+            }
+        }
+    }
+    
+    closedir(dir);
+    
+    /* Remove the now-empty directory */
+    if (rmdir(path) != 0) {
+        buckets_warn("Failed to rmdir: %s (%s)", path, strerror(errno));
+        result = -1;
+    }
+    
+    return result;
+}
+
+/**
  * Delete specific version (hard delete)
  * 
  * Permanently deletes a specific version including delete markers.
@@ -549,9 +768,34 @@ int buckets_delete_version(const char *bucket, const char *object,
     snprintf(full_version_path, sizeof(full_version_path), "%s/%s",
              disk_path, version_path);
     
+    /* Also check for and delete any delete marker file */
+    char marker_path[PATH_MAX * 2];
+    snprintf(marker_path, sizeof(marker_path), "%s%s", full_version_path, DELETE_MARKER_SUFFIX);
+    unlink(marker_path);  /* Ignore errors - may not exist */
+    
     /* Remove version directory recursively */
-    /* TODO: Implement recursive directory deletion */
-    buckets_warn("Recursive directory deletion not yet implemented");
+    if (remove_directory_recursive(full_version_path) != 0) {
+        buckets_error("Failed to delete version directory: %s", full_version_path);
+        return -1;
+    }
+    
+    /* Update .latest symlink if we deleted the latest version */
+    char latest_id[37];
+    if (get_latest_version_id(disk_path, object_path, latest_id, sizeof(latest_id)) == 0) {
+        if (strcmp(latest_id, versionId) == 0) {
+            /* We deleted the latest version - need to find new latest */
+            char versions_dir[PATH_MAX];
+            get_versions_dir_path(object_path, versions_dir, sizeof(versions_dir));
+            
+            char link_path[PATH_MAX * 2];
+            snprintf(link_path, sizeof(link_path), "%s/%s/%s",
+                     disk_path, versions_dir, LATEST_LINK_NAME);
+            
+            /* Just remove the symlink - let next access figure out latest */
+            unlink(link_path);
+            buckets_debug("Removed stale .latest symlink after deleting version %s", versionId);
+        }
+    }
     
     buckets_info("Deleted version: %s/%s version=%s", bucket, object, versionId);
     return 0;

@@ -50,6 +50,9 @@ typedef enum {
     BUCKETS_ERR_CRYPTO,
     BUCKETS_ERR_INIT,
     BUCKETS_ERR_RPC,
+    BUCKETS_ERR_ACCESS_DENIED,
+    BUCKETS_ERR_LIMIT,
+    BUCKETS_ERR_INTERNAL,
 } buckets_error_t;
 
 /* Return result with error handling */

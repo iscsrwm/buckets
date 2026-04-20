@@ -1068,6 +1068,68 @@ int buckets_registry_list(const char *bucket, const char *prefix,
     *locations = NULL;
     *count = 0;
     
+    if (max_keys == 0) max_keys = 1000;
+    
+    /* Try distributed listing first (queries all cluster nodes) */
+    extern int buckets_distributed_list_objects(const char *bucket, const char *prefix,
+                                                 size_t max_keys,
+                                                 cJSON **objects_array, size_t *count);
+    
+    cJSON *objects_array = NULL;
+    size_t dist_count = 0;
+    int dist_ret = buckets_distributed_list_objects(bucket, prefix, max_keys, 
+                                                     &objects_array, &dist_count);
+    
+    if (dist_ret == 0 && objects_array && dist_count > 0) {
+        /* Successfully got distributed results - convert to location structs */
+        buckets_object_location_t **results = buckets_calloc(dist_count, sizeof(buckets_object_location_t*));
+        if (!results) {
+            cJSON_Delete(objects_array);
+            return -1;
+        }
+        
+        size_t found = 0;
+        cJSON *obj = NULL;
+        cJSON_ArrayForEach(obj, objects_array) {
+            cJSON *obj_bucket = cJSON_GetObjectItem(obj, "bucket");
+            cJSON *obj_object = cJSON_GetObjectItem(obj, "object");
+            cJSON *obj_size = cJSON_GetObjectItem(obj, "size");
+            
+            if (!obj_bucket || !obj_object) continue;
+            
+            buckets_object_location_t *loc = buckets_calloc(1, sizeof(buckets_object_location_t));
+            if (!loc) continue;
+            
+            loc->bucket = buckets_strdup(obj_bucket->valuestring);
+            loc->object = buckets_strdup(obj_object->valuestring);
+            loc->version_id = buckets_strdup("latest");
+            loc->size = obj_size ? (size_t)obj_size->valuedouble : 0;
+            loc->mod_time = time(NULL);
+            loc->pool_idx = 0;
+            loc->set_idx = 0;
+            loc->disk_count = 1;
+            loc->disk_idxs[0] = 0;
+            loc->generation = 1;
+            
+            results[found++] = loc;
+        }
+        
+        cJSON_Delete(objects_array);
+        
+        *locations = results;
+        *count = found;
+        
+        buckets_debug("Registry list (distributed): bucket=%s prefix=%s found=%zu",
+                      bucket, prefix ? prefix : "(none)", found);
+        
+        return 0;
+    }
+    
+    /* Fall back to local-only listing if distributed failed */
+    if (objects_array) cJSON_Delete(objects_array);
+    
+    buckets_debug("Falling back to local-only listing for bucket=%s", bucket);
+    
     /* Get storage data directory */
     const buckets_storage_config_t *storage_config = buckets_storage_get_config();
     if (!storage_config || !storage_config->data_dir) {
@@ -1177,61 +1239,123 @@ int buckets_registry_list(const char *bucket, const char *prefix,
             buckets_free(meta_content);
             if (!meta_json) continue;
             
-            /* Check if this is a registry entry (content-type: application/json) */
-            cJSON *meta_obj = cJSON_GetObjectItem(meta_json, "meta");
-            if (!meta_obj) {
+            /* Try to get bucket/object directly from xl.meta (new format) */
+            cJSON *bucket_json = cJSON_GetObjectItem(meta_json, "bucket");
+            cJSON *object_json = cJSON_GetObjectItem(meta_json, "object");
+            
+            buckets_object_location_t *loc = NULL;
+            
+            if (bucket_json && cJSON_IsString(bucket_json) && 
+                object_json && cJSON_IsString(object_json)) {
+                /* New format: bucket/object stored directly in xl.meta */
+                const char *meta_bucket = bucket_json->valuestring;
+                const char *meta_object = object_json->valuestring;
+                
+                /* Skip if not matching our bucket */
+                if (strcmp(meta_bucket, bucket) != 0) {
+                    cJSON_Delete(meta_json);
+                    continue;
+                }
+                
+                /* Skip internal buckets */
+                if (meta_bucket[0] == '.') {
+                    cJSON_Delete(meta_json);
+                    continue;
+                }
+                
+                /* Check prefix filter if specified */
+                if (prefix && strncmp(meta_object, prefix, strlen(prefix)) != 0) {
+                    cJSON_Delete(meta_json);
+                    continue;
+                }
+                
+                /* Create location from xl.meta */
+                loc = buckets_calloc(1, sizeof(buckets_object_location_t));
+                if (loc) {
+                    loc->bucket = buckets_strdup(meta_bucket);
+                    loc->object = buckets_strdup(meta_object);
+                    loc->version_id = buckets_strdup("latest");
+                    
+                    /* Get size from stat */
+                    cJSON *stat = cJSON_GetObjectItem(meta_json, "stat");
+                    if (stat) {
+                        cJSON *size_json = cJSON_GetObjectItem(stat, "size");
+                        if (size_json && cJSON_IsNumber(size_json)) {
+                            loc->size = (size_t)size_json->valuedouble;
+                        }
+                        cJSON *mod_time_json = cJSON_GetObjectItem(stat, "modTime");
+                        if (mod_time_json && cJSON_IsString(mod_time_json)) {
+                            /* Parse ISO8601 time - just use current time for now */
+                            loc->mod_time = time(NULL);
+                        }
+                    }
+                    
+                    loc->pool_idx = 0;
+                    loc->set_idx = 0;
+                    loc->disk_count = 1;
+                    loc->disk_idxs[0] = 0;
+                    loc->generation = 1;
+                }
                 cJSON_Delete(meta_json);
-                continue;
-            }
-            
-            cJSON *content_type = cJSON_GetObjectItem(meta_obj, "content-type");
-            if (!content_type || !cJSON_IsString(content_type) ||
-                strcmp(content_type->valuestring, "application/json") != 0) {
+            } else {
+                /* Legacy format: check for registry entries (application/json) */
+                cJSON *meta_obj = cJSON_GetObjectItem(meta_json, "meta");
+                if (!meta_obj) {
+                    cJSON_Delete(meta_json);
+                    continue;
+                }
+                
+                cJSON *content_type = cJSON_GetObjectItem(meta_obj, "content-type");
+                if (!content_type || !cJSON_IsString(content_type) ||
+                    strcmp(content_type->valuestring, "application/json") != 0) {
+                    cJSON_Delete(meta_json);
+                    continue;
+                }
+                
+                /* Get inline data (base64 encoded registry JSON) */
+                cJSON *inline_data = cJSON_GetObjectItem(meta_json, "inline");
+                if (!inline_data || !cJSON_IsString(inline_data)) {
+                    cJSON_Delete(meta_json);
+                    continue;
+                }
+                
+                /* Decode and parse registry entry */
+                size_t decoded_len = 0;
+                char *decoded = decode_base64_inline(inline_data->valuestring, &decoded_len);
                 cJSON_Delete(meta_json);
-                continue;
-            }
-            
-            /* Get inline data (base64 encoded registry JSON) */
-            cJSON *inline_data = cJSON_GetObjectItem(meta_json, "inline");
-            if (!inline_data || !cJSON_IsString(inline_data)) {
-                cJSON_Delete(meta_json);
-                continue;
-            }
-            
-            /* Decode and parse registry entry */
-            size_t decoded_len = 0;
-            char *decoded = decode_base64_inline(inline_data->valuestring, &decoded_len);
-            cJSON_Delete(meta_json);
-            
-            if (!decoded) continue;
-            
-            buckets_object_location_t *loc = parse_registry_json(decoded);
-            buckets_free(decoded);
-            
-            if (!loc || !loc->bucket) {
-                if (loc) buckets_registry_location_free(loc);
-                continue;
-            }
-            
-            /* Check if this entry matches our bucket */
-            if (strcmp(loc->bucket, bucket) != 0) {
-                buckets_registry_location_free(loc);
-                continue;
-            }
-            
-            /* Check prefix filter if specified */
-            if (prefix && loc->object) {
-                if (strncmp(loc->object, prefix, strlen(prefix)) != 0) {
+                
+                if (!decoded) continue;
+                
+                loc = parse_registry_json(decoded);
+                buckets_free(decoded);
+                
+                if (!loc || !loc->bucket) {
+                    if (loc) buckets_registry_location_free(loc);
+                    continue;
+                }
+                
+                /* Check if this entry matches our bucket */
+                if (strcmp(loc->bucket, bucket) != 0) {
+                    buckets_registry_location_free(loc);
+                    continue;
+                }
+                
+                /* Check prefix filter if specified */
+                if (prefix && loc->object) {
+                    if (strncmp(loc->object, prefix, strlen(prefix)) != 0) {
+                        buckets_registry_location_free(loc);
+                        continue;
+                    }
+                }
+                
+                /* Skip delete markers (version_id starts with "delete-") */
+                if (loc->version_id && strncmp(loc->version_id, "delete-", 7) == 0) {
                     buckets_registry_location_free(loc);
                     continue;
                 }
             }
             
-            /* Skip delete markers (version_id starts with "delete-") */
-            if (loc->version_id && strncmp(loc->version_id, "delete-", 7) == 0) {
-                buckets_registry_location_free(loc);
-                continue;
-            }
+            if (!loc) continue;
             
             /* Add to results (grow array if needed) */
             if (found >= capacity) {

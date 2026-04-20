@@ -157,14 +157,42 @@ int buckets_put_object_with_metadata(const char *bucket, const char *object,
     char object_path[PATH_MAX];
     buckets_compute_object_path(bucket, object, object_path, sizeof(object_path));
     
-    /* Get storage config */
+    /* Get storage config (needed for EC params and fallback disk path) */
     const buckets_storage_config_t *config = buckets_storage_get_config();
-    const char *disk_path = config->data_dir;
+    if (!config) {
+        buckets_error("Storage config not initialized");
+        return -1;
+    }
+    
+    /* Compute placement using consistent hashing */
+    extern int buckets_placement_compute(const char *bucket, const char *object,
+                                         buckets_placement_result_t **result);
+    extern void buckets_placement_free_result(buckets_placement_result_t *result);
+    
+    buckets_placement_result_t *placement = NULL;
+    const char *disk_path = NULL;
+    
+    if (buckets_placement_compute(bucket, object, &placement) == 0 && 
+        placement && placement->disk_count > 0) {
+        disk_path = placement->disk_paths[0];
+        buckets_debug("Using placement disk path: %s", disk_path);
+    } else {
+        /* Fallback to config data_dir */
+        disk_path = config->data_dir;
+        buckets_debug("Using config data_dir: %s", disk_path ? disk_path : "(null)");
+    }
+    
+    /* Fallback to default if still no path */
+    if (!disk_path || disk_path[0] == '\0') {
+        disk_path = "/tmp/buckets-data";
+        buckets_debug("Fallback to default: %s", disk_path);
+    }
     
     /* Create object directory */
     extern int buckets_create_object_dir(const char *disk_path, const char *object_path);
     if (buckets_create_object_dir(disk_path, object_path) != 0) {
         buckets_error("Failed to create object directory");
+        if (placement) buckets_placement_free_result(placement);
         return -1;
     }
     
@@ -172,6 +200,8 @@ int buckets_put_object_with_metadata(const char *bucket, const char *object,
     buckets_xl_meta_t meta = {0};
     meta.version = 1;
     strcpy(meta.format, "xl");
+    meta.bucket = buckets_strdup(bucket);    /* For listing */
+    meta.object = buckets_strdup(object);    /* For listing */
     meta.stat.size = size;
     buckets_get_iso8601_time(meta.stat.modTime);
     
@@ -238,8 +268,33 @@ int buckets_put_object_with_metadata(const char *bucket, const char *object,
         /* Encode as base64 */
         meta.inline_data = base64_encode((const u8*)data, size);
         
-        /* Write xl.meta only */
-        result = buckets_write_xl_meta(disk_path, object_path, &meta);
+        /* Check if we have placement for distributed write */
+        bool has_endpoints = (placement && placement->disk_endpoints && 
+                             placement->disk_endpoints[0] && 
+                             placement->disk_endpoints[0][0] != '\0');
+        
+        if (has_endpoints && placement->disk_count > 0) {
+            /* Distributed inline: replicate xl.meta to all disks in the set */
+            buckets_info("Distributed inline write: replicating xl.meta to %u disks", 
+                        placement->disk_count);
+            
+            extern int buckets_parallel_write_metadata(const char *bucket,
+                                                       const char *object,
+                                                       const char *object_path,
+                                                       buckets_placement_result_t *placement,
+                                                       char **disk_paths,
+                                                       const buckets_xl_meta_t *base_meta,
+                                                       u32 num_disks,
+                                                       bool has_endpoints);
+            
+            result = buckets_parallel_write_metadata(bucket, object, object_path,
+                                                     placement, placement->disk_paths,
+                                                     &meta, placement->disk_count, 
+                                                     has_endpoints);
+        } else {
+            /* Local-only inline: write xl.meta to single disk */
+            result = buckets_write_xl_meta(disk_path, object_path, &meta);
+        }
     } else {
         /* Erasure encode large object */
         u32 k = config->default_ec_k;
@@ -303,30 +358,92 @@ int buckets_put_object_with_metadata(const char *bucket, const char *object,
                                           &meta.erasure.checksums[k + i]);
         }
         
-        /* Write chunks */
-        extern int buckets_write_chunk(const char *disk_path, const char *object_path,
-                                      u32 chunk_index, const void *data, size_t size);
-        for (u32 i = 0; i < k; i++) {
-            if (buckets_write_chunk(disk_path, object_path, i + 1,
-                                   data_chunks[i], chunk_size) != 0) {
-                buckets_error("Failed to write data chunk %u", i);
+        /* Write chunks - check if we should use distributed write */
+        if (placement && placement->disk_count >= (k + m)) {
+            /* Distributed write: write chunks across multiple disks in parallel */
+            buckets_info("Writing %u data + %u parity chunks across %d disks (PARALLEL)", 
+                        k, m, placement->disk_count);
+            
+            /* Check if we have disk endpoints for distributed RPC */
+            bool has_endpoints = (placement->disk_endpoints && 
+                                 placement->disk_endpoints[0] && 
+                                 placement->disk_endpoints[0][0] != '\0');
+            
+            /* Prepare chunk data array (data + parity) */
+            const void **chunk_array = buckets_malloc((k + m) * sizeof(void*));
+            if (!chunk_array) {
+                buckets_error("Failed to allocate chunk array");
                 buckets_ec_free(&ec_ctx);
                 result = -1;
                 goto cleanup_chunks;
             }
-        }
-        for (u32 i = 0; i < m; i++) {
-            if (buckets_write_chunk(disk_path, object_path, k + i + 1,
-                                   parity_chunks[i], chunk_size) != 0) {
-                buckets_error("Failed to write parity chunk %u", i);
+            
+            for (u32 i = 0; i < k + m; i++) {
+                chunk_array[i] = (i < k) ? data_chunks[i] : parity_chunks[i - k];
+            }
+            
+            /* Write all chunks in parallel */
+            extern int buckets_parallel_write_chunks(const char *bucket, const char *object,
+                                                     const char *object_path,
+                                                     buckets_placement_result_t *placement,
+                                                     const void **chunk_data_array,
+                                                     size_t chunk_size, u32 num_chunks);
+            
+            int write_result = buckets_parallel_write_chunks(bucket, object, object_path, placement,
+                                                             chunk_array, chunk_size, k + m);
+            
+            buckets_free(chunk_array);
+            
+            if (write_result != 0) {
+                buckets_error("Parallel chunk write failed");
                 buckets_ec_free(&ec_ctx);
                 result = -1;
                 goto cleanup_chunks;
             }
+            
+            buckets_info("Parallel write complete: %u chunks written", k + m);
+            
+            /* Write xl.meta to all disks in parallel */
+            extern int buckets_parallel_write_metadata(const char *bucket,
+                                                       const char *object,
+                                                       const char *object_path,
+                                                       buckets_placement_result_t *placement,
+                                                       char **disk_paths,
+                                                       const buckets_xl_meta_t *base_meta,
+                                                       u32 num_disks,
+                                                       bool has_endpoints);
+            
+            result = buckets_parallel_write_metadata(bucket, object, object_path,
+                                                     placement, placement->disk_paths, &meta,
+                                                     k + m, has_endpoints);
+        } else {
+            /* Fallback: single-disk write (for tests or when placement unavailable) */
+            buckets_warn("Using single-disk write (placement unavailable or insufficient disks)");
+            
+            extern int buckets_write_chunk(const char *disk_path, const char *object_path,
+                                          u32 chunk_index, const void *data, size_t size);
+            for (u32 i = 0; i < k; i++) {
+                if (buckets_write_chunk(disk_path, object_path, i + 1,
+                                       data_chunks[i], chunk_size) != 0) {
+                    buckets_error("Failed to write data chunk %u", i);
+                    buckets_ec_free(&ec_ctx);
+                    result = -1;
+                    goto cleanup_chunks;
+                }
+            }
+            for (u32 i = 0; i < m; i++) {
+                if (buckets_write_chunk(disk_path, object_path, k + i + 1,
+                                       parity_chunks[i], chunk_size) != 0) {
+                    buckets_error("Failed to write parity chunk %u", i);
+                    buckets_ec_free(&ec_ctx);
+                    result = -1;
+                    goto cleanup_chunks;
+                }
+            }
+            
+            /* Write xl.meta to single disk */
+            result = buckets_write_xl_meta(disk_path, object_path, &meta);
         }
-        
-        /* Write xl.meta */
-        result = buckets_write_xl_meta(disk_path, object_path, &meta);
         
         buckets_ec_free(&ec_ctx);
         
@@ -340,6 +457,18 @@ cleanup_chunks:
     }
     
     buckets_xl_meta_free(&meta);
+    
+    /* Record in registry if write succeeded */
+    if (result == 0) {
+        extern void record_object_location(const char *bucket, const char *object,
+                                          size_t size, buckets_placement_result_t *placement);
+        record_object_location(bucket, object, size, placement);
+    }
+    
+    /* Free placement result */
+    if (placement) {
+        buckets_placement_free_result(placement);
+    }
     
     if (result == 0) {
         buckets_info("Object written with metadata: %s/%s (size=%zu, versioned=%d)",

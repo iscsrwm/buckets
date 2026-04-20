@@ -33,6 +33,14 @@ char* buckets_xl_meta_to_json(const buckets_xl_meta_t *meta)
     /* Version and format */
     cJSON_AddNumberToObject(root, "version", meta->version);
     cJSON_AddStringToObject(root, "format", meta->format);
+    
+    /* Object identity (for listing) */
+    if (meta->bucket) {
+        cJSON_AddStringToObject(root, "bucket", meta->bucket);
+    }
+    if (meta->object) {
+        cJSON_AddStringToObject(root, "object", meta->object);
+    }
 
     /* Stat */
     cJSON *stat = cJSON_CreateObject();
@@ -159,6 +167,17 @@ int buckets_xl_meta_from_json(const char *json, buckets_xl_meta_t *meta)
     cJSON *format = cJSON_GetObjectItem(root, "format");
     if (format && cJSON_IsString(format)) {
         strncpy(meta->format, format->valuestring, sizeof(meta->format) - 1);
+    }
+    
+    /* Object identity (for listing) */
+    cJSON *bucket = cJSON_GetObjectItem(root, "bucket");
+    if (bucket && cJSON_IsString(bucket)) {
+        meta->bucket = buckets_strdup(bucket->valuestring);
+    }
+    
+    cJSON *object = cJSON_GetObjectItem(root, "object");
+    if (object && cJSON_IsString(object)) {
+        meta->object = buckets_strdup(object->valuestring);
     }
 
     /* Stat */
@@ -354,6 +373,16 @@ void buckets_xl_meta_free(buckets_xl_meta_t *meta)
 {
     if (!meta) {
         return;
+    }
+    
+    /* Free object identity */
+    if (meta->bucket) {
+        buckets_free(meta->bucket);
+        meta->bucket = NULL;
+    }
+    if (meta->object) {
+        buckets_free(meta->object);
+        meta->object = NULL;
     }
 
     /* Free erasure data */

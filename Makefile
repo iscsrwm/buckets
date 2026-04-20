@@ -327,6 +327,10 @@ test-storage: $(TEST_BIN_DIR)/storage/test_object
 	@echo "Running storage tests..."
 	@$(TEST_BIN_DIR)/storage/test_object
 
+test-versioning: $(TEST_BIN_DIR)/storage/test_versioning
+	@echo "Running versioning tests..."
+	@$(TEST_BIN_DIR)/storage/test_versioning
+
 test-scanner: $(TEST_BIN_DIR)/migration/test_scanner
 	@echo "Running migration scanner tests..."
 	@$<
@@ -391,6 +395,10 @@ test-s3-multipart: $(TEST_BIN_DIR)/s3/test_s3_multipart
 	@echo "Running S3 multipart upload tests..."
 	@$<
 
+test-s3-auth: $(TEST_BIN_DIR)/s3/test_s3_auth
+	@echo "Running S3 authentication tests..."
+	@$<
+
 # Test binaries (Criterion-based tests)
 $(TEST_BIN_DIR)/cluster/test_format: $(TEST_DIR)/cluster/test_format.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
@@ -453,6 +461,11 @@ $(TEST_BIN_DIR)/crypto/test_sha256: $(TEST_DIR)/crypto/test_sha256.c $(BUILD_DIR
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
 
 $(TEST_BIN_DIR)/storage/test_object: $(TEST_DIR)/storage/test_object.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lisal -lcriterion
+
+$(TEST_BIN_DIR)/storage/test_versioning: $(TEST_DIR)/storage/test_versioning.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
 	@echo "CC TEST $<"
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lisal -lcriterion
@@ -533,6 +546,11 @@ $(TEST_BIN_DIR)/s3/test_s3_buckets: $(TEST_DIR)/s3/test_s3_buckets.c $(BUILD_DIR
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
 
 $(TEST_BIN_DIR)/s3/test_s3_multipart: $(TEST_DIR)/s3/test_s3_multipart.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
+
+$(TEST_BIN_DIR)/s3/test_s3_auth: $(TEST_DIR)/s3/test_s3_auth.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)
 	@echo "CC TEST $<"
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion

@@ -16,6 +16,9 @@
  * Request Parsing
  * ===================================================================*/
 
+/* Forward declaration */
+static void url_decode_inplace(char *str);
+
 /**
  * Parse S3 path: /bucket/key or /bucket or /
  */
@@ -70,11 +73,17 @@ static int parse_s3_path(const char *uri, buckets_s3_request_t *req)
     strncpy(req->key, key, key_len);
     req->key[key_len] = '\0';
     
+    /* URL-decode bucket and key - they come encoded from the HTTP layer
+     * but storage operations expect decoded names. This matches the
+     * streaming handler which also decodes before storing objects. */
+    url_decode_inplace(req->bucket);
+    url_decode_inplace(req->key);
+    
     return BUCKETS_OK;
 }
 
 /**
- * URL decode a string in-place
+ * URL decode a string into destination buffer
  * Converts %XX hex codes to characters
  */
 static void url_decode(char *dst, const char *src)
@@ -102,11 +111,48 @@ static void url_decode(char *dst, const char *src)
     *dst = '\0';
 }
 
+/**
+ * URL decode a string in-place
+ * Safe because decoded string is always <= original length
+ */
+static void url_decode_inplace(char *str)
+{
+    char *src = str;
+    char *dst = str;
+    char a, b;
+    
+    while (*src) {
+        if ((*src == '%') &&
+            ((a = src[1]) && (b = src[2])) &&
+            (isxdigit((unsigned char)a) && isxdigit((unsigned char)b))) {
+            if (a >= 'a') a -= 'a'-'A';
+            if (a >= 'A') a -= ('A' - 10);
+            else a -= '0';
+            if (b >= 'a') b -= 'a'-'A';
+            if (b >= 'A') b -= ('A' - 10);
+            else b -= '0';
+            *dst++ = 16*a+b;
+            src += 3;
+        } else if (*src == '+') {
+            *dst++ = ' ';
+            src++;
+        } else {
+            *dst++ = *src++;
+        }
+    }
+    *dst = '\0';
+}
+
 /* External functions from uv_server.c for header access */
 extern const char* uv_http_get_header(void *conn, const char *name);
 extern int uv_http_iterate_headers_with_prefix(void *conn_ptr, const char *prefix,
                                                 void (*callback)(const char *name, const char *value, void *user_data),
                                                 void *user_data);
+
+/* External auth functions from s3_auth.c */
+extern int buckets_s3_parse_auth_header(const char *auth_header, buckets_s3_request_t *req,
+                                         char *date_out, size_t date_len,
+                                         char *region_out, size_t region_len);
 
 /**
  * Get header value from HTTP request (case-insensitive)
@@ -266,8 +312,35 @@ int buckets_s3_parse_request(buckets_http_request_t *http_req,
     
     req->content_length = http_req->body_len;
     
-    /* TODO: Parse Authorization header */
-    /* For now, allow unauthenticated requests for testing */
+    /* Parse x-amz-date header */
+    const char *amz_date = get_header(http_req, "x-amz-date");
+    if (amz_date && amz_date[0] != '\0') {
+        strncpy(req->date, amz_date, sizeof(req->date) - 1);
+    } else {
+        /* Fall back to Date header */
+        const char *date_hdr = get_header(http_req, "Date");
+        if (date_hdr && date_hdr[0] != '\0') {
+            strncpy(req->date, date_hdr, sizeof(req->date) - 1);
+        }
+    }
+    
+    /* Parse Authorization header (AWS Signature V4) */
+    const char *auth_hdr = get_header(http_req, "Authorization");
+    if (auth_hdr && auth_hdr[0] != '\0') {
+        char date_from_auth[32] = {0};
+        char region_from_auth[64] = {0};
+        
+        if (buckets_s3_parse_auth_header(auth_hdr, req, 
+                                          date_from_auth, sizeof(date_from_auth),
+                                          region_from_auth, sizeof(region_from_auth)) == BUCKETS_OK) {
+            /* Store region from credential scope for signature verification */
+            strncpy(req->region, region_from_auth, sizeof(req->region) - 1);
+            req->region[sizeof(req->region) - 1] = '\0';
+            buckets_debug("Parsed Authorization: access_key=%s, region=%s", req->access_key, req->region);
+        } else {
+            buckets_debug("Failed to parse Authorization header");
+        }
+    }
     
     *s3_req = req;
     return BUCKETS_OK;
@@ -370,6 +443,34 @@ void buckets_s3_handler(buckets_http_request_t *req,
         return;
     }
     
+    /* Verify AWS Signature V4 authentication */
+    if (buckets_s3_auth_enabled()) {
+        ret = buckets_s3_verify_signature(s3_req, NULL);
+        if (ret != BUCKETS_OK) {
+            buckets_s3_request_free(s3_req);
+            res->status_code = 403;
+            buckets_http_response_set_header(res, "Content-Type", "application/xml");
+            /* HEAD requests must not have a body per HTTP spec */
+            if (strcmp(req->method, "HEAD") == 0) {
+                res->body = NULL;
+                res->body_len = 0;
+            } else if (ret == BUCKETS_ERR_ACCESS_DENIED) {
+                const char *xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                    "<Error><Code>AccessDenied</Code>"
+                    "<Message>Access Denied</Message></Error>";
+                res->body = buckets_strdup(xml);
+                res->body_len = strlen(xml);
+            } else {
+                const char *xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                    "<Error><Code>SignatureDoesNotMatch</Code>"
+                    "<Message>The request signature we calculated does not match the signature you provided</Message></Error>";
+                res->body = buckets_strdup(xml);
+                res->body_len = strlen(xml);
+            }
+            return;
+        }
+    }
+    
     /* Allocate S3 response */
     buckets_s3_response_t *s3_res = buckets_calloc(1, sizeof(buckets_s3_response_t));
     if (!s3_res) {
@@ -392,8 +493,14 @@ void buckets_s3_handler(buckets_http_request_t *req,
                 ret = buckets_s3_put_object(s3_req, s3_res);
             }
         } else if (s3_req->bucket[0] != '\0') {
-            /* PUT bucket (create bucket) */
-            ret = buckets_s3_put_bucket(s3_req, s3_res);
+            /* Check for bucket versioning configuration */
+            if (buckets_s3_is_versioning_request(s3_req)) {
+                /* PUT /{bucket}?versioning - Set bucket versioning */
+                ret = buckets_s3_put_bucket_versioning(s3_req, s3_res);
+            } else {
+                /* PUT bucket (create bucket) */
+                ret = buckets_s3_put_bucket(s3_req, s3_res);
+            }
         } else {
             buckets_s3_xml_error(s3_res, "InvalidRequest",
                                 "Invalid PUT request", "/");
@@ -404,26 +511,48 @@ void buckets_s3_handler(buckets_http_request_t *req,
             if (has_query_param(s3_req, "uploadId")) {
                 /* GET /{bucket}/{key}?uploadId={id} - List parts */
                 ret = buckets_s3_list_parts(s3_req, s3_res);
+            } else if (buckets_s3_has_version_id(s3_req)) {
+                /* GET /{bucket}/{key}?versionId={id} - Get specific version */
+                ret = buckets_s3_get_object_version(s3_req, s3_res);
             } else {
                 /* GET object */
                 ret = buckets_s3_get_object(s3_req, s3_res);
             }
         } else if (s3_req->bucket[0] != '\0') {
-            /* LIST objects - check for list-type query parameter */
-            /* If list-type=2, use v2 API, otherwise use v1 */
-            const char *list_type = NULL;
-            for (int i = 0; i < s3_req->query_count; i++) {
-                if (s3_req->query_params_keys[i] &&
-                    strcmp(s3_req->query_params_keys[i], "list-type") == 0) {
-                    list_type = s3_req->query_params_values[i];
-                    break;
-                }
-            }
-            
-            if (list_type && strcmp(list_type, "2") == 0) {
-                ret = buckets_s3_list_objects_v2(s3_req, s3_res);
+            /* Check for GetBucketLocation request */
+            if (has_query_param(s3_req, "location")) {
+                /* GET /{bucket}?location - Get bucket location */
+                /* Return us-east-1 as the default region */
+                const char *location_xml = 
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                    "<LocationConstraint xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"/>";
+                s3_res->body = buckets_strdup(location_xml);
+                s3_res->body_len = strlen(location_xml);
+                s3_res->status_code = 200;
+                ret = BUCKETS_OK;
+            } else if (buckets_s3_is_list_versions_request(s3_req)) {
+                /* GET /{bucket}?versions - List object versions */
+                ret = buckets_s3_list_object_versions(s3_req, s3_res);
+            } else if (buckets_s3_is_versioning_request(s3_req)) {
+                /* GET /{bucket}?versioning - Get bucket versioning status */
+                ret = buckets_s3_get_bucket_versioning(s3_req, s3_res);
             } else {
-                ret = buckets_s3_list_objects_v1(s3_req, s3_res);
+                /* LIST objects - check for list-type query parameter */
+                /* If list-type=2, use v2 API, otherwise use v1 */
+                const char *list_type = NULL;
+                for (int i = 0; i < s3_req->query_count; i++) {
+                    if (s3_req->query_params_keys[i] &&
+                        strcmp(s3_req->query_params_keys[i], "list-type") == 0) {
+                        list_type = s3_req->query_params_values[i];
+                        break;
+                    }
+                }
+                
+                if (list_type && strcmp(list_type, "2") == 0) {
+                    ret = buckets_s3_list_objects_v2(s3_req, s3_res);
+                } else {
+                    ret = buckets_s3_list_objects_v1(s3_req, s3_res);
+                }
             }
         } else {
             /* LIST buckets */
@@ -482,7 +611,16 @@ void buckets_s3_handler(buckets_http_request_t *req,
     /* Convert S3 response to HTTP response */
     res->status_code = s3_res->status_code;
     
-    if (s3_res->body) {
+    /* HEAD requests must not have a body per HTTP spec */
+    if (strcmp(method, "HEAD") == 0) {
+        /* Don't send body for HEAD, but preserve Content-Length for object metadata */
+        if (s3_res->body) {
+            buckets_free(s3_res->body);
+            s3_res->body = NULL;
+        }
+        res->body = NULL;
+        res->body_len = 0;
+    } else if (s3_res->body) {
         res->body = s3_res->body;
         res->body_len = s3_res->body_len;
         s3_res->body = NULL;  /* Transfer ownership */
@@ -503,6 +641,12 @@ void buckets_s3_handler(buckets_http_request_t *req,
         buckets_http_response_set_header(res, "Content-Type", "application/xml");
     }
     
+    /* Set version ID header if present */
+    if (s3_res->version_id[0] != '\0') {
+        buckets_http_response_set_header(res, "x-amz-version-id", s3_res->version_id);
+        buckets_debug("Setting response header: x-amz-version-id: %s", s3_res->version_id);
+    }
+    
     /* Set user metadata headers (x-amz-meta-*) */
     for (int i = 0; i < s3_res->user_meta_count; i++) {
         char header_name[256];
@@ -514,8 +658,17 @@ void buckets_s3_handler(buckets_http_request_t *req,
     /* For HEAD requests, set body_len from s3_res->content_length 
      * so the HTTP layer uses it for Content-Length header.
      * We don't send body for HEAD, but Content-Length should be object size. */
-    if (strcmp(method, "HEAD") == 0 && s3_res->content_length > 0) {
-        res->body_len = (size_t)s3_res->content_length;
+    if (strcmp(method, "HEAD") == 0) {
+        buckets_debug("HEAD response: content_length=%lld, body_len=%zu", 
+                      (long long)s3_res->content_length, s3_res->body_len);
+        if (s3_res->content_length > 0) {
+            res->body_len = (size_t)s3_res->content_length;
+            buckets_debug("HEAD: Set res->body_len to %zu for Content-Length", res->body_len);
+        } else if (s3_res->body_len > 0) {
+            /* Fallback: use body_len if content_length wasn't set */
+            res->body_len = s3_res->body_len;
+            buckets_debug("HEAD: Fallback to body_len=%zu for Content-Length", res->body_len);
+        }
     }
     
     /* Cleanup */
