@@ -5,7 +5,7 @@ Deploy Buckets distributed storage to Kubernetes in minutes.
 ## TL;DR
 
 ```bash
-# 1. Build and deploy
+# 1. Deploy (uses pre-built Docker Hub image)
 cd k8s
 ./deploy.sh deploy
 
@@ -17,6 +17,8 @@ cd k8s
 
 # Done! 🎉
 ```
+
+**Image**: `russellmy/buckets:latest` on Docker Hub
 
 ## What Gets Deployed
 

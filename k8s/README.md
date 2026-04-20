@@ -20,28 +20,29 @@ Deploy Buckets distributed object storage across a Kubernetes cluster with true 
 
 ## Quick Start
 
-### 1. Build Docker Image
+### 1. Use Pre-built Docker Image
+
+The official Buckets image is available on Docker Hub:
+
+```bash
+# Pull the image (optional - Kubernetes will pull automatically)
+docker pull russellmy/buckets:latest
+```
+
+**Alternatively, build your own image:**
 
 ```bash
 # From the project root directory
 docker build -f k8s/Dockerfile -t buckets:latest .
 
-# Tag for your registry (if using remote cluster)
+# Tag for your registry
 docker tag buckets:latest your-registry/buckets:latest
 docker push your-registry/buckets:latest
+
+# Update k8s/statefulset.yaml to use your image
 ```
 
-### 2. Update Image Reference
-
-If using a remote registry, edit `k8s/statefulset.yaml`:
-
-```yaml
-containers:
-  - name: buckets
-    image: your-registry/buckets:latest  # Update this
-```
-
-### 3. Deploy to Kubernetes
+### 2. Deploy to Kubernetes
 
 ```bash
 # Create namespace
@@ -57,7 +58,7 @@ kubectl apply -f k8s/service.yaml
 kubectl apply -f k8s/statefulset.yaml
 ```
 
-### 4. Wait for Pods to be Ready
+### 3. Wait for Pods to be Ready
 
 ```bash
 # Watch pod status

@@ -39,7 +39,7 @@ spec:
       initContainers:
         # Format disks on first startup
         - name: format-disks
-          image: buckets:latest
+          image: russellmy/buckets:latest
           imagePullPolicy: IfNotPresent
           command:
             - /bin/sh
@@ -94,8 +94,8 @@ spec:
       
       containers:
         - name: buckets
-          image: buckets:latest
-          imagePullPolicy: IfNotPresent
+          image: russellmy/buckets:latest
+          imagePullPolicy: Always
           command:
             - /app/bin/buckets
             - server
