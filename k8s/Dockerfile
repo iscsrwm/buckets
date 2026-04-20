@@ -11,6 +11,10 @@ RUN apt-get update && apt-get install -y \
     uuid-dev \
     git \
     wget \
+    autoconf \
+    automake \
+    libtool \
+    nasm \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Intel ISA-L (erasure coding library)
