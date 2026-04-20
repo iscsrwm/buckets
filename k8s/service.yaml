@@ -1,0 +1,47 @@
+---
+# Headless service for StatefulSet DNS
+apiVersion: v1
+kind: Service
+metadata:
+  name: buckets-headless
+  namespace: buckets
+  labels:
+    app: buckets
+    component: storage
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: buckets
+    component: storage
+  ports:
+    - name: http
+      port: 9000
+      targetPort: http
+      protocol: TCP
+
+---
+# LoadBalancer service for external S3 access
+apiVersion: v1
+kind: Service
+metadata:
+  name: buckets-lb
+  namespace: buckets
+  labels:
+    app: buckets
+    component: storage
+spec:
+  type: LoadBalancer
+  selector:
+    app: buckets
+    component: storage
+  ports:
+    - name: http
+      port: 9000
+      targetPort: http
+      protocol: TCP
+  # Optional: session affinity for better client experience
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800  # 3 hours

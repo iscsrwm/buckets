@@ -1,0 +1,107 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: buckets-config
+  namespace: buckets
+data:
+  # Node configuration template
+  # Each StatefulSet pod will mount this and customize based on pod ordinal
+  config-template.json: |
+    {
+      "node_id": "node-${POD_ORDINAL}",
+      "listen_port": 9000,
+      "listen_address": "0.0.0.0",
+      "data_dir": "/data",
+      "disks": [
+        "/data/disk1",
+        "/data/disk2",
+        "/data/disk3",
+        "/data/disk4"
+      ],
+      "cluster": {
+        "nodes": [
+          {
+            "id": "node-0",
+            "endpoint": "http://buckets-0.buckets-headless.buckets.svc.cluster.local:9000",
+            "disks": [
+              "/data/disk1",
+              "/data/disk2",
+              "/data/disk3",
+              "/data/disk4"
+            ]
+          },
+          {
+            "id": "node-1",
+            "endpoint": "http://buckets-1.buckets-headless.buckets.svc.cluster.local:9000",
+            "disks": [
+              "/data/disk1",
+              "/data/disk2",
+              "/data/disk3",
+              "/data/disk4"
+            ]
+          },
+          {
+            "id": "node-2",
+            "endpoint": "http://buckets-2.buckets-headless.buckets.svc.cluster.local:9000",
+            "disks": [
+              "/data/disk1",
+              "/data/disk2",
+              "/data/disk3",
+              "/data/disk4"
+            ]
+          },
+          {
+            "id": "node-3",
+            "endpoint": "http://buckets-3.buckets-headless.buckets.svc.cluster.local:9000",
+            "disks": [
+              "/data/disk1",
+              "/data/disk2",
+              "/data/disk3",
+              "/data/disk4"
+            ]
+          },
+          {
+            "id": "node-4",
+            "endpoint": "http://buckets-4.buckets-headless.buckets.svc.cluster.local:9000",
+            "disks": [
+              "/data/disk1",
+              "/data/disk2",
+              "/data/disk3",
+              "/data/disk4"
+            ]
+          },
+          {
+            "id": "node-5",
+            "endpoint": "http://buckets-5.buckets-headless.buckets.svc.cluster.local:9000",
+            "disks": [
+              "/data/disk1",
+              "/data/disk2",
+              "/data/disk3",
+              "/data/disk4"
+            ]
+          }
+        ],
+        "erasure_sets": [
+          {
+            "id": 0,
+            "nodes": ["node-0", "node-1", "node-2"],
+            "disks_per_node": 4,
+            "data_shards": 8,
+            "parity_shards": 4
+          },
+          {
+            "id": 1,
+            "nodes": ["node-3", "node-4", "node-5"],
+            "disks_per_node": 4,
+            "data_shards": 8,
+            "parity_shards": 4
+          }
+        ]
+      },
+      "placement": {
+        "hash_algorithm": "xxhash",
+        "cache_ttl_seconds": 300
+      },
+      "inline_threshold_bytes": 131072
+    }

@@ -1,0 +1,169 @@
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: buckets
+  namespace: buckets
+  labels:
+    app: buckets
+    component: storage
+spec:
+  serviceName: buckets-headless
+  replicas: 6
+  # Parallel pod management for faster startup
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: buckets
+      component: storage
+  template:
+    metadata:
+      labels:
+        app: buckets
+        component: storage
+    spec:
+      # Spread pods across different nodes for true distributed storage
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - buckets
+                topologyKey: kubernetes.io/hostname
+      
+      initContainers:
+        # Format disks on first startup
+        - name: format-disks
+          image: buckets:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              # Check if already formatted
+              if [ -f /data/disk1/.buckets/format.json ]; then
+                echo "Disks already formatted, skipping..."
+                exit 0
+              fi
+              
+              echo "Formatting disks for first time..."
+              /app/bin/buckets format --config /etc/buckets/config.json
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_ORDINAL
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['apps.kubernetes.io/pod-index']
+            - name: UV_THREADPOOL_SIZE
+              value: "64"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /etc/buckets
+        
+        # Generate node-specific config from template
+        - name: generate-config
+          image: busybox:1.36
+          command:
+            - /bin/sh
+            - -c
+            - |
+              # Extract pod ordinal from hostname (buckets-0, buckets-1, etc)
+              POD_ORDINAL=$(echo $HOSTNAME | sed 's/.*-//')
+              echo "Generating config for pod ordinal: $POD_ORDINAL"
+              
+              # Copy template and substitute POD_ORDINAL
+              sed "s/\${POD_ORDINAL}/$POD_ORDINAL/g" /etc/buckets-template/config-template.json > /etc/buckets/config.json
+              
+              echo "Generated config:"
+              cat /etc/buckets/config.json
+          volumeMounts:
+            - name: config-template
+              mountPath: /etc/buckets-template
+            - name: config
+              mountPath: /etc/buckets
+      
+      containers:
+        - name: buckets
+          image: buckets:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /app/bin/buckets
+            - server
+            - --config
+            - /etc/buckets/config.json
+          ports:
+            - name: http
+              containerPort: 9000
+              protocol: TCP
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            # Optimize libuv thread pool for high concurrency
+            - name: UV_THREADPOOL_SIZE
+              value: "64"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /etc/buckets
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: 2000m
+              memory: 4Gi
+      
+      volumes:
+        - name: config-template
+          configMap:
+            name: buckets-config
+        - name: config
+          emptyDir: {}
+  
+  # Persistent storage for each pod
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: cinder # Adjust based on your cluster
+        resources:
+          requests:
+            storage: 20Gi  # Adjust based on needs
