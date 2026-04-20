@@ -381,3 +381,36 @@ For issues, refer to:
 - Project documentation in `docs/`
 - Performance metrics in `docs/BASELINE_METRICS.md`
 - Optimization guide in `docs/PERFORMANCE_OPTIMIZATION_SUMMARY.txt`
+
+---
+
+## Deployment Success (April 20, 2026)
+
+### ✅ Production Deployment Completed
+
+**Cluster Configuration:**
+- 6 pods (buckets-0 through buckets-5) - all healthy
+- 24 PVCs total (4 disks per pod, each as separate physical volume)
+- 480GB total storage (6 nodes × 4 disks × 20GB)
+- 2 erasure sets with K=8 data + M=4 parity shards
+
+**Architecture Improvements:**
+1. **Multi-PVC per Pod**: Each pod has 4 separate PVCs instead of 1 shared PVC with directories
+   - Each disk is a physical volume (`/dev/vdX`)
+   - True failure isolation per disk
+   - Better I/O distribution
+
+2. **Init Container Fixes**:
+   - Correct format file path: `.buckets.sys/format.json`
+   - Permissions fixed on all 4 disk mounts
+   - Config generation before disk formatting
+
+3. **Health Probes**: TCP socket probes on port 9000 (no auth required)
+
+**Deployment Metrics:**
+- Pod startup time: ~80 seconds from creation to ready
+- All init containers complete successfully
+- No CrashLoopBackOff issues
+- Docker image: `russellmy/buckets:latest` (87MB)
+
+See `MIGRATE_TO_MULTI_PVC.md` for architecture migration details.
