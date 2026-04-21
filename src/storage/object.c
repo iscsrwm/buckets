@@ -298,37 +298,12 @@ int buckets_put_object(const char *bucket, const char *object,
         /* Encode as base64 */
         meta.inline_data = base64_encode((const u8*)data, size);
         
-        /* Check if we have placement for distributed write */
-        bool has_endpoints = (placement && placement->disk_endpoints && 
-                             placement->disk_endpoints[0] && 
-                             placement->disk_endpoints[0][0] != '\0');
-        
-        if (has_endpoints && placement->disk_count > 0) {
-            /* Distributed inline: replicate xl.meta to all disks in the set */
-            buckets_info("Distributed inline write: replicating xl.meta to %u disks", 
-                        placement->disk_count);
-            
-            extern int buckets_parallel_write_metadata(const char *bucket,
-                                                       const char *object,
-                                                       const char *object_path,
-                                                       buckets_placement_result_t *placement,
-                                                       char **disk_paths,
-                                                       const buckets_xl_meta_t *base_meta,
-                                                       u32 num_disks,
-                                                       bool has_endpoints);
-            
-            /* Ensure object directory exists on primary disk (others created by RPC) */
-            extern int buckets_create_object_dir(const char *disk_path, const char *object_path);
-            buckets_create_object_dir(disk_path, object_path);
-            
-            result = buckets_parallel_write_metadata(bucket, object, object_path,
-                                                     placement, placement->disk_paths,
-                                                     &meta, placement->disk_count, 
-                                                     has_endpoints);
-        } else {
-            /* Local-only inline: write xl.meta to single disk */
-            result = buckets_write_xl_meta(disk_path, object_path, &meta);
-        }
+        /* For inline objects (< 128KB), write locally only for performance.
+         * Distributed replication can happen asynchronously in background.
+         * This gives us fast writes for small objects while maintaining the
+         * option to add async replication later. */
+        buckets_info("Inline object write: local-only for performance (size=%zu)", size);
+        result = buckets_write_xl_meta(disk_path, object_path, &meta);
         
         /* Record in registry if write succeeded */
         if (result == 0) {

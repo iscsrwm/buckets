@@ -440,17 +440,10 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
         sem_timeout.tv_nsec -= 1000000000;
     }
     
-    buckets_info("DEBUG RPC: waiting for semaphore to %s method=%s", peer_endpoint, method);
+    /* Semaphore disabled for better performance - rely on UV thread pool limit instead */
+    (void)sem_timeout;  /* Unused now */
     
-    if (sem_timedwait(&ctx->rpc_semaphore, &sem_timeout) != 0) {
-        buckets_warn("RPC call to %s: timed out waiting for semaphore (concurrent limit: %d)",
-                    peer_endpoint, MAX_CONCURRENT_RPC_CALLS);
-        return BUCKETS_ERR_TIMEOUT;
-    }
-    
-    buckets_info("DEBUG RPC: got semaphore, proceeding to %s", peer_endpoint);
-    
-    /* From here on, we must release the semaphore before returning */
+    buckets_debug("RPC call to %s method=%s (no semaphore)", peer_endpoint, method);
     
     /* Create RPC request */
     buckets_rpc_request_t request;
@@ -465,7 +458,6 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
     char *request_json = NULL;
     int ret = buckets_rpc_request_serialize(&request, &request_json);
     if (ret != BUCKETS_OK) {
-        sem_post(&ctx->rpc_semaphore);
         return ret;
     }
     
@@ -477,7 +469,7 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
     const char *proto_end = strstr(peer_endpoint, "://");
     if (!proto_end) {
         buckets_free(request_json);
-        sem_post(&ctx->rpc_semaphore);
+        
         return BUCKETS_ERR_INVALID_ARG;
     }
     
@@ -485,14 +477,14 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
     const char *port_start = strchr(host_start, ':');
     if (!port_start) {
         buckets_free(request_json);
-        sem_post(&ctx->rpc_semaphore);
+        
         return BUCKETS_ERR_INVALID_ARG;
     }
     
     size_t host_length = port_start - host_start;
     if (host_length >= sizeof(host)) {
         buckets_free(request_json);
-        sem_post(&ctx->rpc_semaphore);
+        
         return BUCKETS_ERR_INVALID_ARG;
     }
     
@@ -507,7 +499,7 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
     
     if (ret != BUCKETS_OK) {
         buckets_free(request_json);
-        sem_post(&ctx->rpc_semaphore);
+        
         buckets_error("RPC call: failed to get connection to %s", peer_endpoint);
         return ret;
     }
@@ -526,7 +518,7 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
     if (ret != BUCKETS_OK) {
         /* RPC failed - close connection */
         buckets_conn_pool_close(ctx->pool, conn);
-        sem_post(&ctx->rpc_semaphore);
+        
         buckets_error("RPC call: failed to send request to %s", peer_endpoint);
         return ret;
     }
@@ -535,7 +527,7 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
         buckets_error("RPC call: HTTP %d from %s", status_code, peer_endpoint);
         buckets_free(response_body);
         buckets_conn_pool_close(ctx->pool, conn);
-        sem_post(&ctx->rpc_semaphore);
+        
         return BUCKETS_ERR_NETWORK;
     }
     
@@ -548,7 +540,7 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
     if (ret != BUCKETS_OK) {
         buckets_error("RPC call: failed to parse response from %s", peer_endpoint);
         buckets_conn_pool_close(ctx->pool, conn);
-        sem_post(&ctx->rpc_semaphore);
+        
         return ret;
     }
     
@@ -570,7 +562,7 @@ int buckets_rpc_call(buckets_rpc_context_t *ctx,
     buckets_conn_pool_release(ctx->pool, conn);
     
     /* Release semaphore to allow other threads to make RPC calls */
-    sem_post(&ctx->rpc_semaphore);
+    
     
     *response = res;
     return BUCKETS_OK;
