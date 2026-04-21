@@ -1,0 +1,57 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-worker-pool
+  namespace: buckets
+spec:
+  # Don't retry - one run is enough
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: russellmy/buckets-benchmark:go
+        imagePullPolicy: Always
+        env:
+        - name: TARGET_URL
+          value: "http://buckets-0.buckets-headless.buckets.svc.cluster.local:9000"
+        - name: WORKERS
+          value: "50"
+        - name: DURATION
+          value: "30s"
+        - name: SIZE
+          value: "256KB"
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "========================================"
+          echo "WORKER POOL PERFORMANCE BENCHMARK"
+          echo "========================================"
+          echo ""
+          echo "Configuration:"
+          echo "  Target: $TARGET_URL"
+          echo "  Workers: $WORKERS concurrent workers"
+          echo "  Duration: $DURATION"
+          echo "  Object size: $SIZE"
+          echo "  Test type: HTTP PUT (256KB objects)"
+          echo ""
+          echo "========================================"
+          echo ""
+          
+          # Run benchmark
+          /benchmark \
+            -endpoint="$TARGET_URL" \
+            -workers=$WORKERS \
+            -duration=$DURATION \
+            -size=262144
+          
+          EXIT_CODE=$?
+          
+          echo ""
+          echo "========================================"
+          echo "Benchmark completed (exit code: $EXIT_CODE)"
+          echo "========================================"
+          
+          exit $EXIT_CODE

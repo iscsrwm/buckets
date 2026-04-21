@@ -1,0 +1,147 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: benchmark-direct-http
+  namespace: buckets
+data:
+  benchmark.sh: |
+    #!/bin/bash
+    set -e
+    
+    echo "========================================================================"
+    echo "Direct HTTP Performance Benchmark - No S3 SDK Overhead"
+    echo "========================================================================"
+    echo "Target: buckets-0.buckets-headless.buckets.svc.cluster.local:9000"
+    echo "Method: Direct PUT via curl (bypasses boto3 overhead)"
+    echo "Object Size: 256 KB"
+    echo "Workers: 50 concurrent"
+    echo "Duration: 30 seconds"
+    echo "========================================================================"
+    echo ""
+    
+    # Generate test data
+    echo "[1/4] Generating 256KB test data..."
+    dd if=/dev/urandom of=/tmp/testdata.bin bs=262144 count=1 2>/dev/null
+    MD5=$(md5sum /tmp/testdata.bin | awk '{print $1}')
+    echo "      ✓ Data generated (MD5: $MD5)"
+    echo ""
+    
+    # Create bucket
+    echo "[2/4] Creating bucket..."
+    curl -s -X PUT "http://buckets-0.buckets-headless.buckets.svc.cluster.local:9000/benchmark-direct" > /dev/null
+    echo "      ✓ Bucket created"
+    echo ""
+    
+    # Run benchmark
+    echo "[3/4] Running 50-worker benchmark for 30 seconds..."
+    START_TIME=$(date +%s)
+    END_TIME=$((START_TIME + 30))
+    TOTAL_OPS=0
+    FAILED_OPS=0
+    
+    # Function to upload objects
+    upload_worker() {
+        WORKER_ID=$1
+        OPS=0
+        FAILED=0
+        
+        while [ $(date +%s) -lt $END_TIME ]; do
+            KEY="worker-${WORKER_ID}/obj-$(printf "%06d" $OPS).bin"
+            
+            # Upload with curl (direct HTTP, no S3 SDK)
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+                -X PUT \
+                -H "Content-Type: application/octet-stream" \
+                --data-binary @/tmp/testdata.bin \
+                "http://buckets-0.buckets-headless.buckets.svc.cluster.local:9000/benchmark-direct/$KEY")
+            
+            if [ "$HTTP_CODE" = "200" ]; then
+                OPS=$((OPS + 1))
+            else
+                FAILED=$((FAILED + 1))
+            fi
+            
+            # Small delay to avoid overwhelming
+            sleep 0.01
+        done
+        
+        echo "$OPS $FAILED"
+    }
+    
+    # Launch workers in parallel
+    for i in $(seq 0 49); do
+        upload_worker $i > /tmp/worker-$i.result &
+    done
+    
+    # Wait for all workers
+    wait
+    
+    ACTUAL_DURATION=$(($(date +%s) - START_TIME))
+    
+    # Collect results
+    for i in $(seq 0 49); do
+        if [ -f /tmp/worker-$i.result ]; then
+            read OPS FAILED < /tmp/worker-$i.result
+            TOTAL_OPS=$((TOTAL_OPS + OPS))
+            FAILED_OPS=$((FAILED_OPS + FAILED))
+        fi
+    done
+    
+    echo "      ✓ Benchmark complete"
+    echo ""
+    
+    # Calculate metrics
+    THROUGHPUT=$(echo "scale=2; $TOTAL_OPS / $ACTUAL_DURATION" | bc)
+    AVG_LATENCY=$(echo "scale=2; $ACTUAL_DURATION * 1000 / $TOTAL_OPS" | bc)
+    BANDWIDTH=$(echo "scale=2; $THROUGHPUT * 256 / 1024" | bc)
+    DATA_WRITTEN=$(echo "scale=2; $TOTAL_OPS * 256 / 1024" | bc)
+    
+    # Print results
+    echo "[4/4] Results:"
+    echo "========================================================================"
+    echo "Total Operations:    $TOTAL_OPS"
+    echo "Failed Operations:   $FAILED_OPS"
+    echo "Actual Duration:     ${ACTUAL_DURATION}s"
+    echo "Throughput:          ${THROUGHPUT} ops/sec"
+    echo "Average Latency:     ${AVG_LATENCY} ms"
+    echo "Bandwidth:           ${BANDWIDTH} MB/s"
+    echo "Data Written:        ${DATA_WRITTEN} MB"
+    echo "========================================================================"
+    echo ""
+    echo "✓ Benchmark complete!"
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-direct-http
+  namespace: buckets
+spec:
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: benchmark
+          image: alpine:3.19
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              apk add --no-cache curl bc > /dev/null 2>&1
+              sh /scripts/benchmark.sh
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "1000m"
+            limits:
+              memory: "512Mi"
+              cpu: "2000m"
+      volumes:
+        - name: scripts
+          configMap:
+            name: benchmark-direct-http
+            defaultMode: 0755

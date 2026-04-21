@@ -9,11 +9,92 @@
 #include <string.h>
 #include <limits.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <libgen.h>
+#include <errno.h>
+#include <pthread.h>
 
 #include "buckets.h"
 #include "buckets_storage.h"
 #include "buckets_crypto.h"
 #include "buckets_io.h"
+#include "buckets_group_commit.h"
+
+/* ===================================================================
+ * Directory Cache (avoids repeated ensure_directory calls)
+ * ===================================================================*/
+
+#define DIR_CACHE_SIZE 1024
+
+typedef struct {
+    char paths[DIR_CACHE_SIZE][PATH_MAX];
+    int count;
+    pthread_mutex_t lock;
+} directory_cache_t;
+
+static directory_cache_t g_dir_cache = {0};
+static pthread_once_t g_dir_cache_once = PTHREAD_ONCE_INIT;
+
+static void init_dir_cache(void)
+{
+    pthread_mutex_init(&g_dir_cache.lock, NULL);
+    g_dir_cache.count = 0;
+}
+
+static bool is_dir_cached(const char *path)
+{
+    pthread_once(&g_dir_cache_once, init_dir_cache);
+    
+    pthread_mutex_lock(&g_dir_cache.lock);
+    
+    for (int i = 0; i < g_dir_cache.count; i++) {
+        if (strcmp(g_dir_cache.paths[i], path) == 0) {
+            pthread_mutex_unlock(&g_dir_cache.lock);
+            return true;
+        }
+    }
+    
+    pthread_mutex_unlock(&g_dir_cache.lock);
+    return false;
+}
+
+static void cache_dir(const char *path)
+{
+    pthread_once(&g_dir_cache_once, init_dir_cache);
+    
+    pthread_mutex_lock(&g_dir_cache.lock);
+    
+    /* Simple ring buffer - overwrite oldest if full */
+    int idx = g_dir_cache.count % DIR_CACHE_SIZE;
+    snprintf(g_dir_cache.paths[idx], PATH_MAX, "%s", path);
+    
+    if (g_dir_cache.count < DIR_CACHE_SIZE) {
+        g_dir_cache.count++;
+    }
+    
+    pthread_mutex_unlock(&g_dir_cache.lock);
+}
+
+static int ensure_directory_cached(const char *path)
+{
+    /* Fast path: already cached */
+    if (is_dir_cached(path)) {
+        return BUCKETS_OK;
+    }
+    
+    /* Slow path: create and cache */
+    int ret = buckets_ensure_directory(path);
+    if (ret == BUCKETS_OK) {
+        cache_dir(path);
+    }
+    
+    return ret;
+}
+
+/* ===================================================================
+ * Chunk I/O Operations
+ * ===================================================================*/
 
 /* Read chunk from disk */
 int buckets_read_chunk(const char *disk_path, const char *object_path,
@@ -38,7 +119,7 @@ int buckets_read_chunk(const char *disk_path, const char *object_path,
     return 0;
 }
 
-/* Write chunk to disk (atomic) */
+/* Write chunk to disk with group commit optimization */
 int buckets_write_chunk(const char *disk_path, const char *object_path,
                         u32 chunk_index, const void *data, size_t size)
 {
@@ -52,13 +133,66 @@ int buckets_write_chunk(const char *disk_path, const char *object_path,
     snprintf(chunk_path, sizeof(chunk_path), "%s/%spart.%u",
              disk_path, object_path, chunk_index);
 
-    /* Write chunk atomically */
-    if (buckets_atomic_write(chunk_path, data, size) != 0) {
-        buckets_error("Failed to write chunk: %s", chunk_path);
-        return -1;
+    /* Try to use group commit if available */
+    buckets_group_commit_context_t *gc_ctx = buckets_storage_get_group_commit_ctx();
+    
+    if (gc_ctx) {
+        /* Optimized path: write with group commit (batched fsync) */
+        static bool logged_once = false;
+        if (!logged_once) {
+            buckets_info("✓ Group commit enabled for chunk writes (batched fsync)");
+            logged_once = true;
+        }
+        
+        /* Ensure parent directory exists (with caching) */
+        char *path_copy = buckets_strdup(chunk_path);
+        char *dir_name = dirname(path_copy);
+        char *dir_path = buckets_strdup(dir_name);
+        buckets_free(path_copy);
+        
+        int ret = ensure_directory_cached(dir_path);
+        buckets_free(dir_path);
+        
+        if (ret != BUCKETS_OK) {
+            return -1;
+        }
+        
+        /* Open file for writing */
+        int fd = open(chunk_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) {
+            buckets_error("Failed to open chunk file %s: %s", chunk_path, strerror(errno));
+            return -1;
+        }
+        
+        /* Write with group commit */
+        ssize_t written = buckets_group_commit_write(gc_ctx, fd, data, size);
+        
+        if (written != (ssize_t)size) {
+            close(fd);
+            buckets_error("Failed to write chunk %s: written=%zd expected=%zu", 
+                         chunk_path, written, size);
+            unlink(chunk_path);
+            return -1;
+        }
+        
+        /* Flush this fd before closing (important!) */
+        if (buckets_group_commit_flush_fd(gc_ctx, fd) != 0) {
+            close(fd);
+            buckets_error("Failed to flush chunk %s", chunk_path);
+            unlink(chunk_path);
+            return -1;
+        }
+        
+        close(fd);
+        return 0;
+    } else {
+        /* Fallback: use atomic write with immediate fsync */
+        if (buckets_atomic_write(chunk_path, data, size) != 0) {
+            buckets_error("Failed to write chunk: %s", chunk_path);
+            return -1;
+        }
+        return 0;
     }
-
-    return 0;
 }
 
 /* Verify chunk checksum */

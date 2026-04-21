@@ -1,0 +1,59 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-curl-simple
+  namespace: buckets
+spec:
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: benchmark
+          image: alpine:3.19
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              apk add --no-cache curl bc > /dev/null 2>&1
+              
+              echo "=========================================="
+              echo "Simple Curl Benchmark - No Python Overhead"
+              echo "=========================================="
+              echo "Target: buckets-0.buckets-headless"
+              echo "Workers: Sequential (no concurrency)"
+              echo "Count: 100 uploads"
+              echo "=========================================="
+              echo ""
+              
+              # Generate test data
+              dd if=/dev/urandom of=/tmp/test.bin bs=262144 count=1 2>/dev/null
+              
+              # Run 100 uploads sequentially and measure time
+              START=$(date +%s.%N)
+              
+              for i in $(seq 1 100); do
+                curl -s -X PUT --data-binary @/tmp/test.bin \
+                  http://buckets-0.buckets-headless.buckets.svc.cluster.local:9000/testbucket/obj-$i.bin \
+                  > /dev/null
+              done
+              
+              END=$(date +%s.%N)
+              
+              # Calculate metrics
+              DURATION=$(echo "$END - $START" | bc)
+              OPS=$(echo "100 / $DURATION" | bc -l)
+              AVG_LATENCY=$(echo "$DURATION * 1000 / 100" | bc -l)
+              
+              echo ""
+              echo "Results:"
+              echo "=========================================="
+              printf "Total Operations:    100\n"
+              printf "Duration:            %.2f seconds\n" $DURATION
+              printf "Throughput:          %.2f ops/sec\n" $OPS
+              printf "Average Latency:     %.2f ms\n" $AVG_LATENCY
+              echo "=========================================="
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "500m"

@@ -1,0 +1,72 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-cluster-wide
+  namespace: buckets
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: russellmy/buckets-benchmark:go
+        imagePullPolicy: Always
+        env:
+        - name: TARGET_URL
+          value: "http://buckets-lb.buckets.svc.cluster.local:9000"
+        - name: WORKERS
+          value: "200"
+        - name: DURATION
+          value: "60s"
+        - name: SIZE
+          value: "256KB"
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "========================================"
+          echo "CLUSTER-WIDE LOAD TEST"
+          echo "========================================"
+          echo ""
+          echo "Configuration:"
+          echo "  Target: LoadBalancer (distributes to ALL 6 pods)"
+          echo "  URL: $TARGET_URL"
+          echo "  Workers: $WORKERS concurrent workers"
+          echo "  Duration: $DURATION"
+          echo "  Object size: $SIZE"
+          echo "  Operation: HTTP PUT (256KB objects)"
+          echo ""
+          echo "Expected Performance:"
+          echo "  - Single pod: ~162 ops/sec"
+          echo "  - 6 pods: ~900-1000 ops/sec (theoretical)"
+          echo ""
+          echo "========================================"
+          echo ""
+          
+          # Run benchmark
+          /benchmark \
+            -endpoint="$TARGET_URL" \
+            -workers=200 \
+            -duration=60s \
+            -size=262144
+          
+          EXIT_CODE=$?
+          
+          echo ""
+          echo "========================================"
+          echo "CLUSTER-WIDE TEST COMPLETE"
+          echo "========================================"
+          echo ""
+          echo "Next steps:"
+          echo "  1. Check if throughput scaled linearly (6x single pod)"
+          echo "  2. Verify data distributed across all pods"
+          echo "  3. Check for any pod-level bottlenecks"
+          echo ""
+          echo "To verify data distribution:"
+          echo "  kubectl -n buckets exec buckets-0 -- ls -lh /data/disk1/buckets/"
+          echo "  kubectl -n buckets exec buckets-1 -- ls -lh /data/disk1/buckets/"
+          echo "  ... (repeat for all pods)"
+          echo ""
+          
+          exit $EXIT_CODE

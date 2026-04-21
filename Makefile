@@ -274,7 +274,7 @@ s3: $(S3_OBJ)
 admin: $(ADMIN_OBJ)
 
 # Tests
-test: test-format test-topology test-endpoint test-erasure test-scanner test-worker test-orchestrator test-throttle test-checkpoint test-http-server test-router test-conn-pool test-peer-grid test-rpc test-broadcast test-s3-xml test-s3-ops test-s3-buckets
+test: test-format test-topology test-endpoint test-erasure test-group-commit test-scanner test-worker test-orchestrator test-throttle test-checkpoint test-http-server test-router test-conn-pool test-peer-grid test-rpc test-broadcast test-s3-xml test-s3-ops test-s3-buckets
 
 test-format: $(TEST_BIN_DIR)/cluster/test_format
 	@echo "Running format tests..."
@@ -330,6 +330,10 @@ test-storage: $(TEST_BIN_DIR)/storage/test_object
 test-versioning: $(TEST_BIN_DIR)/storage/test_versioning
 	@echo "Running versioning tests..."
 	@$(TEST_BIN_DIR)/storage/test_versioning
+
+test-group-commit: $(TEST_BIN_DIR)/storage/test_group_commit
+	@echo "Running group commit tests..."
+	@$(TEST_BIN_DIR)/storage/test_group_commit
 
 test-scanner: $(TEST_BIN_DIR)/migration/test_scanner
 	@echo "Running migration scanner tests..."
@@ -469,6 +473,11 @@ $(TEST_BIN_DIR)/storage/test_versioning: $(TEST_DIR)/storage/test_versioning.c $
 	@mkdir -p $(dir $@)
 	@echo "CC TEST $<"
 	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lisal -lcriterion
+
+$(TEST_BIN_DIR)/storage/test_group_commit: $(TEST_DIR)/storage/test_group_commit.c $(BUILD_DIR)/libbuckets.a
+	@mkdir -p $(dir $@)
+	@echo "CC TEST $<"
+	@$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(BUILD_DIR)/libbuckets.a $(LDFLAGS) -lcriterion
 
 $(TEST_BIN_DIR)/migration/test_scanner: $(TEST_DIR)/migration/test_scanner.c $(BUILD_DIR)/libbuckets.a
 	@mkdir -p $(dir $@)

@@ -1,0 +1,27 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-go
+  namespace: buckets
+spec:
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: benchmark
+          image: russellmy/buckets-benchmark:go
+          args:
+            - "-endpoint=http://buckets-lb.buckets.svc.cluster.local:9000"
+            - "-bucket=benchmark-go"
+            - "-workers=50"
+            - "-duration=30s"
+            - "-size=262144"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "1000m"
+            limits:
+              memory: "512Mi"
+              cpu: "2000m"

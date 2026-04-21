@@ -1,0 +1,196 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: benchmark-group-commit
+  namespace: buckets
+data:
+  benchmark.py: |
+    #!/usr/bin/env python3
+    """
+    Kubernetes cluster benchmark for group commit optimization.
+    Tests upload throughput with multiple concurrent workers.
+    """
+    import os
+    import sys
+    import time
+    import hashlib
+    import concurrent.futures
+    import boto3
+    from botocore.client import Config
+    
+    # Configuration
+    ENDPOINT = os.getenv('ENDPOINT', 'http://buckets-lb.buckets.svc.cluster.local:9000')
+    ACCESS_KEY = 'minioadmin'
+    SECRET_KEY = 'minioadmin'
+    BUCKET = 'benchmark-group-commit'
+    
+    # Test parameters
+    OBJECT_SIZE = 256 * 1024  # 256KB - triggers erasure coding
+    NUM_WORKERS = 10  # Reduced to test connection handling
+    DURATION_SECS = 30
+    
+    def get_s3_client():
+        return boto3.client(
+            's3',
+            endpoint_url=ENDPOINT,
+            aws_access_key_id=ACCESS_KEY,
+            aws_secret_access_key=SECRET_KEY,
+            config=Config(
+                signature_version='s3v4',
+                retries={'max_attempts': 0},  # Disable retries
+                connect_timeout=2,
+                read_timeout=10
+            ),
+            region_name='us-east-1'
+        )
+    
+    def upload_object(client, key, data):
+        """Upload a single object and return success/failure."""
+        try:
+            start = time.time()
+            client.put_object(Bucket=BUCKET, Key=key, Body=data)
+            duration = time.time() - start
+            return True, duration
+        except Exception as e:
+            print(f"Upload failed for {key}: {e}", file=sys.stderr)
+            return False, 0
+    
+    def worker_thread(worker_id, start_time, end_time, data):
+        """Worker thread that uploads objects until time expires."""
+        client = get_s3_client()
+        ops = 0
+        total_time = 0
+        
+        while time.time() < end_time:
+            key = f"worker-{worker_id}/obj-{ops:06d}.bin"
+            success, duration = upload_object(client, key, data)
+            if success:
+                ops += 1
+                total_time += duration
+            
+            # Small sleep to avoid overwhelming the cluster
+            time.sleep(0.01)
+        
+        return ops, total_time
+    
+    def main():
+        print("=" * 70)
+        print("Buckets Group Commit Benchmark - Kubernetes Cluster")
+        print("=" * 70)
+        print(f"Endpoint:     {ENDPOINT}")
+        print(f"Object Size:  {OBJECT_SIZE / 1024:.0f} KB")
+        print(f"Workers:      {NUM_WORKERS}")
+        print(f"Duration:     {DURATION_SECS} seconds")
+        print("=" * 70)
+        
+        # Create S3 client
+        client = get_s3_client()
+        
+        # Create bucket
+        print(f"\n[1/4] Creating bucket '{BUCKET}'...")
+        try:
+            client.create_bucket(Bucket=BUCKET)
+            print(f"      ✓ Bucket created")
+        except client.exceptions.BucketAlreadyOwnedByYou:
+            print(f"      ✓ Bucket already exists")
+        except Exception as e:
+            print(f"      ✗ Failed to create bucket: {e}")
+            return 1
+        
+        # Generate test data
+        print(f"\n[2/4] Generating {OBJECT_SIZE / 1024:.0f} KB test data...")
+        data = os.urandom(OBJECT_SIZE)
+        md5 = hashlib.md5(data).hexdigest()
+        print(f"      ✓ Data generated (MD5: {md5})")
+        
+        # Run benchmark
+        print(f"\n[3/4] Running {NUM_WORKERS}-worker benchmark for {DURATION_SECS} seconds...")
+        start_time = time.time()
+        end_time = start_time + DURATION_SECS
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+            futures = [
+                executor.submit(worker_thread, i, start_time, end_time, data)
+                for i in range(NUM_WORKERS)
+            ]
+            
+            # Wait for all workers to complete
+            results = [f.result() for f in futures]
+        
+        actual_duration = time.time() - start_time
+        
+        # Collect results
+        total_ops = sum(r[0] for r in results)
+        total_time = sum(r[1] for r in results)
+        
+        # Calculate metrics
+        throughput = total_ops / actual_duration
+        avg_latency = (total_time / total_ops * 1000) if total_ops > 0 else 0
+        bandwidth_mbps = (throughput * OBJECT_SIZE) / (1024 * 1024)
+        
+        print(f"      ✓ Benchmark complete")
+        
+        # Print results
+        print(f"\n[4/4] Results:")
+        print("=" * 70)
+        print(f"Total Operations:    {total_ops}")
+        print(f"Actual Duration:     {actual_duration:.2f} seconds")
+        print(f"Throughput:          {throughput:.2f} ops/sec")
+        print(f"Average Latency:     {avg_latency:.2f} ms")
+        print(f"Bandwidth:           {bandwidth_mbps:.2f} MB/s")
+        print(f"Data Written:        {total_ops * OBJECT_SIZE / (1024*1024):.2f} MB")
+        print("=" * 70)
+        
+        # Per-worker breakdown
+        print("\nPer-Worker Breakdown:")
+        for i, (ops, total_t) in enumerate(results[:10]):  # Show first 10 workers
+            avg_lat = (total_t / ops * 1000) if ops > 0 else 0
+            print(f"  Worker {i:2d}: {ops:3d} ops, avg latency {avg_lat:.2f} ms")
+        if len(results) > 10:
+            print(f"  ... (showing 10 of {NUM_WORKERS} workers)")
+        
+        print("\n✓ Benchmark complete!")
+        return 0
+    
+    if __name__ == '__main__':
+        sys.exit(main())
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-group-commit
+  namespace: buckets
+spec:
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: benchmark
+          image: python:3.11-slim
+          command:
+            - /bin/bash
+            - -c
+            - |
+              pip install -q boto3
+              python3 /scripts/benchmark.py
+          env:
+            - name: ENDPOINT
+              value: "http://buckets-lb.buckets.svc.cluster.local:9000"
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "1000m"
+            limits:
+              memory: "1Gi"
+              cpu: "2000m"
+      volumes:
+        - name: scripts
+          configMap:
+            name: benchmark-group-commit
+            defaultMode: 0755

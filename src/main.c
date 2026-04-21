@@ -17,6 +17,7 @@
 #include "buckets_cluster.h"
 #include "buckets_registry.h"
 #include "buckets_placement.h"
+#include "buckets_worker_pool.h"
 #include "storage/async_replication.h"
 
 /* Global config pointer for distributed operations */
@@ -286,6 +287,62 @@ static int format_disks_from_config(const char *config_file, bool force) {
     return 0;
 }
 
+/* ===================================================================
+ * Worker Process Callback
+ * ===================================================================*/
+
+/**
+ * Server configuration passed to worker processes
+ */
+typedef struct {
+    const char *bind_addr;
+    int port;
+} server_worker_config_t;
+
+/**
+ * Worker process callback - runs the HTTP server
+ * Called in each forked worker process
+ */
+static int worker_process_main(int worker_id, void *user_data)
+{
+    server_worker_config_t *cfg = (server_worker_config_t*)user_data;
+    
+    buckets_info("Worker %d starting HTTP server on %s:%d", 
+                 worker_id, cfg->bind_addr, cfg->port);
+    
+    /* Create server */
+    uv_http_server_t *uv_server = uv_http_server_create(cfg->bind_addr, cfg->port);
+    if (!uv_server) {
+        buckets_error("Worker %d: Failed to create HTTP server", worker_id);
+        return 1;
+    }
+    
+    /* Register streaming S3 handlers */
+    if (s3_streaming_register_handlers(uv_server) != BUCKETS_OK) {
+        buckets_error("Worker %d: Failed to register S3 handlers", worker_id);
+        uv_http_server_free(uv_server);
+        return 1;
+    }
+    
+    /* Start server (blocks until shutdown) */
+    if (uv_http_server_start(uv_server) != BUCKETS_OK) {
+        buckets_error("Worker %d: Failed to start HTTP server", worker_id);
+        uv_http_server_free(uv_server);
+        return 1;
+    }
+    
+    /* Keep running */
+    while (1) {
+        sleep(1);
+    }
+    
+    /* Cleanup (never reached unless signal) */
+    uv_http_server_stop(uv_server);
+    uv_http_server_free(uv_server);
+    
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
     int ret = 0;
 
@@ -481,7 +538,7 @@ int main(int argc, char *argv[]) {
                     buckets_info("Initializing storage layer...");
                     buckets_storage_config_t storage_cfg = {
                         .data_dir = config->node.data_dir,
-                        .inline_threshold = 128 * 1024,  /* 128 KB */
+                        .inline_threshold = 512 * 1024,  /* 512 KB - optimized for network performance */
                         .default_ec_k = config->erasure.data_shards,
                         .default_ec_m = config->erasure.parity_shards,
                         .verify_checksums = true
@@ -591,8 +648,72 @@ int main(int argc, char *argv[]) {
         
         const char *bind_addr = config ? config->server.bind_address : "0.0.0.0";
         
-        /* ===== UV HTTP Server (streaming support) ===== */
-        buckets_info("Using libuv HTTP server with streaming support");
+        /* ===== Check for multi-process mode ===== */
+        const char *workers_env = getenv("BUCKETS_WORKERS");
+        int num_workers = 0;
+        if (workers_env) {
+            num_workers = atoi(workers_env);
+        }
+        
+        /* Auto-detect if BUCKETS_WORKERS=auto */
+        if (workers_env && strcmp(workers_env, "auto") == 0) {
+            num_workers = buckets_http_worker_get_optimal_count();
+        }
+        
+        /* Use multi-process worker pool if requested */
+        if (num_workers > 0) {
+            buckets_info("==================================================");
+            buckets_info("Starting in MULTI-PROCESS mode with %d workers", num_workers);
+            buckets_info("Each worker runs independent event loop");
+            buckets_info("==================================================");
+            
+            /* Prepare worker configuration */
+            server_worker_config_t worker_cfg = {
+                .bind_addr = bind_addr,
+                .port = port
+            };
+            
+            /* Start worker pool */
+            if (buckets_http_worker_start(num_workers, worker_process_main, &worker_cfg) != 0) {
+                buckets_error("Failed to start worker pool");
+                if (config) {
+                    buckets_storage_cleanup();
+                    buckets_registry_cleanup();
+                    buckets_topology_manager_cleanup();
+                    buckets_multidisk_cleanup();
+                    buckets_config_free(config);
+                }
+                ret = 1;
+                goto cleanup;
+            }
+            
+            buckets_info("Worker pool started successfully!");
+            buckets_info("S3 API available at: http://%s:%d/", bind_addr, port);
+            buckets_info("Running with %d worker processes (SO_REUSEPORT)", num_workers);
+            
+            /* Master process: monitor workers */
+            ret = buckets_http_worker_run();
+            
+            /* Cleanup after workers exit */
+            buckets_info("All workers stopped");
+            s3_streaming_cleanup();
+            buckets_credentials_cleanup();
+            
+            if (config) {
+                async_replication_shutdown();
+                buckets_storage_cleanup();
+                buckets_registry_cleanup();
+                buckets_topology_manager_cleanup();
+                buckets_multidisk_cleanup();
+                buckets_config_free(config);
+            }
+            
+            goto cleanup;
+        }
+        
+        /* ===== UV HTTP Server (single-process mode) ===== */
+        buckets_info("Using libuv HTTP server with streaming support (single-process)");
+        buckets_info("Set BUCKETS_WORKERS=auto for multi-process scaling");
         
         uv_http_server_t *uv_server = uv_http_server_create(bind_addr, port);
         if (!uv_server) {

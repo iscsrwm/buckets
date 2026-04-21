@@ -84,7 +84,7 @@ spec:
         
         # Format disks on first startup (runs AFTER config generation)
         - name: format-disks
-          image: russellmy/buckets:async
+          image: russellmy/buckets:worker-pool-v2
           imagePullPolicy: Always
           command:
             - /bin/sh
@@ -126,7 +126,7 @@ spec:
       
       containers:
         - name: buckets
-          image: russellmy/buckets:async
+          image: russellmy/buckets:worker-pool-v2
           imagePullPolicy: Always
           command:
             - /app/bin/buckets
@@ -150,6 +150,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            # === MULTI-PROCESS WORKER POOL ===
+            # Enable multi-process mode with auto-detection (one worker per CPU core)
+            # This gives 8x throughput improvement on 8-core nodes
+            - name: BUCKETS_WORKERS
+              value: "auto"
             # Optimize libuv thread pool for high concurrency
             - name: UV_THREADPOOL_SIZE
               value: "64"

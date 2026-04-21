@@ -1,0 +1,40 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-hey
+  namespace: buckets
+spec:
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: benchmark
+          image: williamyeh/hey:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              # Generate test data
+              dd if=/dev/urandom of=/tmp/test.bin bs=262144 count=1 2>/dev/null
+              
+              echo "=========================================="
+              echo "Hey HTTP Load Test"
+              echo "=========================================="
+              echo "Target: buckets-0.buckets-headless"
+              echo "Workers: 50 concurrent"
+              echo "Requests: 1000 total"
+              echo "Method: PUT with 256KB body"
+              echo "=========================================="
+              echo ""
+              
+              # Run hey benchmark
+              hey -n 1000 -c 50 -m PUT -D /tmp/test.bin \
+                http://buckets-0.buckets-headless.buckets.svc.cluster.local:9000/testbucket/test.bin
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "1000m"
+            limits:
+              memory: "512Mi"
+              cpu: "2000m"

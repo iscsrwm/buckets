@@ -139,6 +139,14 @@ void buckets_storage_cleanup(void);
 const buckets_storage_config_t* buckets_storage_get_config(void);
 
 /**
+ * Get global group commit context
+ * 
+ * @return Group commit context, or NULL if not initialized
+ */
+struct buckets_group_commit_context;
+struct buckets_group_commit_context* buckets_storage_get_group_commit_ctx(void);
+
+/**
  * Initialize distributed storage RPC handlers
  * 
  * Registers RPC methods for cross-node chunk distribution:

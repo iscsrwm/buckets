@@ -19,6 +19,7 @@
 #include "buckets_hash.h"
 #include "buckets_registry.h"
 #include "buckets_placement.h"
+#include "buckets_group_commit.h"
 #include "storage/async_replication.h"
 
 /* Global storage configuration */
@@ -29,6 +30,9 @@ static buckets_storage_config_t g_storage_config = {
     .default_ec_m = 0,
     .verify_checksums = true
 };
+
+/* Global group commit context */
+static buckets_group_commit_context_t *g_group_commit_ctx = NULL;
 
 /**
  * Get storage data directory
@@ -120,6 +124,14 @@ int buckets_storage_init(const buckets_storage_config_t *config)
     g_storage_config.default_ec_m = config->default_ec_m;
     g_storage_config.verify_checksums = config->verify_checksums;
 
+    /* Initialize group commit for batched fsync */
+    g_group_commit_ctx = buckets_group_commit_init(NULL);  /* Use defaults */
+    if (!g_group_commit_ctx) {
+        buckets_warn("Failed to initialize group commit, will use immediate fsync");
+    } else {
+        buckets_info("✓ Group commit initialized successfully");
+    }
+
     buckets_info("Storage initialized: data_dir=%s, inline_threshold=%u, ec=%u+%u",
                  g_storage_config.data_dir, 
                  g_storage_config.inline_threshold,
@@ -132,6 +144,18 @@ int buckets_storage_init(const buckets_storage_config_t *config)
 /* Cleanup storage system */
 void buckets_storage_cleanup(void)
 {
+    /* Print group commit stats before cleanup */
+    if (g_group_commit_ctx) {
+        buckets_group_commit_stats_t stats;
+        if (buckets_group_commit_get_stats(g_group_commit_ctx, &stats) == 0) {
+            buckets_info("Group Commit Stats: writes=%lu, syncs=%lu, avg_batch=%.1f, bytes=%lu MB",
+                        stats.total_writes, stats.total_syncs, stats.avg_batch_size,
+                        stats.bytes_written / (1024*1024));
+        }
+        buckets_group_commit_cleanup(g_group_commit_ctx);
+        g_group_commit_ctx = NULL;
+    }
+    
     if (g_storage_config.data_dir) {
         buckets_free(g_storage_config.data_dir);
         g_storage_config.data_dir = NULL;
@@ -142,6 +166,12 @@ void buckets_storage_cleanup(void)
 const buckets_storage_config_t* buckets_storage_get_config(void)
 {
     return &g_storage_config;
+}
+
+/* Get global group commit context */
+buckets_group_commit_context_t* buckets_storage_get_group_commit_ctx(void)
+{
+    return g_group_commit_ctx;
 }
 
 /* Base64 encode for inline data */

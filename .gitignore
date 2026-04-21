@@ -43,3 +43,4 @@ coverage/
 # Temp files
 *.tmp
 .tmp/
+opencode.jsonc

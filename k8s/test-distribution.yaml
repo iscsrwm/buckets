@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: test-distribution
+  namespace: buckets
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: test
+        image: curlimages/curl:8.5.0
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "========================================"
+          echo "Testing LoadBalancer Distribution"
+          echo "========================================"
+          echo ""
+          echo "Sending 100 requests to LoadBalancer..."
+          echo "Checking which pods respond..."
+          echo ""
+          
+          # Send 100 requests and capture responses
+          for i in $(seq 1 100); do
+            curl -s http://buckets-lb.buckets.svc.cluster.local:9000/ 2>&1 || echo "Failed"
+            sleep 0.1
+          done
+          
+          echo ""
+          echo "========================================"
+          echo "Distribution test complete"
+          echo "========================================"
+          echo ""
+          echo "Check pod logs to see request distribution:"
+          echo "  kubectl -n buckets logs buckets-0 --tail=20 | grep GET"
+          echo "  kubectl -n buckets logs buckets-1 --tail=20 | grep GET"
+          echo "  ... etc"

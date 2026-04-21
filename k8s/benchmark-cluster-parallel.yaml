@@ -1,0 +1,64 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-cluster-parallel
+  namespace: buckets
+spec:
+  # Run 6 parallel pods to hit all 6 storage pods
+  completions: 6
+  parallelism: 6
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: russellmy/buckets-benchmark:go
+        imagePullPolicy: Always
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: TARGET_URL
+          value: "http://buckets-lb.buckets.svc.cluster.local:9000"
+        - name: WORKERS
+          value: "40"
+        - name: DURATION
+          value: "60s"
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "========================================"
+          echo "CLUSTER-WIDE PARALLEL BENCHMARK"
+          echo "Benchmark Pod: $POD_NAME"
+          echo "========================================"
+          echo ""
+          echo "This is 1 of 6 parallel benchmark pods"
+          echo "Each targets the LoadBalancer from different source IP"
+          echo "Session affinity ensures each hits a different storage pod"
+          echo ""
+          echo "Configuration:"
+          echo "  Target: $TARGET_URL"
+          echo "  Workers: $WORKERS concurrent workers"
+          echo "  Duration: $DURATION"
+          echo "  Object size: 256KB"
+          echo ""
+          
+          # Run benchmark
+          /benchmark \
+            -endpoint="$TARGET_URL" \
+            -workers=40 \
+            -duration=60s \
+            -size=262144 \
+            -bucket="bench-${HOSTNAME}"
+          
+          EXIT_CODE=$?
+          
+          echo ""
+          echo "========================================"
+          echo "Benchmark pod $POD_NAME complete"
+          echo "========================================"
+          
+          exit $EXIT_CODE

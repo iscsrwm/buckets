@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <errno.h>
+#include <sys/socket.h>
 
 #include "buckets.h"
 #include "buckets_net.h"
@@ -379,26 +381,106 @@ int uv_http_server_start(uv_http_server_t *server)
     }
     server->tcp.data = server;
     
-    /* Bind to address */
-    struct sockaddr_in addr;
-    ret = uv_ip4_addr(server->address, server->port, &addr);
-    if (ret != 0) {
-        buckets_error("Invalid address: %s", uv_strerror(ret));
-        uv_close((uv_handle_t*)&server->tcp, NULL);
-        uv_loop_close(server->loop);
-        buckets_free(server->loop);
-        server->loop = NULL;
-        return BUCKETS_ERR_INVALID_ARG;
-    }
+    /* Check if multi-process mode is enabled */
+    const char *workers_env = getenv("BUCKETS_WORKERS");
+    bool multi_process = (workers_env != NULL && workers_env[0] != '\0');
     
-    ret = uv_tcp_bind(&server->tcp, (struct sockaddr*)&addr, 0);
-    if (ret != 0) {
-        buckets_error("Failed to bind: %s", uv_strerror(ret));
+    if (multi_process) {
+        /* Manual socket creation with SO_REUSEPORT for multi-process */
+        int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sockfd < 0) {
+            buckets_error("Failed to create socket: %s", strerror(errno));
+            uv_close((uv_handle_t*)&server->tcp, NULL);
+            uv_loop_close(server->loop);
+            buckets_free(server->loop);
+            server->loop = NULL;
+            return BUCKETS_ERR_IO;
+        }
+        
+        /* Set SO_REUSEADDR */
+        int optval = 1;
+        if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
+            buckets_warn("Failed to set SO_REUSEADDR: %s", strerror(errno));
+        }
+        
+        /* Set SO_REUSEPORT for multi-process */
+        #ifdef SO_REUSEPORT
+        if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval)) < 0) {
+            buckets_error("Failed to set SO_REUSEPORT: %s", strerror(errno));
+            close(sockfd);
+            uv_close((uv_handle_t*)&server->tcp, NULL);
+            uv_loop_close(server->loop);
+            buckets_free(server->loop);
+            server->loop = NULL;
+            return BUCKETS_ERR_IO;
+        }
+        buckets_info("SO_REUSEPORT enabled for multi-process worker pool");
+        #else
+        buckets_error("SO_REUSEPORT not available on this platform");
+        close(sockfd);
         uv_close((uv_handle_t*)&server->tcp, NULL);
         uv_loop_close(server->loop);
         buckets_free(server->loop);
         server->loop = NULL;
         return BUCKETS_ERR_IO;
+        #endif
+        
+        /* Bind socket */
+        struct sockaddr_in addr;
+        ret = uv_ip4_addr(server->address, server->port, &addr);
+        if (ret != 0) {
+            buckets_error("Invalid address: %s", uv_strerror(ret));
+            close(sockfd);
+            uv_close((uv_handle_t*)&server->tcp, NULL);
+            uv_loop_close(server->loop);
+            buckets_free(server->loop);
+            server->loop = NULL;
+            return BUCKETS_ERR_INVALID_ARG;
+        }
+        
+        if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            buckets_error("Failed to bind socket: %s", strerror(errno));
+            close(sockfd);
+            uv_close((uv_handle_t*)&server->tcp, NULL);
+            uv_loop_close(server->loop);
+            buckets_free(server->loop);
+            server->loop = NULL;
+            return BUCKETS_ERR_IO;
+        }
+        
+        /* Attach socket to UV handle */
+        ret = uv_tcp_open(&server->tcp, sockfd);
+        if (ret != 0) {
+            buckets_error("Failed to open UV TCP from socket: %s", uv_strerror(ret));
+            close(sockfd);
+            uv_close((uv_handle_t*)&server->tcp, NULL);
+            uv_loop_close(server->loop);
+            buckets_free(server->loop);
+            server->loop = NULL;
+            return BUCKETS_ERR_IO;
+        }
+    } else {
+        /* Single-process mode - use standard UV bind */
+        struct sockaddr_in addr;
+        ret = uv_ip4_addr(server->address, server->port, &addr);
+        if (ret != 0) {
+            buckets_error("Invalid address: %s", uv_strerror(ret));
+            uv_close((uv_handle_t*)&server->tcp, NULL);
+            uv_loop_close(server->loop);
+            buckets_free(server->loop);
+            server->loop = NULL;
+            return BUCKETS_ERR_INVALID_ARG;
+        }
+        
+        ret = uv_tcp_bind(&server->tcp, (struct sockaddr*)&addr, 0);
+        if (ret != 0) {
+            buckets_error("Failed to bind: %s", uv_strerror(ret));
+            uv_close((uv_handle_t*)&server->tcp, NULL);
+            uv_loop_close(server->loop);
+            buckets_free(server->loop);
+            server->loop = NULL;
+            return BUCKETS_ERR_IO;
+        }
     }
     
     /* Start listening */

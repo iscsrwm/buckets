@@ -40,7 +40,7 @@ spec:
       port: 9000
       targetPort: http
       protocol: TCP
-  # Optional: session affinity for better client experience
+  # Session affinity required for distributed storage (requests must hit correct pod)
   sessionAffinity: ClientIP
   sessionAffinityConfig:
     clientIP:
