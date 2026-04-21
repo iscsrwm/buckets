@@ -19,6 +19,7 @@
 #include "buckets_hash.h"
 #include "buckets_registry.h"
 #include "buckets_placement.h"
+#include "storage/async_replication.h"
 
 /* Global storage configuration */
 static buckets_storage_config_t g_storage_config = {
@@ -306,18 +307,30 @@ int buckets_put_object(const char *bucket, const char *object,
         result = buckets_write_xl_meta(disk_path, object_path, &meta);
         
         if (result == 0) {
-            /* TODO: Queue async replication to other nodes in background
-             * For now, we can optionally do synchronous replication if configured */
-            bool enable_inline_replication = getenv("BUCKETS_REPLICATE_INLINE") != NULL;
+            /* Check replication mode: async (default) or sync (legacy) */
+            const char *repl_mode = getenv("BUCKETS_REPLICATE_INLINE");
+            bool use_async = !repl_mode || strcmp(repl_mode, "sync") != 0;
             
-            if (enable_inline_replication) {
-                bool has_endpoints = (placement && placement->disk_endpoints && 
-                                     placement->disk_endpoints[0] && 
-                                     placement->disk_endpoints[0][0] != '\0');
-                
-                if (has_endpoints && placement->disk_count > 0) {
-                    buckets_info("Inline replication enabled: replicating to %u disks", 
-                                placement->disk_count);
+            bool has_endpoints = (placement && placement->disk_endpoints && 
+                                 placement->disk_endpoints[0] && 
+                                 placement->disk_endpoints[0][0] != '\0');
+            
+            if (has_endpoints && placement->disk_count > 0) {
+                if (use_async) {
+                    /* Async replication (default): Queue for background replication.
+                     * This gives fast response AND durability via eventual consistency.
+                     * Placement ownership is transferred to async queue. */
+                    buckets_info("Queuing async replication to %u disks", placement->disk_count);
+                    
+                    if (async_replication_queue(bucket, object, object_path, &meta, placement) == 0) {
+                        /* Success - placement will be freed by async worker, so don't free below */
+                        placement = NULL;
+                    } else {
+                        buckets_warn("Failed to queue async replication, object on local disk only");
+                    }
+                } else {
+                    /* Sync replication (legacy): Block until all replicas written */
+                    buckets_info("Sync inline replication to %u disks", placement->disk_count);
                     
                     extern int buckets_parallel_write_metadata(const char *bucket,
                                                                const char *object,
@@ -328,7 +341,6 @@ int buckets_put_object(const char *bucket, const char *object,
                                                                u32 num_disks,
                                                                bool has_endpoints);
                     
-                    /* Replicate in background - ignore errors for async semantics */
                     buckets_parallel_write_metadata(bucket, object, object_path,
                                                     placement, placement->disk_paths,
                                                     &meta, placement->disk_count, 
@@ -343,7 +355,12 @@ int buckets_put_object(const char *bucket, const char *object,
         }
         
         buckets_xl_meta_free(&meta);
-        buckets_placement_free_result(placement);
+        
+        /* Only free placement if not transferred to async queue */
+        if (placement) {
+            buckets_placement_free_result(placement);
+        }
+        
         return result;
     }
 

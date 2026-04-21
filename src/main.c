@@ -17,6 +17,7 @@
 #include "buckets_cluster.h"
 #include "buckets_registry.h"
 #include "buckets_placement.h"
+#include "storage/async_replication.h"
 
 /* Global config pointer for distributed operations */
 static buckets_config_t *g_global_config = NULL;
@@ -496,6 +497,14 @@ int main(int argc, char *argv[]) {
                     }
                     buckets_info("Storage layer initialized");
                     
+                    /* Initialize async replication system */
+                    buckets_info("Initializing async replication (4 workers)...");
+                    if (async_replication_init(4) != 0) {
+                        buckets_warn("Failed to initialize async replication, running without it");
+                    } else {
+                        buckets_info("Async replication initialized");
+                    }
+                    
                     /* Initialize distributed storage (RPC for remote chunks) */
                     buckets_info("Initializing distributed storage...");
                     if (buckets_distributed_storage_init() != BUCKETS_OK) {
@@ -556,6 +565,14 @@ int main(int argc, char *argv[]) {
                 goto cleanup;
             }
             buckets_info("Storage layer initialized");
+            
+            /* Initialize async replication system */
+            buckets_info("Initializing async replication (4 workers)...");
+            if (async_replication_init(4) != 0) {
+                buckets_warn("Failed to initialize async replication, running without it");
+            } else {
+                buckets_info("Async replication initialized");
+            }
         }
         
         /* Initialize credential system */
@@ -648,6 +665,8 @@ int main(int argc, char *argv[]) {
         buckets_credentials_cleanup();
         
         if (config) {
+            buckets_info("Shutting down async replication...");
+            async_replication_shutdown();
             buckets_info("Cleaning up storage layer...");
             buckets_storage_cleanup();
             buckets_info("Cleaning up registry...");

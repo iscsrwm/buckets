@@ -84,7 +84,7 @@ spec:
         
         # Format disks on first startup (runs AFTER config generation)
         - name: format-disks
-          image: russellmy/buckets:latest
+          image: russellmy/buckets:async
           imagePullPolicy: Always
           command:
             - /bin/sh
@@ -126,7 +126,7 @@ spec:
       
       containers:
         - name: buckets
-          image: russellmy/buckets:latest
+          image: russellmy/buckets:async
           imagePullPolicy: Always
           command:
             - /app/bin/buckets
@@ -153,6 +153,14 @@ spec:
             # Optimize libuv thread pool for high concurrency
             - name: UV_THREADPOOL_SIZE
               value: "64"
+            # Async replication mode: write local first, replicate in background
+            # Options: not set (async, default), "sync" (synchronous), "1" (legacy sync)
+            # Async gives best performance (~180 ops/s) with eventual consistency
+            - name: BUCKETS_REPLICATE_INLINE
+              value: "async"
+            # Disable fsync for better performance (trade durability for speed)
+            - name: BUCKETS_NO_FSYNC
+              value: "1"
           volumeMounts:
             - name: disk1
               mountPath: /data/disk1
