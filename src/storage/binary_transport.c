@@ -32,7 +32,11 @@
 #include "buckets.h"
 #include "buckets_storage.h"
 #include "buckets_net.h"
+#include "buckets_debug.h"
 #include "../net/uv_server_internal.h"
+
+/* External debug stats */
+extern buckets_debug_stats_t g_stats;
 
 /* Buffer size for streaming */
 #define STREAM_BUFFER_SIZE (256 * 1024)  /* 256 KB chunks */
@@ -100,8 +104,21 @@ static char* url_decode(const char *str)
  * Socket Helpers
  * ===================================================================*/
 
+static void close_tcp_connection(int fd)
+{
+    if (fd >= 0) {
+        close(fd);
+        DEBUG_DEC(g_stats.conn_pool_active);
+    }
+}
+
 static int create_tcp_connection(const char *host, int port)
 {
+    struct timespec connect_start;
+    if (g_debug_instrumentation_enabled) {
+        clock_gettime(CLOCK_MONOTONIC, &connect_start);
+    }
+    
     struct addrinfo hints, *result, *rp;
     int fd = -1;
     char port_str[16];
@@ -114,7 +131,8 @@ static int create_tcp_connection(const char *host, int port)
     
     int ret = getaddrinfo(host, port_str, &hints, &result);
     if (ret != 0) {
-        buckets_error("getaddrinfo failed for %s:%d: %s", host, port, gai_strerror(ret));
+        buckets_error("[TCP_CONNECT] getaddrinfo failed for %s:%d: %s", host, port, gai_strerror(ret));
+        DEBUG_INC(g_stats.conn_pool_failures);
         return -1;
     }
     
@@ -137,14 +155,28 @@ static int create_tcp_connection(const char *host, int port)
             break;  /* Success */
         }
         
-        close(fd);
+        buckets_warn("[TCP_CONNECT] connect() failed for %s:%d: %s", host, port, strerror(errno));
+        close(fd);  /* Don't use close_tcp_connection here - connection never succeeded */
         fd = -1;
     }
     
     freeaddrinfo(result);
     
     if (fd == -1) {
-        buckets_error("Failed to connect to %s:%d", host, port);
+        buckets_error("[TCP_CONNECT] Failed to connect to %s:%d after all attempts", host, port);
+        DEBUG_INC(g_stats.conn_pool_failures);
+    } else {
+        DEBUG_INC(g_stats.conn_pool_total);
+        DEBUG_INC(g_stats.conn_pool_active);
+        
+        if (g_debug_instrumentation_enabled) {
+            struct timespec connect_end;
+            clock_gettime(CLOCK_MONOTONIC, &connect_end);
+            double connect_ms = (connect_end.tv_sec - connect_start.tv_sec) * 1000.0 +
+                               (connect_end.tv_nsec - connect_start.tv_nsec) / 1000000.0;
+            buckets_debug("[TCP_CONNECT] Connected to %s:%d in %.2f ms (fd=%d)", 
+                          host, port, connect_ms, fd);
+        }
     }
     
     return fd;
@@ -243,7 +275,17 @@ int buckets_binary_write_chunk(const char *peer_endpoint,
                                 size_t chunk_size,
                                 const char *disk_path)
 {
+    DEBUG_INC(g_stats.binary_writes_total);
+    DEBUG_INC(g_stats.binary_writes_active);
+    
+    struct timespec start_time, connect_time, send_time;
+    if (g_debug_instrumentation_enabled) {
+        clock_gettime(CLOCK_MONOTONIC, &start_time);
+    }
+    
     if (!peer_endpoint || !bucket || !object || !chunk_data || !disk_path) {
+        DEBUG_DEC(g_stats.binary_writes_active);
+        DEBUG_INC(g_stats.binary_writes_failed);
         return BUCKETS_ERR_INVALID_ARG;
     }
     
@@ -252,13 +294,29 @@ int buckets_binary_write_chunk(const char *peer_endpoint,
     int port;
     if (parse_endpoint(peer_endpoint, host, sizeof(host), &port) != 0) {
         buckets_error("Invalid endpoint: %s", peer_endpoint);
+        DEBUG_DEC(g_stats.binary_writes_active);
+        DEBUG_INC(g_stats.binary_writes_failed);
         return BUCKETS_ERR_INVALID_ARG;
     }
+    
+    buckets_debug("[BINARY_WRITE] chunk=%u endpoint=%s bucket=%s object=%s size=%zu", 
+                  chunk_index, peer_endpoint, bucket, object, chunk_size);
     
     /* Connect to remote node */
     int fd = create_tcp_connection(host, port);
     if (fd < 0) {
+        buckets_error("[BINARY_WRITE] Connection failed to %s:%d for chunk %u", 
+                      host, port, chunk_index);
+        DEBUG_DEC(g_stats.binary_writes_active);
+        DEBUG_INC(g_stats.binary_writes_failed);
         return BUCKETS_ERR_IO;
+    }
+    
+    if (g_debug_instrumentation_enabled) {
+        clock_gettime(CLOCK_MONOTONIC, &connect_time);
+        double connect_ms = (connect_time.tv_sec - start_time.tv_sec) * 1000.0 +
+                           (connect_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+        buckets_debug("[BINARY_WRITE] chunk=%u connected in %.2f ms", chunk_index, connect_ms);
     }
     
     /* URL encode object key */
@@ -268,7 +326,7 @@ int buckets_binary_write_chunk(const char *peer_endpoint,
     if (!encoded_object || !encoded_disk_path) {
         if (encoded_object) buckets_free(encoded_object);
         if (encoded_disk_path) buckets_free(encoded_disk_path);
-        close(fd);
+        close_tcp_connection(fd);
         return BUCKETS_ERR_NOMEM;
     }
     
@@ -292,8 +350,15 @@ int buckets_binary_write_chunk(const char *peer_endpoint,
     
     /* Send headers */
     if (send_all(fd, headers, header_len) != 0) {
-        close(fd);
+        buckets_error("[BINARY_WRITE] chunk=%u failed to send headers", chunk_index);
+        close_tcp_connection(fd);
+        DEBUG_DEC(g_stats.binary_writes_active);
+        DEBUG_INC(g_stats.binary_writes_failed);
         return BUCKETS_ERR_IO;
+    }
+    
+    if (g_debug_instrumentation_enabled) {
+        clock_gettime(CLOCK_MONOTONIC, &send_time);
     }
     
     /* Stream chunk data in pieces */
@@ -305,14 +370,27 @@ int buckets_binary_write_chunk(const char *peer_endpoint,
         size_t to_send = remaining > STREAM_BUFFER_SIZE ? STREAM_BUFFER_SIZE : remaining;
         
         if (send_all(fd, data_ptr, to_send) != 0) {
-            buckets_error("Failed to send chunk data (sent %zu/%zu)", total_sent, chunk_size);
-            close(fd);
+            buckets_error("[BINARY_WRITE] chunk=%u failed to send data (sent %zu/%zu)", 
+                          chunk_index, total_sent, chunk_size);
+            close_tcp_connection(fd);
+            DEBUG_DEC(g_stats.binary_writes_active);
+            DEBUG_INC(g_stats.binary_writes_failed);
             return BUCKETS_ERR_IO;
         }
         
         data_ptr += to_send;
         remaining -= to_send;
         total_sent += to_send;
+    }
+    
+    if (g_debug_instrumentation_enabled) {
+        struct timespec data_sent_time;
+        clock_gettime(CLOCK_MONOTONIC, &data_sent_time);
+        double send_ms = (data_sent_time.tv_sec - send_time.tv_sec) * 1000.0 +
+                        (data_sent_time.tv_nsec - send_time.tv_nsec) / 1000000.0;
+        buckets_debug("[BINARY_WRITE] chunk=%u sent %zu bytes in %.2f ms (%.2f MB/s)",
+                      chunk_index, chunk_size, send_ms, 
+                      (chunk_size / 1024.0 / 1024.0) / (send_ms / 1000.0));
     }
     
     /* Read response headers */
@@ -323,8 +401,10 @@ int buckets_binary_write_chunk(const char *peer_endpoint,
     while (resp_len < sizeof(response) - 1) {
         ssize_t n = recv(fd, response + resp_len, sizeof(response) - resp_len - 1, 0);
         if (n <= 0) {
-            buckets_error("Failed to receive response");
-            close(fd);
+            buckets_error("[BINARY_WRITE] chunk=%u failed to receive response", chunk_index);
+            close_tcp_connection(fd);
+            DEBUG_DEC(g_stats.binary_writes_active);
+            DEBUG_INC(g_stats.binary_writes_failed);
             return BUCKETS_ERR_IO;
         }
         resp_len += n;
@@ -334,22 +414,35 @@ int buckets_binary_write_chunk(const char *peer_endpoint,
         if (headers_end) break;
     }
     
-    close(fd);
+    close_tcp_connection(fd);
     
     /* Parse status code */
     int status_code = 0;
     if (sscanf(response, "HTTP/1.%*d %d", &status_code) != 1) {
-        buckets_error("Failed to parse HTTP response");
+        buckets_error("[BINARY_WRITE] chunk=%u failed to parse HTTP response", chunk_index);
+        DEBUG_DEC(g_stats.binary_writes_active);
+        DEBUG_INC(g_stats.binary_writes_failed);
         return BUCKETS_ERR_IO;
     }
     
     if (status_code != 200) {
-        buckets_error("Remote chunk write failed with status %d", status_code);
+        buckets_error("[BINARY_WRITE] chunk=%u remote write failed with status %d", 
+                      chunk_index, status_code);
+        DEBUG_DEC(g_stats.binary_writes_active);
+        DEBUG_INC(g_stats.binary_writes_failed);
         return BUCKETS_ERR_IO;
     }
     
-    buckets_debug("Binary write: chunk %u to %s:%s (%zu bytes)", 
-                  chunk_index, peer_endpoint, disk_path, chunk_size);
+    if (g_debug_instrumentation_enabled) {
+        struct timespec end_time;
+        clock_gettime(CLOCK_MONOTONIC, &end_time);
+        double total_ms = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
+                         (end_time.tv_nsec - start_time.tv_nsec) / 1000000.0;
+        buckets_info("[BINARY_WRITE] chunk=%u SUCCESS total_time=%.2f ms size=%zu endpoint=%s",
+                     chunk_index, total_ms, chunk_size, peer_endpoint);
+    }
+    
+    DEBUG_DEC(g_stats.binary_writes_active);
     
     return BUCKETS_OK;
 }
@@ -397,7 +490,7 @@ int buckets_binary_read_chunk(const char *peer_endpoint,
     if (!encoded_object || !encoded_disk_path) {
         if (encoded_object) buckets_free(encoded_object);
         if (encoded_disk_path) buckets_free(encoded_disk_path);
-        close(fd);
+        close_tcp_connection(fd);
         return BUCKETS_ERR_NOMEM;
     }
     
@@ -419,7 +512,7 @@ int buckets_binary_read_chunk(const char *peer_endpoint,
     
     /* Send request */
     if (send_all(fd, request, req_len) != 0) {
-        close(fd);
+        close_tcp_connection(fd);
         return BUCKETS_ERR_IO;
     }
     
@@ -432,7 +525,7 @@ int buckets_binary_read_chunk(const char *peer_endpoint,
         ssize_t n = recv(fd, header_buf + header_len, sizeof(header_buf) - header_len - 1, 0);
         if (n <= 0) {
             buckets_error("Failed to receive response headers");
-            close(fd);
+            close_tcp_connection(fd);
             return BUCKETS_ERR_IO;
         }
         header_len += n;
@@ -444,7 +537,7 @@ int buckets_binary_read_chunk(const char *peer_endpoint,
     
     if (!headers_end) {
         buckets_error("Failed to find end of headers");
-        close(fd);
+        close_tcp_connection(fd);
         return BUCKETS_ERR_IO;
     }
     
@@ -452,13 +545,13 @@ int buckets_binary_read_chunk(const char *peer_endpoint,
     int status_code = 0;
     if (sscanf(header_buf, "HTTP/1.%*d %d", &status_code) != 1) {
         buckets_error("Failed to parse HTTP response");
-        close(fd);
+        close_tcp_connection(fd);
         return BUCKETS_ERR_IO;
     }
     
     if (status_code != 200) {
         buckets_error("Remote chunk read failed with status %d", status_code);
-        close(fd);
+        close_tcp_connection(fd);
         return BUCKETS_ERR_IO;
     }
     
@@ -474,14 +567,14 @@ int buckets_binary_read_chunk(const char *peer_endpoint,
     
     if (content_length == 0) {
         buckets_error("Missing or invalid Content-Length");
-        close(fd);
+        close_tcp_connection(fd);
         return BUCKETS_ERR_IO;
     }
     
     /* Allocate buffer for chunk data */
     void *data = buckets_malloc(content_length);
     if (!data) {
-        close(fd);
+        close_tcp_connection(fd);
         return BUCKETS_ERR_NOMEM;
     }
     
@@ -502,14 +595,14 @@ int buckets_binary_read_chunk(const char *peer_endpoint,
         if (n <= 0) {
             buckets_error("Failed to receive chunk data");
             buckets_free(data);
-            close(fd);
+            close_tcp_connection(fd);
             return BUCKETS_ERR_IO;
         }
         write_ptr += n;
         remaining -= n;
     }
     
-    close(fd);
+    close_tcp_connection(fd);
     
     *chunk_data = data;
     *chunk_size = content_length;

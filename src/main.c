@@ -18,6 +18,7 @@
 #include "buckets_registry.h"
 #include "buckets_placement.h"
 #include "buckets_worker_pool.h"
+#include "buckets_debug.h"
 #include "storage/async_replication.h"
 
 /* Global config pointer for distributed operations */
@@ -52,6 +53,7 @@ static void print_usage(const char *progname) {
     printf("  server [options]    Start S3 API server\n");
     printf("  format [options]    Format disks for cluster operation\n");
     printf("  creds <subcommand>  Manage S3 credentials\n");
+    printf("  debug <subcommand>  Debug instrumentation commands\n");
     printf("  version             Print version information\n");
     printf("  help                Show this help message\n");
     printf("\n");
@@ -69,6 +71,12 @@ static void print_usage(const char *progname) {
     printf("  creds delete <key>  Delete credential by access key\n");
     printf("  creds enable <key>  Enable a credential\n");
     printf("  creds disable <key> Disable a credential\n");
+    printf("\n");
+    printf("Debug Commands:\n");
+    printf("  debug enable        Enable debug instrumentation\n");
+    printf("  debug disable       Disable debug instrumentation\n");
+    printf("  debug stats         Print debug statistics\n");
+    printf("  debug reset         Reset debug statistics\n");
     printf("\n");
     printf("Examples:\n");
     printf("  %s server                           # Start on default port 9000\n", progname);
@@ -366,6 +374,9 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Failed to initialize Buckets\n");
         return 1;
     }
+    
+    /* Initialize debug instrumentation */
+    buckets_debug_init();
 
     /* Parse command */
     if (argc < 2) {
@@ -984,8 +995,47 @@ int main(int argc, char *argv[]) {
         
         buckets_credentials_cleanup();
         
+    } else if (strcmp(command, "debug") == 0) {
+        /* Debug instrumentation commands */
+        if (argc < 3) {
+            fprintf(stderr, "Error: Missing subcommand for debug\n\n");
+            printf("Usage: %s debug <subcommand>\n\n", argv[0]);
+            printf("Subcommands:\n");
+            printf("  enable    Enable debug instrumentation\n");
+            printf("  disable   Disable debug instrumentation\n");
+            printf("  stats     Print debug statistics\n");
+            printf("  reset     Reset debug statistics\n");
+            printf("\n");
+            ret = 1;
+            goto cleanup;
+        }
+        
+        const char *subcmd = argv[2];
+        
+        if (strcmp(subcmd, "enable") == 0) {
+            buckets_debug_set_enabled(true);
+            printf("Debug instrumentation ENABLED\n");
+            printf("Logs will now include detailed timing and resource tracking\n");
+            
+        } else if (strcmp(subcmd, "disable") == 0) {
+            buckets_debug_set_enabled(false);
+            printf("Debug instrumentation DISABLED\n");
+            
+        } else if (strcmp(subcmd, "stats") == 0) {
+            buckets_debug_print_stats();
+            
+        } else if (strcmp(subcmd, "reset") == 0) {
+            buckets_debug_reset_stats();
+            printf("Debug statistics reset\n");
+            
+        } else {
+            fprintf(stderr, "Error: Unknown subcommand: %s\n", subcmd);
+            fprintf(stderr, "Use '%s debug' for help\n", argv[0]);
+            ret = 1;
+        }
+        
     } else {
-        fprintf(stderr, "Unknown command: %s\n\n", command);
+        fprintf(stderr, "Error: unknown command: %s\n\n", command);
         print_usage(argv[0]);
         ret = 1;
     }

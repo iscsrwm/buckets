@@ -23,7 +23,7 @@
 
 /* Connection limits */
 #define BUCKETS_DEFAULT_MAX_CONNECTIONS      10000
-#define BUCKETS_DEFAULT_BACKLOG              128
+#define BUCKETS_DEFAULT_BACKLOG              4096  /* Increased for multi-client concurrent connections */
 
 /* Timeouts (milliseconds) */
 #define BUCKETS_DEFAULT_HEADERS_TIMEOUT_MS   30000   /* 30 seconds */
@@ -150,6 +150,10 @@ struct uv_http_conn {
     
     /* Close synchronization - count of handles pending close */
     int pending_close_count;
+    
+    /* Write tracking - prevents use-after-free race conditions */
+    int pending_writes;            /* Number of writes in flight */
+    pthread_mutex_t write_lock;    /* Protects pending_writes counter */
 };
 
 /* ===================================================================

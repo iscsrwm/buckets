@@ -48,7 +48,7 @@ static void on_handle_close(uv_handle_t *handle);
 static void on_timeout(uv_timer_t *timer);
 static void on_shutdown_async(uv_async_t *handle);
 static void* server_thread_main(void *arg);
-static int safe_uv_write(uv_http_conn_t *conn, char *write_buf, size_t write_len) __attribute__((unused));
+static int safe_uv_write(uv_http_conn_t *conn, char *write_buf, size_t write_len);
 
 static void process_request(uv_http_conn_t *conn);
 static void setup_parser_callbacks(llhttp_settings_t *settings);
@@ -415,15 +415,23 @@ int uv_http_server_start(uv_http_server_t *server)
             return BUCKETS_ERR_IO;
         }
         buckets_info("SO_REUSEPORT enabled for multi-process worker pool");
-        #else
+        
+        /* Optimize socket buffers for better performance */
+        int sndbuf = 256 * 1024;  /* 256 KB send buffer */
+        int rcvbuf = 256 * 1024;  /* 256 KB receive buffer */
+        
+        if (setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0) {
+            buckets_warn("Failed to set SO_SNDBUF on listen socket: %s", strerror(errno));
+        }
+        
+        if (setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
+            buckets_warn("Failed to set SO_RCVBUF on listen socket: %s", strerror(errno));
+        }
+#else
         buckets_error("SO_REUSEPORT not available on this platform");
         close(sockfd);
-        uv_close((uv_handle_t*)&server->tcp, NULL);
-        uv_loop_close(server->loop);
-        buckets_free(server->loop);
-        server->loop = NULL;
-        return BUCKETS_ERR_IO;
-        #endif
+        return -1;
+#endif
         
         /* Bind socket */
         struct sockaddr_in addr;
@@ -640,6 +648,8 @@ uv_http_conn_t* uv_http_conn_create(uv_http_server_t *server)
     
     conn->server = server;
     conn->state = CONN_STATE_READING_HEADERS;
+    conn->pending_writes = 0;
+    pthread_mutex_init(&conn->write_lock, NULL);
     conn->keep_alive = true;  /* HTTP/1.1 default */
     
     /* Initialize TCP handle */
@@ -770,6 +780,17 @@ void uv_http_conn_close(uv_http_conn_t *conn)
     
     conn->state = CONN_STATE_CLOSING;
     
+    /* Check if there are pending writes - if so, they will close when complete */
+    pthread_mutex_lock(&conn->write_lock);
+    int pending = conn->pending_writes;
+    pthread_mutex_unlock(&conn->write_lock);
+    
+    if (pending > 0) {
+        buckets_debug("Connection has %d pending writes, deferring close", pending);
+        /* The last write completion will detect CLOSING state and call close again */
+        return;
+    }
+    
     /* Stop timeout timer */
     uv_timer_stop(&conn->timeout_timer);
     
@@ -836,6 +857,9 @@ static void on_handle_close(uv_handle_t *handle)
     
     /* Clean up request state */
     uv_http_conn_reset(conn);
+    
+    /* Destroy write lock */
+    pthread_mutex_destroy(&conn->write_lock);
     
     buckets_free(conn);
 }
@@ -928,6 +952,32 @@ static void on_connection(uv_stream_t *server_handle, int status)
     
     /* Enable TCP_NODELAY for lower latency */
     uv_tcp_nodelay(&conn->tcp, 1);
+    
+    /* Optimize socket buffers for high-throughput transfers
+     * 
+     * Set send/recv buffers to 256KB for better performance on high-bandwidth networks.
+     * This reduces the number of syscalls needed for large transfers (256KB+ chunks).
+     * 
+     * Benefits:
+     * - Fewer context switches for large PUT/GET operations
+     * - Better TCP window scaling on high-latency networks
+     * - Improved throughput for erasure-coded chunk transfers (typically 256KB-4MB)
+     */
+    int sock_fd = 0;
+    uv_fileno((uv_handle_t*)&conn->tcp, &sock_fd);
+    
+    if (sock_fd > 0) {
+        int sndbuf = 256 * 1024;  /* 256 KB send buffer */
+        int rcvbuf = 256 * 1024;  /* 256 KB receive buffer */
+        
+        if (setsockopt(sock_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0) {
+            buckets_warn("Failed to set SO_SNDBUF: %s (continuing anyway)", strerror(errno));
+        }
+        
+        if (setsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
+            buckets_warn("Failed to set SO_RCVBUF: %s (continuing anyway)", strerror(errno));
+        }
+    }
     
     /* Start timeout for headers */
     uv_http_conn_reset_timeout(conn, server->headers_timeout_ms);
@@ -2101,6 +2151,7 @@ int uv_http_response_end(uv_http_conn_t *conn)
  * Takes ownership of write_buf (will free on error).
  * Returns 0 on success, -1 on error.
  */
+__attribute__((unused))
 static int safe_uv_write(uv_http_conn_t *conn, char *write_buf, size_t write_len)
 {
     if (!conn || !write_buf || write_len == 0) {
@@ -2108,8 +2159,10 @@ static int safe_uv_write(uv_http_conn_t *conn, char *write_buf, size_t write_len
         return -1;
     }
     
-    /* Check connection state */
+    /* Check if connection is valid and not closing - with lock protection */
+    pthread_mutex_lock(&conn->write_lock);
     if (conn->state == CONN_STATE_CLOSING) {
+        pthread_mutex_unlock(&conn->write_lock);
         buckets_debug("safe_uv_write: connection is closing");
         buckets_free(write_buf);
         return -1;
@@ -2118,6 +2171,7 @@ static int safe_uv_write(uv_http_conn_t *conn, char *write_buf, size_t write_len
     /* Validate stream type before write */
     uv_stream_t *stream = (uv_stream_t*)&conn->tcp;
     if (stream->type != UV_TCP) {
+        pthread_mutex_unlock(&conn->write_lock);
         buckets_error("safe_uv_write: invalid stream type %d (expected UV_TCP=%d)", 
                      stream->type, UV_TCP);
         buckets_free(write_buf);
@@ -2126,14 +2180,23 @@ static int safe_uv_write(uv_http_conn_t *conn, char *write_buf, size_t write_len
     
     /* Check if handle is closing */
     if (uv_is_closing((uv_handle_t*)&conn->tcp)) {
+        pthread_mutex_unlock(&conn->write_lock);
         buckets_debug("safe_uv_write: handle is closing");
         buckets_free(write_buf);
         return -1;
     }
     
+    /* Increment pending writes counter before initiating write */
+    conn->pending_writes++;
+    pthread_mutex_unlock(&conn->write_lock);
+    
     uv_buf_t buf = uv_buf_init(write_buf, write_len);
     uv_write_t *req = buckets_malloc(sizeof(uv_write_t));
     if (!req) {
+        /* Decrement on allocation failure */
+        pthread_mutex_lock(&conn->write_lock);
+        conn->pending_writes--;
+        pthread_mutex_unlock(&conn->write_lock);
         buckets_free(write_buf);
         return -1;
     }
@@ -2141,6 +2204,10 @@ static int safe_uv_write(uv_http_conn_t *conn, char *write_buf, size_t write_len
     
     int ret = uv_write(req, stream, &buf, 1, on_write_complete);
     if (ret != 0) {
+        /* Decrement on write failure */
+        pthread_mutex_lock(&conn->write_lock);
+        conn->pending_writes--;
+        pthread_mutex_unlock(&conn->write_lock);
         buckets_free(write_buf);
         buckets_free(req);
         buckets_error("safe_uv_write: uv_write failed: %s", uv_strerror(ret));
@@ -2161,8 +2228,24 @@ static void on_write_complete(uv_write_t *req, int status)
     
     if (!conn) return;
     
+    /* Decrement pending writes counter */
+    pthread_mutex_lock(&conn->write_lock);
+    if (conn->pending_writes > 0) {
+        conn->pending_writes--;
+    }
+    int pending = conn->pending_writes;
+    bool was_closing = (conn->state == CONN_STATE_CLOSING);
+    pthread_mutex_unlock(&conn->write_lock);
+    
     if (status < 0) {
         buckets_debug("Write failed: %s", uv_strerror(status));
+        uv_http_conn_close(conn);
+        return;
+    }
+    
+    /* If connection was marked for closing and this was the last write, close now */
+    if (was_closing && pending == 0) {
+        buckets_debug("Last pending write complete, closing connection");
         uv_http_conn_close(conn);
         return;
     }
