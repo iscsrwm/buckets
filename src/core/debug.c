@@ -30,8 +30,16 @@ static _Atomic uint64_t g_request_counter = 0;
 void buckets_debug_init(void)
 {
     memset(&g_stats, 0, sizeof(g_stats));
-    g_debug_instrumentation_enabled = false;
-    buckets_info("Debug instrumentation initialized (disabled by default)");
+    
+    /* Check environment variable */
+    const char *env_debug = getenv("BUCKETS_DEBUG");
+    if (env_debug && (strcmp(env_debug, "1") == 0 || strcmp(env_debug, "true") == 0)) {
+        g_debug_instrumentation_enabled = true;
+        buckets_info("Debug instrumentation initialized (ENABLED via BUCKETS_DEBUG env)");
+    } else {
+        g_debug_instrumentation_enabled = false;
+        buckets_info("Debug instrumentation initialized (disabled by default)");
+    }
 }
 
 void buckets_debug_cleanup(void)

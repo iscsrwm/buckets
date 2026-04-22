@@ -1,12 +1,12 @@
 # Buckets Project Status
 
-**Last Updated**: April 21, 2026  
-**Current Phase**: Phase 9 - S3 API Layer (Weeks 35-42) - ✅ **COMPLETE**  
-**Current Week**: Week 42 - Multi-Process Worker Pool ✅  
-**Status**: 🟢 **PRODUCTION READY** - 7.4x Performance Improvement  
-**Overall Progress**: 42/52 weeks (81% complete)  
-**Deployment**: ✅ Kubernetes with 16-worker multi-process architecture  
-**Performance**: ✅ 164 ops/sec per pod (was 22 ops/sec) - **7.46x faster** (verified repeatable)  
+**Last Updated**: April 22, 2026  
+**Current Phase**: Phase 9 - S3 API Layer (Weeks 35-42) - ⚠️ **ISSUES DISCOVERED**  
+**Current Week**: Week 43 - Performance Investigation & Critical Issue Discovery  
+**Status**: ⚠️ **SINGLE-CLIENT READY** - 🔴 **Multi-client failures discovered**  
+**Overall Progress**: 43/52 weeks (83% complete)  
+**Deployment**: ✅ Kubernetes with 16-worker multi-process architecture + socket buffer optimization  
+**Performance**: ✅ 100 ops/sec (single client) | 🔴 **0.1-0.5 ops/sec (multi-client, 40-70% failures)**  
 **Phase 1 Status**: ✅ COMPLETE (Foundation - Weeks 1-4)  
 **Phase 2 Status**: ✅ COMPLETE (Hashing - Weeks 5-7)  
 **Phase 3 Status**: ✅ COMPLETE (Cryptography & Erasure - Weeks 8-11)  
@@ -19,7 +19,178 @@
 
 ---
 
-## 🎉 Latest Achievement: Multi-Process Worker Pool - 7.46x Performance (Verified Repeatable)!
+## 🔬 Latest Work: Socket Buffer Optimization & Bottleneck Discovery (April 22, 2026)
+
+**Date**: April 22, 2026
+
+Implemented socket buffer optimization and conducted rigorous performance testing that **revealed the true bottleneck**: concurrency contention, not network latency.
+
+### Socket Buffer Optimization Results
+
+| Metric | Before (worker-pool-v2) | After (socket-opt) | Change |
+|--------|-------------------------|-------------------|--------|
+| **Throughput** | 164.18 ops/sec | **160.72 ops/sec** (avg of 2 runs) | -2.1% |
+| **Latency (avg)** | 302ms | **307.76ms** | +1.9% |
+| **Bandwidth** | 41.05 MB/s | **40.18 MB/s** | -2.1% |
+
+**Result**: No significant performance change (within ±1.86% measurement variance)
+
+### Critical Discovery: The Real Bottleneck 🎯
+
+Initial assumption: "300ms latency = network RTT"  
+**This was WRONG!** Detailed testing revealed:
+
+#### Actual Network Performance (Measured with ping/curl)
+- **ICMP ping**: 0.36ms RTT (NOT 300ms!)
+- **TCP connect**: ~1ms
+- **HTTP request**: ~3-4ms total
+- **Single PUT**: **25-30ms actual processing**
+
+#### The Real Problem: Concurrency Contention
+
+Testing with varying worker counts hitting a single pod:
+
+| Workers | Avg Latency | Throughput | Min Latency | Issue |
+|---------|-------------|------------|-------------|-------|
+| 1 | 28.82ms | 34.52 ops/sec | 22.93ms | Baseline |
+| 5 | 53.50ms | 81.28 ops/sec | 28.41ms | Good |
+| 10 | 76.38ms | **96.12 ops/sec** | 31.31ms | **Optimal** |
+| 20 | 132.63ms | 102.24 ops/sec | 25.87ms | Some queuing |
+| **50** | **233.21ms** | **72.02 ops/sec** ⬇️ | 52.64ms | **Severe contention** |
+
+**Key Insight**: 
+- Min latency stays ~25-30ms (true processing time)
+- Avg latency grows with concurrency due to **queueing**
+- **50 workers → 1 pod causes throughput COLLAPSE** (too much contention)
+
+#### Where the 300ms "Latency" Actually Comes From
+
+When 50 workers hit a single pod:
+- **Actual processing**: ~30ms
+- **Queueing time**: ~270ms (waiting for CPU, locks, worker threads)
+- **Total observed**: ~300ms average
+
+**The 300ms is NOT network delay - it's requests waiting in queues!**
+
+### Corrected Bottleneck Analysis
+
+| Component | Contribution | Status |
+|-----------|--------------|--------|
+| **Concurrency contention** | ~270ms (90%) | 🔴 **REAL BOTTLENECK** |
+| **Request processing** | ~30ms (10%) | 🟢 Efficient |
+| **Network RTT** | ~0.4ms (<1%) | 🟢 Extremely fast |
+| **Disk I/O** | ~5-10ms (included in 30ms) | 🟢 Optimized |
+
+**Files Modified**: `src/net/uv_server.c` - Added SO_SNDBUF/SO_RCVBUF settings  
+**Docker Image**: `russellmy/buckets:socket-opt`  
+**Documentation**: `docs/SOCKET_BUFFER_OPTIMIZATION.md` (with corrected analysis)
+
+### Next Optimization Opportunities (Re-Prioritized)
+
+Based on **corrected understanding** of bottlenecks:
+
+1. **⭐ Distribute Load Across All 6 Pods** (IMMEDIATE HIGH IMPACT)
+   - **Current**: 50 workers → 1 pod = severe contention
+   - **Better**: 50 workers → 6 pods = ~8 workers per pod
+   - **Expected**: 480+ ops/sec, 60ms latency (6x improvement!)
+   - **Effort**: Low (use LoadBalancer service instead of direct pod)
+
+2. **Optimize Concurrency Handling** (High impact, medium effort)
+   - Profile and reduce lock contention
+   - Increase worker thread pool (16 → 32-64)
+   - Better request queuing strategies
+   - Expected: 2-3x improvement at high concurrency
+
+3. **io_uring Async I/O** (High impact, high complexity)
+   - Reduce thread blocking on I/O
+   - Eliminate memory copies
+   - Expected: 3-5x improvement in concurrent scenarios
+
+4. **Smart Request Routing** (Medium impact)
+   - Local-first reads
+   - Reduce inter-pod RPC
+   - Expected: 50-100% GET improvement
+
+**⚠️ CRITICAL FINDING**: Multi-client testing revealed systemic failures (37-68% failure rate, 10-20 second latencies). System works well for single clients (~100 ops/sec) but fails under multi-client load. Requires immediate investigation before production deployment.
+
+See `docs/PERFORMANCE_SUMMARY_APR22.md` for complete analysis.
+
+---
+
+## 🔴 Critical Issue Discovered: Multi-Client Failures (April 22, 2026)
+
+**Issue**: System cannot handle multiple concurrent clients even with session affinity
+
+### Test Results
+
+**Single Client** (✅ Works):
+- 1 benchmark pod, 10-20 workers
+- Throughput: 96-102 ops/sec
+- Success rate: 100%
+- Latency: 76-132ms
+
+**Multiple Clients** (🔴 Fails):
+- 3 benchmark pods, 10 workers each (30 total)
+- Throughput: 0.12-0.33 ops/sec per pod
+- Success rate: 45-55% (37-68% failures!)
+- Latency: 10-21 seconds (30s timeouts)
+
+**6 benchmark pods, 10 workers each (60 total)**:
+- Throughput: 0.12-0.50 ops/sec per pod  
+- Success rate: 32-63%
+- Latency: 10-21 seconds
+
+### Symptoms
+- 30-second operation timeouts
+- "Chunk write failed" errors
+- "Failed to receive response" errors
+- Extreme latency (10-20 seconds vs expected 100ms)
+
+### Impact
+🔴 **System NOT production-ready for multi-client workloads**
+
+**What works**: Single client accessing the cluster (~100 ops/sec)  
+**What fails**: Multiple independent clients (causes 40-70% failure rate)
+
+### Required Actions
+
+1. **Debug multi-client coordination failures**
+   - Enable comprehensive logging
+   - Profile lock contention and resource usage
+   - Check RPC connection pool exhaustion
+   - Review erasure coding coordination logic
+
+2. **Identify root cause**
+   - Why do multiple clients cause failures?
+   - Resource limits (FDs, threads, memory)?
+   - Distributed coordination bugs?
+   - Deadlocks or race conditions?
+
+3. **Do NOT deploy to production** until this is resolved
+
+**Status**: Investigation required before claiming production-ready status
+
+---
+
+## Previous Findings from April 22, 2026
+
+### Socket Buffer Optimization (Completed)
+
+**Result**: No performance impact (-2.1%, within variance)  
+**Conclusion**: Socket buffers were NOT the bottleneck
+
+### Network RTT Measurement (Critical Discovery)
+
+**Initial assumption**: 300ms benchmark latency = network delay  
+**Actual measurement**:
+- ICMP ping: **0.36ms** RTT
+- HTTP request: **3-4ms** total
+
+**Conclusion**: Network is extremely fast. The 300ms is NOT network delay.
+
+---
+
+## 🎉 Previous Achievement: Multi-Process Worker Pool - 7.46x Performance (Verified Repeatable)!
 
 **Date**: April 21, 2026
 
