@@ -1691,8 +1691,18 @@ static void send_buffered_response(uv_http_conn_t *conn, uv_async_work_t *async)
         return;
     }
     
+    /* Increment pending writes BEFORE calling uv_write to prevent race with close */
+    pthread_mutex_lock(&conn->write_lock);
+    conn->pending_writes++;
+    pthread_mutex_unlock(&conn->write_lock);
+    
     int ret = uv_write(req, stream, &buf, 1, on_write_complete);
     if (ret != 0) {
+        /* Decrement on failure since write callback won't be called */
+        pthread_mutex_lock(&conn->write_lock);
+        conn->pending_writes--;
+        pthread_mutex_unlock(&conn->write_lock);
+        
         buckets_free(write_buf);
         buckets_free(req);
         buckets_error("uv_write failed: %s", uv_strerror(ret));
@@ -1713,21 +1723,44 @@ static void async_handler_after_work(uv_work_t *work, int status)
     
     (void)status;  /* Ignore cancel status for now */
     
-    /* Clear async_work pointer so response functions work normally if called again */
-    conn->async_work = NULL;
+    /* CRITICAL: Check if connection is still alive BEFORE doing anything.
+     * The connection could have timed out or been closed while we were in the thread pool.
+     * If connection is closing, just cleanup and return. */
+    if (conn->state == CONN_STATE_CLOSING || uv_is_closing((uv_handle_t*)&conn->tcp)) {
+        buckets_debug("Connection closed during async work, skipping response");
+        /* Clear async_work pointer */
+        conn->async_work = NULL;
+        /* Free async work structure and its buffers */
+        for (int i = 0; i < async->num_headers && async->response_headers[i]; i++) {
+            buckets_free(async->response_headers[i]);
+        }
+        if (async->response_body) {
+            buckets_free(async->response_body);
+        }
+        buckets_free(async);
+        return;
+    }
     
     /* Send the buffered response (now safe - we're on event loop thread).
      * Note: send_buffered_response sets pending_final_write=true, so on_write_complete
-     * will handle keep-alive/close AFTER the write completes - don't do it here! */
+     * will handle keep-alive/close AFTER the write completes - don't do it here! 
+     * 
+     * IMPORTANT: We keep async_work set until AFTER the response is queued to prevent
+     * the timeout handler from closing the connection mid-send. */
     if (async->response_ready && async->response_started) {
         send_buffered_response(conn, async);
+        /* Clear async_work pointer AFTER response is queued */
+        conn->async_work = NULL;
         /* Don't touch conn after this - on_write_complete handles keep-alive/close */
     } else if (!conn->response_started) {
-        /* Handler didn't send response - send 500 and close.
-         * Since async_work is cleared, uv_http_response_* will write directly. */
+        /* Handler didn't send response - send 500 and close. */
         conn->pending_final_write = true;
+        conn->async_work = NULL;  /* Clear before calling response functions */
         uv_http_response_start(conn, 500, NULL, 0, 0);
         /* Note: uv_http_response_end doesn't write anything for non-chunked with 0 body */
+    } else {
+        /* Response started but not ready - shouldn't happen, but handle gracefully */
+        conn->async_work = NULL;
     }
     
     /* Free async work structure and its buffers */

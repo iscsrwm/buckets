@@ -1,0 +1,173 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-multi-client-1
+  namespace: buckets
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: russellmy/buckets-benchmark:go
+        imagePullPolicy: Always
+        env:
+        - name: TARGET_URL
+          value: "http://buckets-headless.buckets.svc.cluster.local:9000"
+        - name: WORKERS
+          value: "20"
+        - name: DURATION
+          value: "30s"
+        - name: SIZE
+          value: "256KB"
+        - name: CLIENT_ID
+          value: "1"
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "========================================"
+          echo "MULTI-CLIENT BENCHMARK - CLIENT 1"
+          echo "========================================"
+          echo ""
+          echo "Configuration:"
+          echo "  Target: $TARGET_URL"
+          echo "  Workers: $WORKERS concurrent workers"
+          echo "  Duration: $DURATION"
+          echo "  Object size: $SIZE"
+          echo ""
+          echo "========================================"
+          echo ""
+          
+          # Run benchmark
+          /benchmark \
+            -endpoint="$TARGET_URL" \
+            -workers=$WORKERS \
+            -duration=$DURATION \
+            -size=262144
+          
+          EXIT_CODE=$?
+          
+          echo ""
+          echo "========================================"
+          echo "CLIENT 1 - Benchmark completed (exit code: $EXIT_CODE)"
+          echo "========================================"
+          
+          exit $EXIT_CODE
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-multi-client-2
+  namespace: buckets
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: russellmy/buckets-benchmark:go
+        imagePullPolicy: Always
+        env:
+        - name: TARGET_URL
+          value: "http://buckets-headless.buckets.svc.cluster.local:9000"
+        - name: WORKERS
+          value: "20"
+        - name: DURATION
+          value: "30s"
+        - name: SIZE
+          value: "256KB"
+        - name: CLIENT_ID
+          value: "2"
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "========================================"
+          echo "MULTI-CLIENT BENCHMARK - CLIENT 2"
+          echo "========================================"
+          echo ""
+          echo "Configuration:"
+          echo "  Target: $TARGET_URL"
+          echo "  Workers: $WORKERS concurrent workers"
+          echo "  Duration: $DURATION"
+          echo "  Object size: $SIZE"
+          echo ""
+          echo "========================================"
+          echo ""
+          
+          # Run benchmark
+          /benchmark \
+            -endpoint="$TARGET_URL" \
+            -workers=$WORKERS \
+            -duration=$DURATION \
+            -size=262144
+          
+          EXIT_CODE=$?
+          
+          echo ""
+          echo "========================================"
+          echo "CLIENT 2 - Benchmark completed (exit code: $EXIT_CODE)"
+          echo "========================================"
+          
+          exit $EXIT_CODE
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-multi-client-3
+  namespace: buckets
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: russellmy/buckets-benchmark:go
+        imagePullPolicy: Always
+        env:
+        - name: TARGET_URL
+          value: "http://buckets-headless.buckets.svc.cluster.local:9000"
+        - name: WORKERS
+          value: "20"
+        - name: DURATION
+          value: "30s"
+        - name: SIZE
+          value: "256KB"
+        - name: CLIENT_ID
+          value: "3"
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "========================================"
+          echo "MULTI-CLIENT BENCHMARK - CLIENT 3"
+          echo "========================================"
+          echo ""
+          echo "Configuration:"
+          echo "  Target: $TARGET_URL"
+          echo "  Workers: $WORKERS concurrent workers"
+          echo "  Duration: $DURATION"
+          echo "  Object size: $SIZE"
+          echo ""
+          echo "========================================"
+          echo ""
+          
+          # Run benchmark
+          /benchmark \
+            -endpoint="$TARGET_URL" \
+            -workers=$WORKERS \
+            -duration=$DURATION \
+            -size=262144
+          
+          EXIT_CODE=$?
+          
+          echo ""
+          echo "========================================"
+          echo "CLIENT 3 - Benchmark completed (exit code: $EXIT_CODE)"
+          echo "========================================"
+          
+          exit $EXIT_CODE
