@@ -1,0 +1,179 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: debug-multi-client-1
+  namespace: buckets
+spec:
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: benchmark
+        test: debug-multi-client
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: curlimages/curl:latest
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            echo "=== Debug Multi-Client Test - Pod 1 ==="
+            echo "Testing with 10 workers, 20 second duration"
+            
+            # Wait for all pods to be ready
+            sleep 5
+            
+            # Run load test
+            for i in $(seq 1 10); do
+              (
+                start=$(date +%s%N)
+                # PUT test object
+                dd if=/dev/urandom bs=256k count=1 2>/dev/null | \
+                  curl -X PUT \
+                    --data-binary @- \
+                    --max-time 30 \
+                    -w "PUT: status=%{http_code} time=%{time_total}s\n" \
+                    -o /dev/null -s \
+                    "http://buckets-headless.buckets.svc.cluster.local:9000/test-bucket/debug-pod1-obj-${i}" || \
+                  echo "PUT FAILED for obj-${i}"
+                
+                # GET test object
+                curl -X GET \
+                  --max-time 30 \
+                  -w "GET: status=%{http_code} time=%{time_total}s\n" \
+                  -o /dev/null -s \
+                  "http://buckets-headless.buckets.svc.cluster.local:9000/test-bucket/debug-pod1-obj-${i}" || \
+                  echo "GET FAILED for obj-${i}"
+                
+                end=$(date +%s%N)
+                duration_ms=$(( (end - start) / 1000000 ))
+                echo "Worker ${i}: Total duration ${duration_ms}ms"
+              ) &
+            done
+            
+            # Wait for all workers
+            wait
+            
+            echo "=== Pod 1 Complete ==="
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: debug-multi-client-2
+  namespace: buckets
+spec:
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: benchmark
+        test: debug-multi-client
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: curlimages/curl:latest
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            echo "=== Debug Multi-Client Test - Pod 2 ==="
+            echo "Testing with 10 workers, 20 second duration"
+            
+            # Wait for all pods to be ready
+            sleep 5
+            
+            # Run load test
+            for i in $(seq 1 10); do
+              (
+                start=$(date +%s%N)
+                # PUT test object
+                dd if=/dev/urandom bs=256k count=1 2>/dev/null | \
+                  curl -X PUT \
+                    --data-binary @- \
+                    --max-time 30 \
+                    -w "PUT: status=%{http_code} time=%{time_total}s\n" \
+                    -o /dev/null -s \
+                    "http://buckets-headless.buckets.svc.cluster.local:9000/test-bucket/debug-pod2-obj-${i}" || \
+                  echo "PUT FAILED for obj-${i}"
+                
+                # GET test object
+                curl -X GET \
+                  --max-time 30 \
+                  -w "GET: status=%{http_code} time=%{time_total}s\n" \
+                  -o /dev/null -s \
+                  "http://buckets-headless.buckets.svc.cluster.local:9000/test-bucket/debug-pod2-obj-${i}" || \
+                  echo "GET FAILED for obj-${i}"
+                
+                end=$(date +%s%N)
+                duration_ms=$(( (end - start) / 1000000 ))
+                echo "Worker ${i}: Total duration ${duration_ms}ms"
+              ) &
+            done
+            
+            # Wait for all workers
+            wait
+            
+            echo "=== Pod 2 Complete ==="
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: debug-multi-client-3
+  namespace: buckets
+spec:
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: benchmark
+        test: debug-multi-client
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: curlimages/curl:latest
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            echo "=== Debug Multi-Client Test - Pod 3 ==="
+            echo "Testing with 10 workers, 20 second duration"
+            
+            # Wait for all pods to be ready
+            sleep 5
+            
+            # Run load test
+            for i in $(seq 1 10); do
+              (
+                start=$(date +%s%N)
+                # PUT test object
+                dd if=/dev/urandom bs=256k count=1 2>/dev/null | \
+                  curl -X PUT \
+                    --data-binary @- \
+                    --max-time 30 \
+                    -w "PUT: status=%{http_code} time=%{time_total}s\n" \
+                    -o /dev/null -s \
+                    "http://buckets-headless.buckets.svc.cluster.local:9000/test-bucket/debug-pod3-obj-${i}" || \
+                  echo "PUT FAILED for obj-${i}"
+                
+                # GET test object
+                curl -X GET \
+                  --max-time 30 \
+                  -w "GET: status=%{http_code} time=%{time_total}s\n" \
+                  -o /dev/null -s \
+                  "http://buckets-headless.buckets.svc.cluster.local:9000/test-bucket/debug-pod3-obj-${i}" || \
+                  echo "GET FAILED for obj-${i}"
+                
+                end=$(date +%s%N)
+                duration_ms=$(( (end - start) / 1000000 ))
+                echo "Worker ${i}: Total duration ${duration_ms}ms"
+              ) &
+            done
+            
+            # Wait for all workers
+            wait
+            
+            echo "=== Pod 3 Complete ==="

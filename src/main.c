@@ -356,14 +356,20 @@ int main(int argc, char *argv[]) {
 
     /* Set libuv thread pool size BEFORE any libuv calls.
      * Default is 4 which is too small for distributed operations.
-     * Each async handler (RPC, S3 ops) uses a thread from this pool.
-     * With 6 nodes making concurrent RPCs, we need more threads to
-     * prevent deadlock. 32 threads should handle typical workloads. */
+     * Each async handler (RPC, S3 ops, chunk writes) uses a thread from this pool.
+     * 
+     * Multi-client workloads can generate high concurrency:
+     * - Multiple clients × workers per client × chunks per object = concurrent operations
+     * - Each operation blocks a thread during disk I/O (open/write/fsync)
+     * - Need enough threads so requests don't wait >30 seconds (socket timeout)
+     * 
+     * Example: 3 clients × 10 workers × 12 chunks = 360 concurrent chunk writes
+     * Each chunk write takes ~10ms, but may queue if pool exhausted.
+     * 
+     * Setting to 512 threads to handle high multi-client concurrency. */
     if (getenv("UV_THREADPOOL_SIZE") == NULL) {
-        /* Need many threads to handle concurrent RPC calls without deadlock.
-         * With 6 nodes, each request can trigger 12 parallel chunk operations,
-         * and each of those may require RPC calls. 128 threads provides headroom. */
-        setenv("UV_THREADPOOL_SIZE", "128", 1);
+        setenv("UV_THREADPOOL_SIZE", "512", 1);
+        buckets_info("UV thread pool size: 512 (optimized for multi-client workloads)");
     }
 
     /* Initialize logging first */
