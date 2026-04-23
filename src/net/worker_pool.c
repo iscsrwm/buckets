@@ -27,6 +27,7 @@
 
 #include "buckets.h"
 #include "buckets_worker_pool.h"
+#include "buckets_storage.h"  /* For buckets_chunk_reinit_after_fork */
 
 /* Maximum number of worker processes */
 #define MAX_WORKERS 64
@@ -91,6 +92,9 @@ static int worker_main(int worker_id, buckets_http_worker_callback_t callback, v
     signal(SIGCHLD, SIG_DFL);
     
     buckets_info("Worker %d started (pid=%d)", worker_id, getpid());
+    
+    /* Reinitialize io_uring after fork - CRITICAL for correct operation */
+    buckets_chunk_reinit_after_fork();
     
     /* Set environment variable so worker knows its ID */
     char worker_id_str[32];

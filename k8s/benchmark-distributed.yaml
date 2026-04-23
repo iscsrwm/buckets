@@ -1,0 +1,62 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-dist-pod0
+  namespace: buckets
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: russellmy/buckets-benchmark:go-fixed-v2
+        imagePullPolicy: Always
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Distributed Test - Targeting buckets-0"
+          /benchmark -endpoint="http://buckets-0.buckets-headless.buckets.svc.cluster.local:9000" -workers=20 -duration=30s -size=262144
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-dist-pod1
+  namespace: buckets
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: russellmy/buckets-benchmark:go-fixed-v2
+        imagePullPolicy: Always
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Distributed Test - Targeting buckets-1"
+          /benchmark -endpoint="http://buckets-1.buckets-headless.buckets.svc.cluster.local:9000" -workers=20 -duration=30s -size=262144
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-dist-pod2
+  namespace: buckets
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: russellmy/buckets-benchmark:go-fixed-v2
+        imagePullPolicy: Always
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Distributed Test - Targeting buckets-2"
+          /benchmark -endpoint="http://buckets-2.buckets-headless.buckets.svc.cluster.local:9000" -workers=20 -duration=30s -size=262144

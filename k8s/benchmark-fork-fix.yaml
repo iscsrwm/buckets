@@ -1,0 +1,44 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-fork-fix
+  namespace: buckets
+spec:
+  completions: 1
+  parallelism: 1
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: russellmy/buckets-benchmark:latest
+        env:
+        - name: S3_ENDPOINT
+          value: "http://buckets-lb.buckets.svc.cluster.local:9000"
+        - name: AWS_ACCESS_KEY_ID
+          value: "minioadmin"
+        - name: AWS_SECRET_ACCESS_KEY
+          value: "minioadmin"
+        - name: AWS_EC2_METADATA_DISABLED
+          value: "true"
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          echo "=== Buckets Fork Fix Benchmark ==="
+          echo "Endpoint: $S3_ENDPOINT"
+          echo "Starting benchmark at $(date)"
+          echo ""
+          
+          # Run benchmark with multiple concurrent clients to stress test multi-process worker pool
+          /benchmark \
+            -endpoint=$S3_ENDPOINT \
+            -bucket=test-fork-fix \
+            -duration=60s \
+            -workers=16 \
+            -size=65536
+          
+          echo ""
+          echo "Benchmark completed at $(date)"

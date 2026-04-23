@@ -547,18 +547,18 @@ int buckets_put_object(const char *bucket, const char *object,
             chunk_array[i] = (i < k) ? data_chunks[i] : parity_chunks[i - k];
         }
         
-        /* Write all chunks in parallel */
+        /* Write all chunks in parallel with batching optimization */
         struct timespec start_write, end_write;
         clock_gettime(CLOCK_MONOTONIC, &start_write);
         
-        extern int buckets_parallel_write_chunks(const char *bucket, const char *object,
-                                                 const char *object_path,
-                                                 buckets_placement_result_t *placement,
-                                                 const void **chunk_data_array,
-                                                 size_t chunk_size, u32 num_chunks);
+        extern int buckets_batched_parallel_write_chunks(const char *bucket, const char *object,
+                                                         const char *object_path,
+                                                         buckets_placement_result_t *placement,
+                                                         const void **chunk_data_array,
+                                                         size_t chunk_size, u32 num_chunks);
         
-        int write_result = buckets_parallel_write_chunks(bucket, object, object_path, placement,
-                                                         chunk_array, chunk_size, k + m);
+        int write_result = buckets_batched_parallel_write_chunks(bucket, object, object_path, placement,
+                                                                 chunk_array, chunk_size, k + m);
         
         clock_gettime(CLOCK_MONOTONIC, &end_write);
         double write_time = (end_write.tv_sec - start_write.tv_sec) + 

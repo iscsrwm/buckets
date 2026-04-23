@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     zlib1g-dev \
     uuid-dev \
+    liburing-dev \
     git \
     wget \
     autoconf \
@@ -44,6 +45,7 @@ RUN apt-get update && apt-get install -y \
     libssl3 \
     zlib1g \
     uuid-runtime \
+    liburing2 \
     ca-certificates \
     curl \
     && rm -rf /var/lib/apt/lists/*

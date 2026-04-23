@@ -15,6 +15,7 @@
 #include "buckets.h"
 #include "buckets_net.h"
 #include "uv_server_internal.h"
+#include "uv_server_metrics.h"
 
 /* ===================================================================
  * Stream Validation Macro
@@ -348,6 +349,9 @@ int uv_http_server_start(uv_http_server_t *server)
         buckets_warn("Server already running");
         return BUCKETS_OK;
     }
+    
+    /* Initialize metrics */
+    uv_metrics_init();
     
     /* Initialize TLS if enabled */
     int ret = uv_http_tls_init(server);
@@ -774,22 +778,36 @@ void uv_http_conn_reset(uv_http_conn_t *conn)
 
 void uv_http_conn_close(uv_http_conn_t *conn)
 {
-    if (!conn || conn->state == CONN_STATE_CLOSING) {
+    if (!conn) {
+        return;
+    }
+    
+    buckets_info("uv_http_conn_close: conn=%p", conn);
+    
+    /* CRITICAL: We must set CONN_STATE_CLOSING and check pending_writes atomically
+     * to prevent race with async_handler_after_work. If we set CLOSING outside the lock,
+     * async work could check the state, see it's not closing, then we proceed to close
+     * the connection while async work tries to write to it. */
+    pthread_mutex_lock(&conn->write_lock);
+    
+    if (conn->state == CONN_STATE_CLOSING) {
+        buckets_info("  already closing, returning (conn=%p)", conn);
+        pthread_mutex_unlock(&conn->write_lock);
         return;
     }
     
     conn->state = CONN_STATE_CLOSING;
-    
-    /* Check if there are pending writes - if so, they will close when complete */
-    pthread_mutex_lock(&conn->write_lock);
     int pending = conn->pending_writes;
+    buckets_info("  set CLOSING state, pending_writes=%d (conn=%p)", pending, conn);
     pthread_mutex_unlock(&conn->write_lock);
     
     if (pending > 0) {
-        buckets_debug("Connection has %d pending writes, deferring close", pending);
+        buckets_info("  Connection has %d pending writes, deferring close (conn=%p)", pending, conn);
         /* The last write completion will detect CLOSING state and call close again */
         return;
     }
+    
+    buckets_info("  Proceeding to close handles (conn=%p)", conn);
     
     /* Stop timeout timer */
     uv_timer_stop(&conn->timeout_timer);
@@ -800,10 +818,12 @@ void uv_http_conn_close(uv_http_conn_t *conn)
     /* Close handles - use the same callback for both so we know when all are done */
     if (!uv_is_closing((uv_handle_t*)&conn->timeout_timer)) {
         conn->pending_close_count++;
+        buckets_info("  Closing timeout timer (conn=%p)", conn);
         uv_close((uv_handle_t*)&conn->timeout_timer, on_handle_close);
     }
     if (!uv_is_closing((uv_handle_t*)&conn->tcp)) {
         conn->pending_close_count++;
+        buckets_info("  Closing TCP handle (conn=%p)", conn);
         uv_close((uv_handle_t*)&conn->tcp, on_handle_close);
     }
     
@@ -831,6 +851,7 @@ static void on_handle_close(uv_handle_t *handle)
     }
     
     /* All handles are now closed - safe to free the connection */
+    buckets_info("on_handle_close: All handles closed, freeing connection (conn=%p)", conn);
     uv_http_server_t *server = conn->server;
     
     /* Remove from server's connection list */
@@ -860,6 +881,9 @@ static void on_handle_close(uv_handle_t *handle)
     
     /* Destroy write lock */
     pthread_mutex_destroy(&conn->write_lock);
+    
+    /* Track connection closure */
+    uv_metrics_conn_closed();
     
     buckets_free(conn);
 }
@@ -904,6 +928,9 @@ static void on_timeout(uv_timer_t *timer)
         
         /* Best effort write - don't wait for completion */
         uv_try_write((uv_stream_t*)&conn->tcp, &buf, 1);
+        
+        /* Track timeout */
+        uv_metrics_timeout();
     }
     
     uv_http_conn_close(conn);
@@ -925,6 +952,7 @@ static void on_connection(uv_stream_t *server_handle, int status)
     /* Check connection limit */
     if (server->connection_count >= server->max_connections) {
         buckets_warn("Connection limit reached (%d)", server->max_connections);
+        uv_metrics_conn_rejected();
         
         /* Accept and immediately close */
         uv_tcp_t temp;
@@ -952,6 +980,9 @@ static void on_connection(uv_stream_t *server_handle, int status)
     
     /* Enable TCP_NODELAY for lower latency */
     uv_tcp_nodelay(&conn->tcp, 1);
+    
+    /* Track connection acceptance */
+    uv_metrics_conn_accepted();
     
     /* Optimize socket buffers for high-throughput transfers
      * 
@@ -1112,6 +1143,9 @@ static void on_read(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf)
 {
     uv_http_conn_t *conn = (uv_http_conn_t*)stream->data;
     (void)buf;  /* We use conn->read_buffer */
+    
+    /* Periodically snapshot metrics (throttled internally to every 10 seconds) */
+    uv_metrics_snapshot();
     
     if (nread < 0) {
         if (nread != UV_EOF) {
@@ -1612,12 +1646,20 @@ static void async_handler_work(uv_work_t *work)
 /**
  * Helper to send buffered response from async handler.
  * Called from event loop thread (safe to use uv_write).
+ * 
+ * @param lock_held If true, caller already holds conn->write_lock and this function
+ *                  will release it after incrementing pending_writes.
  */
-static void send_buffered_response(uv_http_conn_t *conn, uv_async_work_t *async)
+static void send_buffered_response(uv_http_conn_t *conn, uv_async_work_t *async, bool lock_held)
 {
-    /* Check if connection is still valid for writing */
+    /* Check if connection is still valid for writing.
+     * NOTE: This check is redundant when lock_held=true since the caller already checked,
+     * but we keep it for the non-locked path. */
     if (conn->state == CONN_STATE_CLOSING || uv_is_closing((uv_handle_t*)&conn->tcp)) {
         buckets_debug("Connection closing, skipping buffered response send");
+        if (lock_held) {
+            pthread_mutex_unlock(&conn->write_lock);
+        }
         return;
     }
     
@@ -1655,6 +1697,9 @@ static void send_buffered_response(uv_http_conn_t *conn, uv_async_work_t *async)
     char *write_buf = buckets_malloc(total_len);
     if (!write_buf) {
         buckets_error("Failed to allocate write buffer");
+        if (lock_held) {
+            pthread_mutex_unlock(&conn->write_lock);
+        }
         uv_http_conn_close(conn);
         return;
     }
@@ -1674,6 +1719,9 @@ static void send_buffered_response(uv_http_conn_t *conn, uv_async_work_t *async)
         buckets_free(write_buf);
         buckets_error("Failed to allocate write request");
         conn->pending_final_write = false;
+        if (lock_held) {
+            pthread_mutex_unlock(&conn->write_lock);
+        }
         uv_http_conn_close(conn);
         return;
     }
@@ -1684,16 +1732,38 @@ static void send_buffered_response(uv_http_conn_t *conn, uv_async_work_t *async)
     if (stream->type != UV_TCP) {
         buckets_error("send_buffered_response: invalid stream type %d (expected UV_TCP=%d)", 
                      stream->type, UV_TCP);
+        buckets_error("  conn=%p, state=%d, pending_writes=%d, async_work=%p, lock_held=%d",
+                     conn, conn->state, conn->pending_writes, conn->async_work, lock_held);
+        buckets_error("  uv_is_closing=%d, response_started=%d, pending_final_write=%d",
+                     uv_is_closing((uv_handle_t*)&conn->tcp), conn->response_started, 
+                     conn->pending_final_write);
         buckets_free(write_buf);
         buckets_free(req);
         conn->pending_final_write = false;
+        if (lock_held) {
+            pthread_mutex_unlock(&conn->write_lock);
+        }
         uv_http_conn_close(conn);
         return;
     }
     
-    /* Increment pending writes BEFORE calling uv_write to prevent race with close */
-    pthread_mutex_lock(&conn->write_lock);
+    /* Increment pending writes BEFORE calling uv_write to prevent race with close.
+     * If caller already holds the lock, we'll release it after increment.
+     * Otherwise, we acquire it ourselves.
+     * 
+     * CRITICAL: If lock_held=true, we also clear conn->async_work here while holding
+     * the lock. This prevents the timeout handler from seeing async_work==NULL and
+     * proceeding to close the connection while we're about to write. */
+    if (!lock_held) {
+        pthread_mutex_lock(&conn->write_lock);
+    }
     conn->pending_writes++;
+    buckets_info("send_buffered_response: incremented pending_writes to %d (conn=%p, lock_held=%d)",
+                 conn->pending_writes, conn, lock_held);
+    if (lock_held && conn->async_work) {
+        buckets_info("  clearing async_work (conn=%p)", conn);
+        conn->async_work = NULL;  /* Clear under lock to prevent timeout race */
+    }
     pthread_mutex_unlock(&conn->write_lock);
     
     int ret = uv_write(req, stream, &buf, 1, on_write_complete);
@@ -1723,11 +1793,27 @@ static void async_handler_after_work(uv_work_t *work, int status)
     
     (void)status;  /* Ignore cancel status for now */
     
+    /* Track async work completion */
+    if (async->queued_time_us > 0) {
+        uint64_t wait_time_us = uv_metrics_now_us() - async->queued_time_us;
+        uv_metrics_async_end(wait_time_us);
+    }
+    
     /* CRITICAL: Check if connection is still alive BEFORE doing anything.
      * The connection could have timed out or been closed while we were in the thread pool.
-     * If connection is closing, just cleanup and return. */
-    if (conn->state == CONN_STATE_CLOSING || uv_is_closing((uv_handle_t*)&conn->tcp)) {
-        buckets_debug("Connection closed during async work, skipping response");
+     * If connection is closing, just cleanup and return.
+     * 
+     * IMPORTANT: We must hold the write_lock while checking state AND queueing the response
+     * to prevent the timeout handler from closing the connection mid-send. */
+    buckets_info("async_handler_after_work: conn=%p, about to check state", conn);
+    pthread_mutex_lock(&conn->write_lock);
+    bool connection_closing = (conn->state == CONN_STATE_CLOSING || 
+                               uv_is_closing((uv_handle_t*)&conn->tcp));
+    
+    if (connection_closing) {
+        pthread_mutex_unlock(&conn->write_lock);
+        buckets_debug("Connection closed during async work, skipping response (conn=%p, state=%d)", 
+                     conn, conn->state);
         /* Clear async_work pointer */
         conn->async_work = NULL;
         /* Free async work structure and its buffers */
@@ -1741,6 +1827,11 @@ static void async_handler_after_work(uv_work_t *work, int status)
         return;
     }
     
+    /* Connection is still alive - increment pending_writes to prevent close during send.
+     * We hold the lock from the state check through the response queueing to ensure
+     * atomicity. The lock will be released by send_buffered_response after incrementing
+     * pending_writes. */
+    
     /* Send the buffered response (now safe - we're on event loop thread).
      * Note: send_buffered_response sets pending_final_write=true, so on_write_complete
      * will handle keep-alive/close AFTER the write completes - don't do it here! 
@@ -1748,18 +1839,19 @@ static void async_handler_after_work(uv_work_t *work, int status)
      * IMPORTANT: We keep async_work set until AFTER the response is queued to prevent
      * the timeout handler from closing the connection mid-send. */
     if (async->response_ready && async->response_started) {
-        send_buffered_response(conn, async);
-        /* Clear async_work pointer AFTER response is queued */
-        conn->async_work = NULL;
+        send_buffered_response(conn, async, true);  /* lock_held=true, clears async_work */
+        /* Note: async_work is cleared inside send_buffered_response under the lock */
         /* Don't touch conn after this - on_write_complete handles keep-alive/close */
     } else if (!conn->response_started) {
         /* Handler didn't send response - send 500 and close. */
+        pthread_mutex_unlock(&conn->write_lock);  /* Release lock we acquired earlier */
         conn->pending_final_write = true;
         conn->async_work = NULL;  /* Clear before calling response functions */
         uv_http_response_start(conn, 500, NULL, 0, 0);
         /* Note: uv_http_response_end doesn't write anything for non-chunked with 0 body */
     } else {
         /* Response started but not ready - shouldn't happen, but handle gracefully */
+        pthread_mutex_unlock(&conn->write_lock);  /* Release lock we acquired earlier */
         conn->async_work = NULL;
     }
     
@@ -1787,12 +1879,16 @@ static int queue_async_handler(uv_http_conn_t *conn, uv_route_t *route)
     async->route = route;
     async->response_ready = false;
     async->response_started = false;
+    async->queued_time_us = uv_metrics_now_us();
     
     /* Link async to connection so response functions can buffer */
     conn->async_work = async;
     
     /* Mark connection as processing to prevent timeout */
     conn->state = CONN_STATE_PROCESSING;
+    
+    /* Track async work start */
+    uv_metrics_async_start();
     
     /* Queue work to libuv thread pool */
     int ret = uv_queue_work(conn->server->loop, &async->work,
@@ -1827,12 +1923,16 @@ static int queue_async_default_handler(uv_http_conn_t *conn,
     async->handler_data = user_data;
     async->response_ready = false;
     async->response_started = false;
+    async->queued_time_us = uv_metrics_now_us();
     
     /* Link async to connection so response functions can buffer */
     conn->async_work = async;
     
     /* Mark connection as processing to prevent timeout */
     conn->state = CONN_STATE_PROCESSING;
+    
+    /* Track async work start */
+    uv_metrics_async_start();
     
     /* Queue work to libuv thread pool */
     int ret = uv_queue_work(conn->server->loop, &async->work,
@@ -1855,6 +1955,10 @@ static int queue_async_default_handler(uv_http_conn_t *conn,
 static void process_request(uv_http_conn_t *conn)
 {
     uv_http_server_t *server = conn->server;
+    
+    /* Track request start time for metrics */
+    conn->request_start_time_us = uv_metrics_now_us();
+    uv_metrics_request_start();
     
     /* If response already started (e.g., from streaming handler), skip to done */
     if (conn->response_started) {
@@ -1972,14 +2076,11 @@ int uv_http_response_start(uv_http_conn_t *conn, int status,
         return BUCKETS_ERR_INVALID_ARG;
     }
     
-    /* Check if connection is still valid for writing */
-    if (conn->state == CONN_STATE_CLOSING || uv_is_closing((uv_handle_t*)&conn->tcp)) {
-        buckets_debug("Connection closing, skipping response start");
-        return BUCKETS_ERR_IO;
-    }
-    
     /* If running in async handler (worker thread), buffer response instead of
-     * calling uv_write directly - uv_write is NOT thread-safe! */
+     * calling uv_write directly - uv_write is NOT thread-safe!
+     * IMPORTANT: Check this FIRST before checking connection state, because state
+     * checks (especially uv_is_closing) access conn->tcp which could be freed by
+     * timeout handler on event loop thread while we're in worker thread. */
     if (conn->async_work) {
         uv_async_work_t *async = conn->async_work;
         async->status_code = status;
@@ -1998,6 +2099,12 @@ int uv_http_response_start(uv_http_conn_t *conn, int status,
         conn->response_started = true;
         conn->response_chunked = false;
         return BUCKETS_OK;
+    }
+    
+    /* Not in async handler - check if connection is still valid for writing */
+    if (conn->state == CONN_STATE_CLOSING || uv_is_closing((uv_handle_t*)&conn->tcp)) {
+        buckets_debug("Connection closing, skipping response start");
+        return BUCKETS_ERR_IO;
     }
     
     /* Build response header */
@@ -2056,14 +2163,10 @@ int uv_http_response_write(uv_http_conn_t *conn, const void *data, size_t len)
 {
     if (len == 0) return BUCKETS_OK;
     
-    /* Validate stream before write */
-    if (!is_stream_valid_for_write(conn)) {
-        buckets_debug("Connection invalid, skipping response write");
-        return BUCKETS_ERR_IO;
-    }
-    
     /* If running in async handler (worker thread), buffer response body instead of
-     * calling uv_write directly - uv_write is NOT thread-safe! */
+     * calling uv_write directly - uv_write is NOT thread-safe!
+     * IMPORTANT: Check this FIRST before validating stream, because stream validation
+     * reads conn->tcp which could be freed by timeout handler on event loop thread. */
     if (conn->async_work) {
         uv_async_work_t *async = conn->async_work;
         
@@ -2082,6 +2185,12 @@ int uv_http_response_write(uv_http_conn_t *conn, const void *data, size_t len)
         memcpy(async->response_body + async->response_body_len, data, len);
         async->response_body_len += len;
         return BUCKETS_OK;
+    }
+    
+    /* Not in async handler - validate stream before actual write */
+    if (!is_stream_valid_for_write(conn)) {
+        buckets_debug("Connection invalid, skipping response write");
+        return BUCKETS_ERR_IO;
     }
     
     /* Allocate write buffer */
@@ -2286,6 +2395,13 @@ static void on_write_complete(uv_write_t *req, int status)
     /* If this was the final response write, handle keep-alive now */
     if (conn->pending_final_write) {
         conn->pending_final_write = false;
+        
+        /* Track request completion for metrics */
+        if (conn->request_start_time_us > 0) {
+            uint64_t latency_us = uv_metrics_now_us() - conn->request_start_time_us;
+            uv_metrics_request_end(latency_us);
+            conn->request_start_time_us = 0;
+        }
         
         if (conn->keep_alive && conn->state != CONN_STATE_CLOSING) {
             /* Reset for next request */

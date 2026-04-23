@@ -34,10 +34,13 @@ func generateTestData(size int) []byte {
 func worker(id int, endpoint string, bucket string, data []byte, duration time.Duration, results chan<- Result, wg *sync.WaitGroup) {
 	defer wg.Done()
 
+	// Each worker gets its own HTTP client to avoid lock contention
+	// But we configure larger connection pool to prevent blocking
 	client := &http.Client{
 		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
-			MaxIdleConnsPerHost: 10,
+			MaxIdleConnsPerHost: 100,  // Large enough for any worker count
+			MaxConnsPerHost:     0,     // Unlimited (default behavior)
 			IdleConnTimeout:     90 * time.Second,
 		},
 	}
@@ -128,7 +131,7 @@ func main() {
 
 	startTime := time.Now()
 
-	// Launch workers
+	// Launch workers (each creates its own client to avoid lock contention)
 	for i := 0; i < *workers; i++ {
 		wg.Add(1)
 		go worker(i, *endpoint, *bucket, data, *duration, results, &wg)

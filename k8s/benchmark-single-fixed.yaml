@@ -1,0 +1,47 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-single-fixed
+  namespace: buckets
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: russellmy/buckets-benchmark:go-fixed-v2
+        imagePullPolicy: Always
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "========================================"
+          echo "SINGLE CLIENT BENCHMARK (FIXED v2)"
+          echo "========================================"
+          echo ""
+          echo "Configuration:"
+          echo "  Target: http://buckets-headless.buckets.svc.cluster.local:9000"
+          echo "  Workers: 20 concurrent workers"
+          echo "  Duration: 30s"
+          echo "  Object size: 256KB"
+          echo "  FIX: Each worker has its own HTTP client with MaxIdleConns=100"
+          echo ""
+          echo "========================================"
+          echo ""
+          
+          # Run benchmark
+          /benchmark \
+            -endpoint="http://buckets-headless.buckets.svc.cluster.local:9000" \
+            -workers=20 \
+            -duration=30s \
+            -size=262144
+          
+          EXIT_CODE=$?
+          
+          echo ""
+          echo "========================================"
+          echo "SINGLE CLIENT (FIXED v2) - Benchmark completed (exit code: $EXIT_CODE)"
+          echo "========================================"
+          
+          exit $EXIT_CODE

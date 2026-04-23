@@ -22,7 +22,7 @@ extern "C" {
 #include "buckets_placement.h"
 
 /* Storage constants */
-#define BUCKETS_INLINE_THRESHOLD  (128 * 1024)  /* 128 KB */
+#define BUCKETS_INLINE_THRESHOLD  (512 * 1024)  /* 512 KB - optimized for network performance */
 #define BUCKETS_MIN_CHUNK_SIZE    (64 * 1024)   /* 64 KB */
 #define BUCKETS_MAX_CHUNK_SIZE    (512 * 1024 * 1024)  /* 512 MB - support large files */
 #define BUCKETS_HASH_PREFIX_LEN   2             /* 00-ff */
@@ -441,6 +441,21 @@ int buckets_read_chunk(const char *disk_path, const char *object_path,
  */
 int buckets_write_chunk(const char *disk_path, const char *object_path,
                         u32 chunk_index, const void *data, size_t size);
+
+/**
+ * Get global io_uring context for chunk I/O
+ * 
+ * @return io_uring context or NULL if not initialized
+ */
+struct buckets_io_uring_context* buckets_chunk_get_io_uring_ctx(void);
+
+/**
+ * Reinitialize io_uring after fork()
+ * 
+ * MUST be called in child process after fork() because io_uring file descriptors
+ * are not valid across fork boundaries, and pthread_once state is inherited.
+ */
+void buckets_chunk_reinit_after_fork(void);
 
 /**
  * Verify chunk checksum
@@ -885,28 +900,54 @@ int buckets_parallel_write_chunks(const char *bucket,
                                    u32 num_chunks);
 
 /**
- * Read multiple chunks in parallel (local + RPC)
+ * Write multiple chunks in parallel (local + RPC)
  * 
- * Executes chunk reads concurrently using thread pool for maximum performance.
- * Each chunk is read from its target disk (local or remote via RPC) in parallel.
- * Tolerates failures - returns number of successful reads (need >= K for reconstruction).
+ * Executes chunk writes concurrently using thread pool for maximum performance.
+ * Each chunk is written to its target disk (local or remote via RPC) in parallel.
+ * Tolerates failures - continues even if some chunks fail to write.
  * 
  * @param bucket Bucket name
  * @param object Object key
  * @param object_path Hashed object path (prefix/hash/)
  * @param placement Placement result with disk endpoints
- * @param chunk_data_array Output: Array of chunk data pointers (caller must free each)
- * @param chunk_sizes_array Output: Array of chunk sizes
- * @param num_chunks Total number of chunks to read (K+M)
- * @return Number of successfully read chunks (need >= K for reconstruction), -1 on error
+ * @param chunk_data_array Array of chunk data pointers (K+M chunks)
+ * @param chunk_size Chunk size (uniform for all chunks)
+ * @param num_chunks Total number of chunks (K+M)
+ * @return 0 on success, -1 if too many chunks failed
  */
-int buckets_parallel_read_chunks(const char *bucket,
-                                  const char *object,
-                                  const char *object_path,
-                                  buckets_placement_result_t *placement,
-                                  void **chunk_data_array,
-                                  size_t *chunk_sizes_array,
-                                  u32 num_chunks);
+int buckets_parallel_write_chunks(const char *bucket,
+                                   const char *object,
+                                   const char *object_path,
+                                   buckets_placement_result_t *placement,
+                                   const void **chunk_data_array,
+                                   size_t chunk_size,
+                                   u32 num_chunks);
+
+/**
+ * Write multiple chunks in parallel with automatic batching (OPTIMIZED)
+ * 
+ * Groups chunks by destination node and sends them in batches to reduce
+ * network round-trips. This is the preferred method for distributed writes.
+ * 
+ * Example: 12 chunks across 3 nodes → 3 batch requests (vs 12 individual)
+ * Expected improvement: 30-50% throughput increase
+ * 
+ * @param bucket Bucket name
+ * @param object Object key
+ * @param object_path Hashed object path (prefix/hash/)
+ * @param placement Placement result with disk endpoints
+ * @param chunk_data_array Array of chunk data pointers (K+M chunks)
+ * @param chunk_size Chunk size (uniform for all chunks)
+ * @param num_chunks Total number of chunks (K+M)
+ * @return 0 on success, -1 if too many chunks failed
+ */
+int buckets_batched_parallel_write_chunks(const char *bucket,
+                                          const char *object,
+                                          const char *object_path,
+                                          buckets_placement_result_t *placement,
+                                          const void **chunk_data_array,
+                                          size_t chunk_size,
+                                          u32 num_chunks);
 
 /**
  * Write xl.meta to multiple disks in parallel (local + RPC)
@@ -979,6 +1020,42 @@ int buckets_binary_read_chunk(const char *peer_endpoint,
                                void **chunk_data,
                                size_t *chunk_size,
                                const char *disk_path);
+
+/* ===================================================================
+ * Batched Binary Transport (Optimization)
+ * 
+ * Groups multiple chunks destined for the same node into a single
+ * HTTP request to reduce network round-trips and improve throughput.
+ * ===================================================================*/
+
+/* Batch chunk metadata sizes */
+#define BATCH_BUCKET_SIZE   256
+#define BATCH_OBJECT_SIZE   1024
+#define BATCH_DISKPATH_SIZE 512
+
+/**
+ * Chunk batch entry
+ */
+typedef struct {
+    u32 chunk_index;
+    const void *chunk_data;
+    size_t chunk_size;
+    char bucket[BATCH_BUCKET_SIZE];
+    char object[BATCH_OBJECT_SIZE];
+    char disk_path[BATCH_DISKPATH_SIZE];
+} buckets_batch_chunk_t;
+
+/**
+ * Write multiple chunks to remote node in a single HTTP request
+ * 
+ * @param peer_endpoint Remote node endpoint
+ * @param chunks Array of chunks to write
+ * @param chunk_count Number of chunks
+ * @return BUCKETS_OK on success
+ */
+int buckets_binary_batch_write_chunks(const char *peer_endpoint,
+                                       const buckets_batch_chunk_t *chunks,
+                                       size_t chunk_count);
 
 /**
  * Register binary chunk transport handlers with HTTP server

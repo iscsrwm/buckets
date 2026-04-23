@@ -154,6 +154,9 @@ struct uv_http_conn {
     /* Write tracking - prevents use-after-free race conditions */
     int pending_writes;            /* Number of writes in flight */
     pthread_mutex_t write_lock;    /* Protects pending_writes counter */
+    
+    /* Performance metrics */
+    uint64_t request_start_time_us; /* Timestamp when request processing started */
 };
 
 /* ===================================================================
@@ -253,6 +256,9 @@ typedef struct uv_async_work {
     size_t response_body_capacity;
     bool response_ready;           /* Response has been prepared */
     bool response_started;         /* Handler called response_start */
+    
+    /* Performance metrics */
+    uint64_t queued_time_us;       /* When this work was queued to thread pool */
 } uv_async_work_t;
 
 /* ===================================================================

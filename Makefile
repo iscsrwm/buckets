@@ -5,7 +5,7 @@
 CC := gcc
 # NOTE: Mongoose removed - now using libuv-based HTTP server
 CFLAGS := -std=c11 -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -Wall -Wextra -Werror -pedantic -O2 -fPIC
-LDFLAGS := -lssl -lcrypto -luuid -lz -lisal -lpthread -lm -ldl -lrt
+LDFLAGS := -lssl -lcrypto -luuid -lz -lisal -luring -lpthread -lm -ldl -lrt
 INCLUDES := -Iinclude -Isrc -Ithird_party/cJSON \
             -Ithird_party/libuv/include -Ithird_party/llhttp/include
 
@@ -37,6 +37,7 @@ NET_SRC := $(wildcard $(SRC_DIR)/net/*.c)
 S3_SRC := $(wildcard $(SRC_DIR)/s3/*.c)
 ADMIN_SRC := $(wildcard $(SRC_DIR)/admin/*.c)
 CONFIG_SRC := $(wildcard $(SRC_DIR)/config/*.c)
+IO_SRC := $(wildcard $(SRC_DIR)/io/*.c)
 CJSON_SRC := third_party/cJSON/cJSON.c
 # MONGOOSE_SRC removed - using libuv-based http_server_uv.c instead
 
@@ -86,7 +87,7 @@ LLHTTP_SRC := $(LLHTTP_DIR)/src/api.c \
 
 ALL_SRC := $(CORE_SRC) $(CLUSTER_SRC) $(HASH_SRC) $(CRYPTO_SRC) $(ERASURE_SRC) \
            $(STORAGE_SRC) $(REGISTRY_SRC) $(TOPOLOGY_SRC) $(PLACEMENT_SRC) $(MIGRATION_SRC) \
-           $(NET_SRC) $(S3_SRC) $(ADMIN_SRC) $(CONFIG_SRC) $(CJSON_SRC) \
+           $(NET_SRC) $(S3_SRC) $(ADMIN_SRC) $(CONFIG_SRC) $(IO_SRC) $(CJSON_SRC) \
            $(LIBUV_SRC) $(LLHTTP_SRC)
 
 # Object files
@@ -104,6 +105,7 @@ NET_OBJ := $(NET_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 S3_OBJ := $(S3_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 ADMIN_OBJ := $(ADMIN_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 CONFIG_OBJ := $(CONFIG_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+IO_OBJ := $(IO_SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 CJSON_OBJ := $(OBJ_DIR)/cJSON.o
 # MONGOOSE_OBJ removed - using libuv-based HTTP server
 
@@ -151,7 +153,7 @@ LLHTTP_OBJ := $(OBJ_DIR)/llhttp/api.o \
 
 ALL_OBJ := $(CORE_OBJ) $(CLUSTER_OBJ) $(HASH_OBJ) $(CRYPTO_OBJ) $(ERASURE_OBJ) \
            $(STORAGE_OBJ) $(REGISTRY_OBJ) $(TOPOLOGY_OBJ) $(PLACEMENT_OBJ) $(MIGRATION_OBJ) \
-           $(NET_OBJ) $(S3_OBJ) $(ADMIN_OBJ) $(CONFIG_OBJ) $(CJSON_OBJ) \
+           $(NET_OBJ) $(S3_OBJ) $(ADMIN_OBJ) $(CONFIG_OBJ) $(IO_OBJ) $(CJSON_OBJ) \
            $(LIBUV_OBJ) $(LLHTTP_OBJ)
 
 # Test files

@@ -2,6 +2,7 @@
  * Chunk I/O Implementation
  * 
  * Chunk read/write operations with checksum verification.
+ * Now with io_uring async I/O for high performance.
  */
 
 #include <stdio.h>
@@ -20,6 +21,61 @@
 #include "buckets_crypto.h"
 #include "buckets_io.h"
 #include "buckets_group_commit.h"
+#include "buckets_io_uring.h"
+
+/* ===================================================================
+ * io_uring Context (for async I/O)
+ * ===================================================================*/
+
+static buckets_io_uring_context_t *g_io_uring_ctx = NULL;
+static pthread_once_t g_io_uring_once = PTHREAD_ONCE_INIT;
+
+static void init_io_uring_ctx(void)
+{
+    buckets_info("init_io_uring_ctx called (pid=%d)", getpid());
+    
+    buckets_io_uring_config_t config = {
+        .queue_depth = 1024,     /* Increased from 512 for better concurrency */
+        .batch_size = 128,       /* Increased from 64 to match queue depth */
+        .sq_poll = true,         /* ENABLED: Kernel polling for zero-syscall submission */
+        .io_poll = false         /* Keep disabled (not needed for block devices) */
+    };
+    
+    g_io_uring_ctx = buckets_io_uring_init(&config);
+    if (!g_io_uring_ctx) {
+        buckets_warn("Failed to initialize io_uring, falling back to blocking I/O");
+    } else {
+        buckets_info("✓ io_uring initialized for async chunk I/O (queue_depth=1024, sq_poll=ON, ctx=%p, pid=%d)", 
+                     g_io_uring_ctx, getpid());
+    }
+}
+
+buckets_io_uring_context_t* buckets_chunk_get_io_uring_ctx(void)
+{
+    pthread_once(&g_io_uring_once, init_io_uring_ctx);
+    return g_io_uring_ctx;
+}
+
+/**
+ * Reinitialize io_uring after fork()
+ * 
+ * MUST be called in child process after fork() because:
+ * 1. io_uring file descriptors are not valid across fork
+ * 2. pthread_once state is copied, so child thinks it's already initialized
+ * 
+ * This function resets the pthread_once state and forces reinitialization.
+ */
+void buckets_chunk_reinit_after_fork(void)
+{
+    buckets_info("Reinitializing io_uring after fork (pid=%d)", getpid());
+    
+    /* Reset pthread_once - this is safe because we're in a new process */
+    g_io_uring_once = (pthread_once_t)PTHREAD_ONCE_INIT;
+    g_io_uring_ctx = NULL;
+    
+    /* Force reinitialization */
+    init_io_uring_ctx();
+}
 
 /* ===================================================================
  * Directory Cache (avoids repeated ensure_directory calls)
@@ -120,6 +176,38 @@ int buckets_read_chunk(const char *disk_path, const char *object_path,
 }
 
 /* Write chunk to disk with group commit optimization */
+/* Async write completion context */
+typedef struct {
+    volatile int *result_ptr;        /* Pointer to store result (atomic access) */
+    volatile int *done_flag;         /* Flag to indicate completion */
+    int fd;                          /* File descriptor to close */
+    char chunk_path[PATH_MAX];      /* Path for error cleanup */
+} async_write_ctx_t;
+
+/* Completion callback for async write */
+static void chunk_write_completion_cb(buckets_io_result_t *result)
+{
+    async_write_ctx_t *ctx = (async_write_ctx_t*)result->user_data;
+    
+    if (result->result < 0) {
+        buckets_error("Async write failed: %s", strerror(result->error));
+        __atomic_store_n(ctx->result_ptr, -1, __ATOMIC_RELEASE);
+        unlink(ctx->chunk_path);
+    } else {
+        __atomic_store_n(ctx->result_ptr, 0, __ATOMIC_RELEASE);
+    }
+    
+    /* Close fd */
+    if (ctx->fd >= 0) {
+        close(ctx->fd);
+    }
+    
+    /* Signal completion */
+    __atomic_store_n(ctx->done_flag, 1, __ATOMIC_RELEASE);
+    
+    buckets_free(ctx);
+}
+
 int buckets_write_chunk(const char *disk_path, const char *object_path,
                         u32 chunk_index, const void *data, size_t size)
 {
@@ -133,7 +221,99 @@ int buckets_write_chunk(const char *disk_path, const char *object_path,
     snprintf(chunk_path, sizeof(chunk_path), "%s/%spart.%u",
              disk_path, object_path, chunk_index);
 
-    /* Try to use group commit if available */
+    /* Try io_uring first for async I/O */
+    buckets_io_uring_context_t *io_ctx = buckets_chunk_get_io_uring_ctx();
+    
+    if (io_ctx) {
+        /* Async path with io_uring */
+        
+        /* Ensure parent directory exists (with caching) */
+        char *path_copy = buckets_strdup(chunk_path);
+        char *dir_name = dirname(path_copy);
+        char *dir_path = buckets_strdup(dir_name);
+        buckets_free(path_copy);
+        
+        int ret = ensure_directory_cached(dir_path);
+        buckets_free(dir_path);
+        
+        if (ret != BUCKETS_OK) {
+            return -1;
+        }
+        
+        /* Open file for writing (without O_DIRECT for now - requires aligned buffers) */
+        int fd = open(chunk_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0) {
+            buckets_error("Failed to open chunk file %s: %s", chunk_path, strerror(errno));
+            return -1;
+        }
+        
+        /* Prepare completion context */
+        async_write_ctx_t *async_ctx = buckets_malloc(sizeof(*async_ctx));
+        if (!async_ctx) {
+            close(fd);
+            return -1;
+        }
+        
+        volatile int write_result = -1;
+        volatile int done_flag = 0;
+        
+        async_ctx->result_ptr = &write_result;
+        async_ctx->done_flag = &done_flag;
+        async_ctx->fd = fd;
+        snprintf(async_ctx->chunk_path, sizeof(async_ctx->chunk_path), "%s", chunk_path);
+        
+        /* Submit async write */
+        ret = buckets_io_uring_write_async(io_ctx, fd, data, size,
+                                           chunk_write_completion_cb, async_ctx);
+        if (ret < 0) {
+            buckets_error("Failed to submit async write");
+            close(fd);
+            buckets_free(async_ctx);
+            goto fallback_blocking;
+        }
+        
+        /* Submit to kernel - the poller thread will process completions */
+        int submitted = buckets_io_uring_submit(io_ctx);
+        if (submitted < 0) {
+            buckets_error("Failed to submit io_uring operations");
+            close(fd);
+            buckets_free(async_ctx);
+            goto fallback_blocking;
+        }
+        
+        /* Wait for completion by polling the done flag
+         * The background poller thread will call our callback which sets this flag.
+         * Poll very frequently (10 microsecond intervals) for low latency. */
+        int timeout_us = 30000000;  /* 30 seconds in microseconds */
+        int elapsed_us = 0;
+        int poll_interval_us = 10;  /* Check every 10 microseconds */
+        
+        while (!__atomic_load_n(&done_flag, __ATOMIC_ACQUIRE) && elapsed_us < timeout_us) {
+            usleep(poll_interval_us);
+            elapsed_us += poll_interval_us;
+            
+            /* Gradually increase poll interval to reduce CPU usage for slow operations */
+            if (elapsed_us > 1000 && poll_interval_us < 100) {
+                poll_interval_us = 100;  /* After 1ms, poll every 100us */
+            } else if (elapsed_us > 10000 && poll_interval_us < 1000) {
+                poll_interval_us = 1000;  /* After 10ms, poll every 1ms */
+            }
+        }
+        
+        if (!__atomic_load_n(&done_flag, __ATOMIC_ACQUIRE)) {
+            buckets_error("Async write timeout after %dus (%dms)", timeout_us, timeout_us / 1000);
+            return -1;
+        }
+        
+        /* Get the result */
+        int final_result = __atomic_load_n(&write_result, __ATOMIC_ACQUIRE);
+        
+        return final_result;
+    }
+    
+fallback_blocking:
+    /* Fallback: Try to use group commit if available */
+    ;  /* Empty statement to allow label */
     buckets_group_commit_context_t *gc_ctx = buckets_storage_get_group_commit_ctx();
     
     if (gc_ctx) {

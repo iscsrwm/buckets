@@ -44,6 +44,116 @@ extern buckets_debug_stats_t g_stats;
 /* Timeout for socket operations (seconds) */
 #define SOCKET_TIMEOUT_SEC 30  /* 30 seconds max (reduced from 300) */
 
+/* Simple connection cache for connection reuse */
+#define CONN_CACHE_SIZE 64  /* Cache up to 64 connections (covers 6 nodes x 4 disks x 2) */
+
+typedef struct {
+    int fd;
+    char host[256];
+    int port;
+    time_t last_used;
+    pthread_mutex_t lock;
+} cached_conn_t;
+
+static cached_conn_t g_conn_cache[CONN_CACHE_SIZE];
+static pthread_mutex_t g_cache_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool g_cache_initialized = false;
+
+static void init_conn_cache(void)
+{
+    if (g_cache_initialized) return;
+    
+    pthread_mutex_lock(&g_cache_lock);
+    if (!g_cache_initialized) {
+        for (int i = 0; i < CONN_CACHE_SIZE; i++) {
+            g_conn_cache[i].fd = -1;
+            g_conn_cache[i].host[0] = '\0';
+            g_conn_cache[i].port = 0;
+            g_conn_cache[i].last_used = 0;
+            pthread_mutex_init(&g_conn_cache[i].lock, NULL);
+        }
+        g_cache_initialized = true;
+    }
+    pthread_mutex_unlock(&g_cache_lock);
+}
+
+int get_cached_connection(const char *host, int port)
+{
+    init_conn_cache();
+    
+    time_t now = time(NULL);
+    
+    /* Try to find existing connection */
+    for (int i = 0; i < CONN_CACHE_SIZE; i++) {
+        pthread_mutex_lock(&g_conn_cache[i].lock);
+        
+        if (g_conn_cache[i].fd >= 0 &&
+            strcmp(g_conn_cache[i].host, host) == 0 &&
+            g_conn_cache[i].port == port &&
+            (now - g_conn_cache[i].last_used) < 120) {  /* 120 sec keep-alive (2 min) */
+            
+            int fd = g_conn_cache[i].fd;
+            g_conn_cache[i].fd = -1;  /* Take ownership */
+            pthread_mutex_unlock(&g_conn_cache[i].lock);
+            
+            buckets_debug("[CONN_CACHE] Reusing connection to %s:%d (slot %d)", host, port, i);
+            return fd;
+        }
+        
+        pthread_mutex_unlock(&g_conn_cache[i].lock);
+    }
+    
+    return -1;  /* No cached connection */
+}
+
+void cache_connection(int fd, const char *host, int port)
+{
+    init_conn_cache();
+    
+    time_t now = time(NULL);
+    int oldest_slot = 0;
+    time_t oldest_time = now;
+    
+    /* Find empty slot or replace oldest */
+    for (int i = 0; i < CONN_CACHE_SIZE; i++) {
+        pthread_mutex_lock(&g_conn_cache[i].lock);
+        
+        if (g_conn_cache[i].fd < 0) {
+            /* Empty slot found */
+            g_conn_cache[i].fd = fd;
+            snprintf(g_conn_cache[i].host, sizeof(g_conn_cache[i].host), "%s", host);
+            g_conn_cache[i].port = port;
+            g_conn_cache[i].last_used = now;
+            pthread_mutex_unlock(&g_conn_cache[i].lock);
+            
+            buckets_debug("[CONN_CACHE] Cached connection to %s:%d (slot %d)", host, port, i);
+            return;
+        }
+        
+        if (g_conn_cache[i].last_used < oldest_time) {
+            oldest_time = g_conn_cache[i].last_used;
+            oldest_slot = i;
+        }
+        
+        pthread_mutex_unlock(&g_conn_cache[i].lock);
+    }
+    
+    /* No empty slot, replace oldest */
+    pthread_mutex_lock(&g_conn_cache[oldest_slot].lock);
+    if (g_conn_cache[oldest_slot].fd >= 0) {
+        close(g_conn_cache[oldest_slot].fd);
+        DEBUG_DEC(g_stats.conn_pool_active);
+    }
+    g_conn_cache[oldest_slot].fd = fd;
+    snprintf(g_conn_cache[oldest_slot].host, sizeof(g_conn_cache[oldest_slot].host), "%s", host);
+    g_conn_cache[oldest_slot].port = port;
+    g_conn_cache[oldest_slot].last_used = now;
+    pthread_mutex_unlock(&g_conn_cache[oldest_slot].lock);
+    
+    buckets_debug("[CONN_CACHE] Replaced oldest connection (slot %d) with %s:%d", 
+                  oldest_slot, host, port);
+}
+
 /* ===================================================================
  * URL Encoding/Decoding
  * ===================================================================*/
@@ -104,7 +214,7 @@ static char* url_decode(const char *str)
  * Socket Helpers
  * ===================================================================*/
 
-static void close_tcp_connection(int fd)
+void close_tcp_connection(int fd)
 {
     if (fd >= 0) {
         close(fd);
@@ -112,7 +222,7 @@ static void close_tcp_connection(int fd)
     }
 }
 
-static int create_tcp_connection(const char *host, int port)
+int create_tcp_connection(const char *host, int port)
 {
     struct timespec connect_start;
     if (g_debug_instrumentation_enabled) {
@@ -140,9 +250,15 @@ static int create_tcp_connection(const char *host, int port)
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (fd == -1) continue;
         
-        /* Set socket options */
+        /* Set socket options for optimal performance */
         int flag = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+        
+        /* Increase socket buffers for better throughput */
+        int sndbuf = 256 * 1024;  /* 256 KB send buffer */
+        int rcvbuf = 256 * 1024;  /* 256 KB receive buffer */
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
         
         /* Set timeouts */
         struct timeval timeout;
@@ -231,7 +347,7 @@ static int recv_all(int fd, void *data, size_t len)
 }
 
 /* Parse endpoint URL to extract host and port */
-static int parse_endpoint(const char *endpoint, char *host, size_t host_len, int *port)
+int parse_endpoint(const char *endpoint, char *host, size_t host_len, int *port)
 {
     /* Format: http://host:port or https://host:port */
     const char *proto_end = strstr(endpoint, "://");
@@ -302,14 +418,19 @@ int buckets_binary_write_chunk(const char *peer_endpoint,
     buckets_debug("[BINARY_WRITE] chunk=%u endpoint=%s bucket=%s object=%s size=%zu", 
                   chunk_index, peer_endpoint, bucket, object, chunk_size);
     
-    /* Connect to remote node */
-    int fd = create_tcp_connection(host, port);
+    /* Try to get cached connection first */
+    int fd = get_cached_connection(host, port);
+    
+    /* If no cached connection, create new one */
     if (fd < 0) {
-        buckets_error("[BINARY_WRITE] Connection failed to %s:%d for chunk %u", 
-                      host, port, chunk_index);
-        DEBUG_DEC(g_stats.binary_writes_active);
-        DEBUG_INC(g_stats.binary_writes_failed);
-        return BUCKETS_ERR_IO;
+        fd = create_tcp_connection(host, port);
+        if (fd < 0) {
+            buckets_error("[BINARY_WRITE] Connection failed to %s:%d for chunk %u", 
+                          host, port, chunk_index);
+            DEBUG_DEC(g_stats.binary_writes_active);
+            DEBUG_INC(g_stats.binary_writes_failed);
+            return BUCKETS_ERR_IO;
+        }
     }
     
     if (g_debug_instrumentation_enabled) {
@@ -341,7 +462,7 @@ int buckets_binary_write_chunk(const char *peer_endpoint,
         "X-Object: %s\r\n"
         "X-Chunk-Index: %u\r\n"
         "X-Disk-Path: %s\r\n"
-        "Connection: close\r\n"
+        "Connection: keep-alive\r\n"
         "\r\n",
         host, port, chunk_size, bucket, encoded_object, chunk_index, encoded_disk_path);
     
@@ -414,12 +535,11 @@ int buckets_binary_write_chunk(const char *peer_endpoint,
         if (headers_end) break;
     }
     
-    close_tcp_connection(fd);
-    
     /* Parse status code */
     int status_code = 0;
     if (sscanf(response, "HTTP/1.%*d %d", &status_code) != 1) {
         buckets_error("[BINARY_WRITE] chunk=%u failed to parse HTTP response", chunk_index);
+        close_tcp_connection(fd);
         DEBUG_DEC(g_stats.binary_writes_active);
         DEBUG_INC(g_stats.binary_writes_failed);
         return BUCKETS_ERR_IO;
@@ -428,10 +548,14 @@ int buckets_binary_write_chunk(const char *peer_endpoint,
     if (status_code != 200) {
         buckets_error("[BINARY_WRITE] chunk=%u remote write failed with status %d", 
                       chunk_index, status_code);
+        close_tcp_connection(fd);
         DEBUG_DEC(g_stats.binary_writes_active);
         DEBUG_INC(g_stats.binary_writes_failed);
         return BUCKETS_ERR_IO;
     }
+    
+    /* Always cache connection for reuse (Connection: keep-alive ensures it's valid) */
+    cache_connection(fd, host, port);
     
     if (g_debug_instrumentation_enabled) {
         struct timespec end_time;
@@ -911,7 +1035,18 @@ int buckets_binary_transport_register(buckets_http_server_t *server)
         return ret;
     }
     
-    buckets_info("Binary chunk transport handlers registered");
+    /* Register PUT handler for batch chunk writes (optimization) */
+    extern void buckets_handle_batch_chunk_write(buckets_http_request_t *req,
+                                                  buckets_http_response_t *res,
+                                                  void *user_data);
+    ret = buckets_router_add_route(router, "PUT", "/_internal/batch_chunks",
+                                    buckets_handle_batch_chunk_write, NULL);
+    if (ret != BUCKETS_OK) {
+        buckets_error("Failed to register batch chunk write handler");
+        return ret;
+    }
+    
+    buckets_info("Binary chunk transport handlers registered (including batch optimization)");
     
     return BUCKETS_OK;
 }

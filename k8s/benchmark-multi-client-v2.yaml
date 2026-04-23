@@ -1,0 +1,62 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-multi-v2-1
+  namespace: buckets
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: russellmy/buckets-benchmark:go-fixed-v2
+        imagePullPolicy: Always
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Multi-Client Test v2 - Client 1"
+          /benchmark -endpoint="http://buckets-headless.buckets.svc.cluster.local:9000" -workers=20 -duration=30s -size=262144
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-multi-v2-2
+  namespace: buckets
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: russellmy/buckets-benchmark:go-fixed-v2
+        imagePullPolicy: Always
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Multi-Client Test v2 - Client 2"
+          /benchmark -endpoint="http://buckets-headless.buckets.svc.cluster.local:9000" -workers=20 -duration=30s -size=262144
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-multi-v2-3
+  namespace: buckets
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: russellmy/buckets-benchmark:go-fixed-v2
+        imagePullPolicy: Always
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Multi-Client Test v2 - Client 3"
+          /benchmark -endpoint="http://buckets-headless.buckets.svc.cluster.local:9000" -workers=20 -duration=30s -size=262144

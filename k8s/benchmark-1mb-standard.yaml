@@ -1,0 +1,46 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-1mb-standard
+  namespace: buckets
+spec:
+  completions: 1
+  parallelism: 1
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: russellmy/buckets-benchmark:latest
+        env:
+        - name: S3_ENDPOINT
+          value: "http://buckets-lb.buckets.svc.cluster.local:9000"
+        - name: AWS_ACCESS_KEY_ID
+          value: "minioadmin"
+        - name: AWS_SECRET_ACCESS_KEY
+          value: "minioadmin"
+        - name: AWS_EC2_METADATA_DISABLED
+          value: "true"
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          echo "=== STANDARD 1MB BENCHMARK ==="
+          echo "Purpose: Measure erasure-coded object performance with batched chunk writes"
+          echo "Endpoint: $S3_ENDPOINT"
+          echo "Configuration: 16 workers, 60s duration, 1MB objects"
+          echo "Starting at $(date)"
+          echo ""
+          
+          # Run benchmark - 1MB objects will trigger erasure coding and distributed chunk writes
+          /benchmark \
+            -endpoint=$S3_ENDPOINT \
+            -bucket=test-1mb-standard \
+            -duration=60s \
+            -workers=16 \
+            -size=1048576
+          
+          echo ""
+          echo "Benchmark completed at $(date)"
