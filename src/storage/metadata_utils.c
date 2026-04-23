@@ -16,6 +16,7 @@
 #include "buckets_crypto.h"
 #include "buckets_erasure.h"
 #include "buckets_profile.h"
+#include "buckets_async_write.h"
 
 /* Base64 encode for inline objects */
 static char* base64_encode(const u8 *data, size_t size)
@@ -388,45 +389,77 @@ int buckets_put_object_with_metadata(const char *bucket, const char *object,
                 chunk_array[i] = (i < k) ? data_chunks[i] : parity_chunks[i - k];
             }
             
-            /* Write all chunks in parallel with batching */
-            PROFILE_START(chunk_write_batched);
-            PROFILE_MARK("Starting batched chunk writes: %u chunks, size=%zu", k + m, chunk_size);
+            /* Check if async write is enabled (pipelined ACK) */
+            const char *async_mode = getenv("BUCKETS_ASYNC_WRITE");
+            bool use_async = (async_mode && strcmp(async_mode, "1") == 0);
             
-            extern int buckets_batched_parallel_write_chunks(const char *bucket, const char *object,
-                                                             const char *object_path,
-                                                             buckets_placement_result_t *placement,
-                                                             const void **chunk_data_array,
-                                                             size_t chunk_size, u32 num_chunks);
-            
-            int write_result = buckets_batched_parallel_write_chunks(bucket, object, object_path, placement,
-                                                                     chunk_array, chunk_size, k + m);
-            
-            PROFILE_END(chunk_write_batched, "Batched chunk writes complete: %u chunks", k + m);
-            
-            buckets_free(chunk_array);
-            
-            if (write_result != 0) {
-                buckets_error("Parallel chunk write failed");
-                buckets_ec_free(&ec_ctx);
-                result = -1;
-                goto cleanup_chunks;
+            if (use_async) {
+                /* PIPELINED ACK MODE: Queue writes in background, return immediately */
+                PROFILE_MARK("📤 PIPELINED ACK: Queueing async writes for %u chunks", k + m);
+                
+                /* Transfer ownership of chunk_array to async system */
+                /* Note: Don't free chunk_array or chunks - async system owns them now */
+                uint64_t job_id;
+                int queue_result = buckets_async_write_queue(bucket, object, object_path,
+                                                             placement, (void**)chunk_array,
+                                                             chunk_size, k + m, &meta, &job_id);
+                
+                if (queue_result == BUCKETS_OK) {
+                    buckets_info("✅ Pipelined ACK: Queued async write job %lu for %s/%s",
+                                job_id, bucket, object);
+                    result = 0;  /* Success - writes queued in background */
+                    
+                    /* IMPORTANT: Don't free chunks or placement - async system owns them */
+                    /* Skip cleanup, set flags to prevent double-free */
+                    goto skip_cleanup_for_async;
+                } else {
+                    buckets_error("Failed to queue async write, falling back to sync");
+                    /* Fall through to sync path */
+                    use_async = false;
+                }
             }
             
-            buckets_info("Parallel write complete: %u chunks written", k + m);
-            
-            /* Write xl.meta to all disks in parallel */
-            extern int buckets_parallel_write_metadata(const char *bucket,
-                                                       const char *object,
-                                                       const char *object_path,
-                                                       buckets_placement_result_t *placement,
-                                                       char **disk_paths,
-                                                       const buckets_xl_meta_t *base_meta,
-                                                       u32 num_disks,
-                                                       bool has_endpoints);
-            
-            result = buckets_parallel_write_metadata(bucket, object, object_path,
-                                                     placement, placement->disk_paths, &meta,
-                                                     k + m, has_endpoints);
+            if (!use_async) {
+                /* SYNC MODE: Write chunks before returning to client */
+                PROFILE_START(chunk_write_batched);
+                PROFILE_MARK("Starting batched chunk writes: %u chunks, size=%zu", k + m, chunk_size);
+                
+                extern int buckets_batched_parallel_write_chunks(const char *bucket, const char *object,
+                                                                 const char *object_path,
+                                                                 buckets_placement_result_t *placement,
+                                                                 const void **chunk_data_array,
+                                                                 size_t chunk_size, u32 num_chunks);
+                
+                int write_result = buckets_batched_parallel_write_chunks(bucket, object, object_path, placement,
+                                                                         chunk_array, chunk_size, k + m);
+                
+                PROFILE_END(chunk_write_batched, "Batched chunk writes complete: %u chunks", k + m);
+                
+                buckets_free(chunk_array);
+                
+                if (write_result != 0) {
+                    buckets_error("Parallel chunk write failed");
+                    buckets_ec_free(&ec_ctx);
+                    result = -1;
+                    goto cleanup_chunks;
+                }
+                
+                buckets_info("Parallel write complete: %u chunks written", k + m);
+                
+                /* Write xl.meta to all disks in parallel */
+                extern int buckets_parallel_write_metadata(const char *bucket,
+                                                           const char *object,
+                                                           const char *object_path,
+                                                           buckets_placement_result_t *placement,
+                                                           char **disk_paths,
+                                                           const buckets_xl_meta_t *base_meta,
+                                                           u32 num_disks,
+                                                           bool has_endpoints);
+                
+                result = buckets_parallel_write_metadata(bucket, object, object_path,
+                                                         placement, placement->disk_paths, &meta,
+                                                         k + m, has_endpoints);
+            }
         } else {
             /* Fallback: single-disk write (for tests or when placement unavailable) */
             buckets_warn("Using single-disk write (placement unavailable or insufficient disks)");
@@ -456,6 +489,19 @@ int buckets_put_object_with_metadata(const char *bucket, const char *object,
             result = buckets_write_xl_meta(disk_path, object_path, &meta);
         }
         
+skip_cleanup_for_async:
+        /* Check if we should skip cleanup (async write owns resources) */
+        {
+            const char *async_mode = getenv("BUCKETS_ASYNC_WRITE");
+            bool use_async = (async_mode && strcmp(async_mode, "1") == 0);
+            
+            if (use_async && result == 0) {
+                /* Async write owns chunks and placement - skip freeing them */
+                buckets_ec_free(&ec_ctx);
+                goto skip_chunk_cleanup;
+            }
+        }
+        
         buckets_ec_free(&ec_ctx);
         
 cleanup_chunks:
@@ -465,6 +511,9 @@ cleanup_chunks:
         for (u32 i = 0; i < m; i++) {
             buckets_free(parity_chunks[i]);
         }
+        
+skip_chunk_cleanup:
+        ;  /* Empty statement for label */
     }
     
     buckets_xl_meta_free(&meta);
@@ -476,9 +525,14 @@ cleanup_chunks:
         record_object_location(bucket, object, size, placement);
     }
     
-    /* Free placement result */
-    if (placement) {
-        buckets_placement_free_result(placement);
+    /* Free placement result (unless async write owns it) */
+    {
+        const char *async_mode = getenv("BUCKETS_ASYNC_WRITE");
+        bool use_async = (async_mode && strcmp(async_mode, "1") == 0);
+        
+        if (placement && !(use_async && result == 0)) {
+            buckets_placement_free_result(placement);
+        }
     }
     
     PROFILE_END(with_metadata_total, "Object written with metadata result=%d size=%zu", result, size);
