@@ -1,0 +1,279 @@
+diff --git a/src/s3/s3_streaming.c b/src/s3/s3_streaming.c
+index XXXXX..XXXXX 100644
+--- a/src/s3/s3_streaming.c
++++ b/src/s3/s3_streaming.c
+@@ -466,6 +466,12 @@ int s3_stream_upload_finalize(s3_stream_upload_t *upload)
+         return -1;
+     }
+     
++    /* Start profiling */
++    struct timespec t_start, t_body_assembled, t_storage_complete;
++    clock_gettime(CLOCK_MONOTONIC, &t_start);
++    
++    buckets_info("[PROFILE] Starting upload finalization: %s/%s size=%zu", upload->bucket, upload->key, upload->bytes_received);
++    
+     /* Compute final hash (MD5 for S3-compatible ETag) */
+     unsigned char hash[EVP_MAX_MD_SIZE];
+     unsigned int hash_len;
+@@ -487,6 +493,11 @@ int s3_stream_upload_finalize(s3_stream_upload_t *upload)
+     
+     /* Assemble complete object from chunks */
+     size_t total_size = upload->bytes_received;
++    
++    clock_gettime(CLOCK_MONOTONIC, &t_body_assembled);
++    double t_prepare = (t_body_assembled.tv_sec - t_start.tv_sec) + 
++                       (t_body_assembled.tv_nsec - t_start.tv_nsec) / 1e9;
++    buckets_info("[PROFILE] Body preparation complete: %.3f ms", t_prepare * 1000);
+     
+     uint8_t *object_data = buckets_malloc(total_size);
+     if (!object_data) {
+@@ -503,6 +514,8 @@ int s3_stream_upload_finalize(s3_stream_upload_t *upload)
+         memcpy(object_data + offset, upload->data_chunks[i], chunk_size);
+         offset += chunk_size;
+     }
++    
++    buckets_info("[PROFILE] Object data assembled: %zu bytes", total_size);
+     
+     /* Check if bucket has versioning enabled */
+     bool versioning_enabled = false;
+@@ -530,6 +543,10 @@ int s3_stream_upload_finalize(s3_stream_upload_t *upload)
+                     upload->user_meta_keys[i], upload->user_meta_values[i]);
+     }
+     
++    clock_gettime(CLOCK_MONOTONIC, &t_storage_complete);
++    buckets_info("[PROFILE] Calling storage layer: size=%zu versioning=%d", total_size, versioning_enabled);
++    struct timespec t_storage_start = t_storage_complete;
++    
+     if (versioning_enabled) {
+         /* Versioning is enabled - create a new version */
+         ret = buckets_put_object_versioned(upload->bucket, upload->key, 
+@@ -551,6 +568,12 @@ int s3_stream_upload_finalize(s3_stream_upload_t *upload)
+         }
+     }
+     
++    clock_gettime(CLOCK_MONOTONIC, &t_storage_complete);
++    double t_storage = (t_storage_complete.tv_sec - t_storage_start.tv_sec) + 
++                       (t_storage_complete.tv_nsec - t_storage_start.tv_nsec) / 1e9;
++    buckets_info("[PROFILE] Storage layer complete: %.3f ms (%.2f MB/s)", 
++                 t_storage * 1000, (total_size / 1024.0 / 1024.0) / t_storage);
++    
+     /* Free metadata strings */
+     if (meta.meta.content_type) {
+         buckets_free(meta.meta.content_type);
+@@ -572,6 +595,13 @@ int s3_stream_upload_finalize(s3_stream_upload_t *upload)
+     
+     upload->completed = true;
+     
++    struct timespec t_end;
++    clock_gettime(CLOCK_MONOTONIC, &t_end);
++    double t_total = (t_end.tv_sec - t_start.tv_sec) + (t_end.tv_nsec - t_start.tv_nsec) / 1e9;
++    buckets_info("[PROFILE] ═══════════════════════════════════════════════");
++    buckets_info("[PROFILE] UPLOAD COMPLETE: %.3f ms total (storage: %.3f ms = %.1f%%)", 
++                 t_total * 1000, t_storage * 1000, (t_storage / t_total) * 100);
++    
+     if (versioning_enabled && upload->version_id[0] != '\0') {
+         buckets_info("Streaming upload complete: %s/%s (%zu bytes, ETag=%s, VersionId=%s)",
+                     upload->bucket, upload->key, total_size, upload->etag, upload->version_id);
+diff --git a/src/storage/object.c b/src/storage/object.c
+index XXXXX..XXXXX 100644
+--- a/src/storage/object.c
++++ b/src/storage/object.c
+@@ -339,6 +339,9 @@ int buckets_put_object(const char *bucket, const char *object,
+     
+     struct timespec start_total, end_total;
+     clock_gettime(CLOCK_MONOTONIC, &start_total);
++    
++    buckets_info("[PROFILE] ═══════════════════════════════════════════════");
++    buckets_info("[PROFILE] PUT OBJECT START: %s/%s size=%zu", bucket, object, size);
+     
+     /* Compute object path */
+     char object_path[PATH_MAX];
+@@ -398,6 +401,9 @@ int buckets_put_object(const char *bucket, const char *object,
+         goto cleanup_simple;
+     }
+     
++    struct timespec t_placement_done;
++    clock_gettime(CLOCK_MONOTONIC, &t_placement_done);
++    
+     buckets_info("Erasure encoding object: size=%zu, k=%u, m=%u", size, k, m);
+     
+     /* Log input data for debugging */
+@@ -427,6 +433,9 @@ int buckets_put_object(const char *bucket, const char *object,
+     /* Encode with erasure coding */
+     struct timespec start_encode, end_encode;
+     clock_gettime(CLOCK_MONOTONIC, &start_encode);
++    double t_placement = (start_encode.tv_sec - t_placement_done.tv_sec) + 
++                         (start_encode.tv_nsec - t_placement_done.tv_nsec) / 1e9;
++    buckets_info("[PROFILE] Placement & allocation: %.3f ms", t_placement * 1000);
+     
+     buckets_ec_ctx_t ec_ctx;
+     if (buckets_ec_init(&ec_ctx, k, m) != 0) {
+@@ -443,9 +452,14 @@ int buckets_put_object(const char *bucket, const char *object,
+     
+     clock_gettime(CLOCK_MONOTONIC, &end_encode);
+     double encode_time = (end_encode.tv_sec - start_encode.tv_sec) + 
+                         (end_encode.tv_nsec - start_encode.tv_nsec) / 1e9;
+-    buckets_info("⏱️  Erasure encoding: %.3f ms (%.2f MB/s)", 
+-                 encode_time * 1000, (size / 1024.0 / 1024.0) / encode_time);
++    buckets_info("[PROFILE] ⏱️  Erasure encoding: %.3f ms (%.2f MB/s)", 
++                 encode_time * 1000, (size / 1024.0 / 1024.0) / encode_time);
++    
++    /* Start checksum timing */
++    struct timespec start_checksum, end_checksum;
++    clock_gettime(CLOCK_MONOTONIC, &start_checksum);
+ 
+     /* Compute checksums */
+     meta.erasure.data = k;
+@@ -475,6 +489,11 @@ int buckets_put_object(const char *bucket, const char *object,
+         buckets_compute_chunk_checksum(parity_chunks[i], chunk_size,
+                                        &meta.erasure.checksums[k + i]);
+     }
++    
++    clock_gettime(CLOCK_MONOTONIC, &end_checksum);
++    double checksum_time = (end_checksum.tv_sec - start_checksum.tv_sec) + 
++                           (end_checksum.tv_nsec - start_checksum.tv_nsec) / 1e9;
++    buckets_info("[PROFILE] Checksum computation: %.3f ms", checksum_time * 1000);
+ 
+     /* Get disk paths from placement (consistent hash set selection) */
+     char **set_disk_paths = NULL;
+@@ -549,6 +568,8 @@ int buckets_put_object(const char *bucket, const char *object,
+         
+         /* Write all chunks in parallel with batching optimization */
+         struct timespec start_write, end_write;
++        buckets_info("[PROFILE] Starting parallel chunk writes: %u chunks", k + m);
++        
+         clock_gettime(CLOCK_MONOTONIC, &start_write);
+         
+         extern int buckets_batched_parallel_write_chunks(const char *bucket, const char *object,
+@@ -562,8 +583,8 @@ int buckets_put_object(const char *bucket, const char *object,
+         clock_gettime(CLOCK_MONOTONIC, &end_write);
+         double write_time = (end_write.tv_sec - start_write.tv_sec) + 
+                            (end_write.tv_nsec - start_write.tv_nsec) / 1e9;
+-        
+-        buckets_free(chunk_array);
++        
++        buckets_info("[PROFILE] ⏱️  Parallel chunk writes: %.3f ms (%.2f MB/s)", 
++                     write_time * 1000, (size / 1024.0 / 1024.0) / write_time);
+         
+         if (write_result != 0) {
+@@ -571,10 +592,7 @@ int buckets_put_object(const char *bucket, const char *object,
+             buckets_ec_free(&ec_ctx);
+             goto cleanup_chunks;
+         }
+-        
+-        buckets_info("⏱️  Parallel chunk writes: %.3f ms (%.2f MB/s)", 
+-                     write_time * 1000, (size / 1024.0 / 1024.0) / write_time);
+-        buckets_info("Parallel write complete: %u chunks written", k + m);
++        
++        buckets_free(chunk_array);
+         
+         /* Write xl.meta to all disks (local and remote) in PARALLEL */
+         struct timespec start_meta, end_meta;
+@@ -595,7 +613,7 @@ int buckets_put_object(const char *bucket, const char *object,
+         clock_gettime(CLOCK_MONOTONIC, &end_meta);
+         double meta_time = (end_meta.tv_sec - start_meta.tv_sec) + 
+                           (end_meta.tv_nsec - start_meta.tv_nsec) / 1e9;
+-        buckets_info("⏱️  Metadata writes (PARALLEL): %.3f ms (%u disks)", meta_time * 1000, k + m);
++        buckets_info("[PROFILE] ⏱️  Metadata writes: %.3f ms (%u disks)", meta_time * 1000, k + m);
+     }
+ 
+     /* Record in registry if write succeeded */
+@@ -620,7 +638,18 @@ cleanup_chunks:
+     clock_gettime(CLOCK_MONOTONIC, &end_total);
+     double total_time = (end_total.tv_sec - start_total.tv_sec) + 
+                        (end_total.tv_nsec - start_total.tv_nsec) / 1e9;
+-    buckets_info("⏱️  TOTAL upload time: %.3f ms (%.2f MB/s) for %s/%s", 
++    
++    buckets_info("[PROFILE] ═══════════════════════════════════════════════");
++    buckets_info("[PROFILE] TIMING BREAKDOWN:");
++    buckets_info("[PROFILE]   Placement & alloc:  %.3f ms", t_placement * 1000);
++    buckets_info("[PROFILE]   Erasure encoding:   %.3f ms", encode_time * 1000);
++    buckets_info("[PROFILE]   Checksums:          %.3f ms", checksum_time * 1000);
++    if (size >= BUCKETS_INLINE_THRESHOLD) {
++        buckets_info("[PROFILE]   Chunk writes:       %.3f ms", write_time * 1000);
++        buckets_info("[PROFILE]   Metadata writes:    %.3f ms", meta_time * 1000);
++    }
++    buckets_info("[PROFILE]   TOTAL:              %.3f ms (%.2f MB/s)", total_time * 1000, (size / 1024.0 / 1024.0) / total_time);
++    buckets_info("[PROFILE] ═══════════════════════════════════════════════");
+                  total_time * 1000, (size / 1024.0 / 1024.0) / total_time, bucket, object);
+     buckets_info("Object written: %s/%s (size=%zu)", bucket, object, size);
+     return result;
+diff --git a/src/storage/parallel_chunks_batched.c b/src/storage/parallel_chunks_batched.c
+index XXXXX..XXXXX 100644
+--- a/src/storage/parallel_chunks_batched.c
++++ b/src/storage/parallel_chunks_batched.c
+@@ -118,6 +118,11 @@ int buckets_batched_parallel_write_chunks(const char *bucket,
+     
+     buckets_info("[BATCHED_WRITE] Starting batched write: %u chunks for %s/%s", num_chunks, bucket, object);
+     
++    /* Profile timing */
++    struct timespec t_start, t_group, t_launch, t_wait;
++    clock_gettime(CLOCK_MONOTONIC, &t_start);
++    buckets_info("[PROFILE][BATCH] Start batching: %u chunks", num_chunks);
++    
+     /* Group chunks by destination node */
+     node_batch_t batches[MAX_BATCHES];
+     size_t batch_count = 0;
+@@ -182,6 +187,11 @@ int buckets_batched_parallel_write_chunks(const char *bucket,
+         }
+     }
+     
++    clock_gettime(CLOCK_MONOTONIC, &t_group);
++    double t_grouping = (t_group.tv_sec - t_start.tv_sec) + (t_group.tv_nsec - t_start.tv_nsec) / 1e9;
++    buckets_info("[PROFILE][BATCH] Grouping complete: %.3f ms, %zu batches", t_grouping * 1000, batch_count);
++    
+     buckets_info("[BATCHED_WRITE] Grouped %u chunks into %zu batches", num_chunks, batch_count);
+     
+     /* Log batch details */
+@@ -199,6 +209,10 @@ int buckets_batched_parallel_write_chunks(const char *bucket,
+     
+     /* Launch threads for each batch */
+     for (size_t i = 0; i < batch_count; i++) {
++        buckets_info("[PROFILE][BATCH] Launching thread for batch %zu: %zu chunks to %s", 
++                     i, batches[i].chunk_count, 
++                     batches[i].is_local ? "LOCAL" : batches[i].node_endpoint);
++        
+         if (pthread_create(&batches[i].thread, NULL, batch_write_worker, &batches[i]) != 0) {
+             buckets_error("[BATCHED_WRITE] Failed to create thread for batch %zu", i);
+             
+@@ -213,10 +227,18 @@ int buckets_batched_parallel_write_chunks(const char *bucket,
+         }
+     }
+     
++    clock_gettime(CLOCK_MONOTONIC, &t_launch);
++    double t_launching = (t_launch.tv_sec - t_group.tv_sec) + (t_launch.tv_nsec - t_group.tv_nsec) / 1e9;
++    buckets_info("[PROFILE][BATCH] All threads launched: %.3f ms", t_launching * 1000);
++    
+     /* Wait for all batches to complete */
+     int failed = 0;
+     for (size_t i = 0; i < batch_count; i++) {
++        struct timespec t_join_start, t_join_end;
++        clock_gettime(CLOCK_MONOTONIC, &t_join_start);
++        
+         pthread_join(batches[i].thread, NULL);
++        clock_gettime(CLOCK_MONOTONIC, &t_join_end);
++        double t_join = (t_join_end.tv_sec - t_join_start.tv_sec) + (t_join_end.tv_nsec - t_join_start.tv_nsec) / 1e9;
+         
+         if (batches[i].result != 0) {
+             buckets_error("[BATCHED_WRITE] Batch %zu failed", i);
+@@ -224,9 +246,20 @@ int buckets_batched_parallel_write_chunks(const char *bucket,
+         } else {
+             buckets_debug("[BATCHED_WRITE] Batch %zu succeeded (%zu chunks)", i, batches[i].chunk_count);
+         }
++        
++        buckets_info("[PROFILE][BATCH] Batch %zu complete: %.3f ms, %zu chunks, result=%d", 
++                     i, t_join * 1000, batches[i].chunk_count, batches[i].result);
+     }
+     
++    clock_gettime(CLOCK_MONOTONIC, &t_wait);
++    double t_waiting = (t_wait.tv_sec - t_launch.tv_sec) + (t_wait.tv_nsec - t_launch.tv_nsec) / 1e9;
++    double t_total_batch = (t_wait.tv_sec - t_start.tv_sec) + (t_wait.tv_nsec - t_start.tv_nsec) / 1e9;
++    
++    buckets_info("[PROFILE][BATCH] ═══════════════════════════════════════");
++    buckets_info("[PROFILE][BATCH] Grouping: %.3f ms, Launch: %.3f ms, Wait: %.3f ms, TOTAL: %.3f ms", 
++                 t_grouping * 1000, t_launching * 1000, t_waiting * 1000, t_total_batch * 1000);
++    buckets_info("[PROFILE][BATCH] ═══════════════════════════════════════");
++    
+     if (failed > 0) {
+         buckets_error("[BATCHED_WRITE] %d/%zu batches failed", failed, batch_count);
+         return -1;

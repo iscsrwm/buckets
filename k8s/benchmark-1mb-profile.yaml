@@ -1,0 +1,31 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-1mb-profile
+  namespace: buckets
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: benchmark
+        image: russellmy/buckets-benchmark:latest
+        env:
+        - name: ENDPOINT
+          value: "http://buckets-0.buckets-headless.buckets.svc.cluster.local:9000"
+        - name: BUCKET
+          value: "profile-test"
+        - name: OBJECT_SIZE
+          value: "1048576"  # 1MB
+        - name: WORKERS
+          value: "1"  # Single worker for clear profiling
+        - name: DURATION
+          value: "10s"  # Short run to get clean logs
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "500m"
+          limits:
+            memory: "512Mi"
+            cpu: "1000m"

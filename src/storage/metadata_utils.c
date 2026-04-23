@@ -15,6 +15,7 @@
 #include "buckets_storage.h"
 #include "buckets_crypto.h"
 #include "buckets_erasure.h"
+#include "buckets_profile.h"
 
 /* Base64 encode for inline objects */
 static char* base64_encode(const u8 *data, size_t size)
@@ -148,6 +149,9 @@ int buckets_put_object_with_metadata(const char *bucket, const char *object,
                                      bool enable_versioning,
                                      char *versionId)
 {
+    PROFILE_START(with_metadata_total);
+    PROFILE_MARK("PUT with metadata: %s/%s size=%zu", bucket, object, size);
+    
     if (!bucket || !object || !data) {
         buckets_error("NULL parameter in put_object_with_metadata");
         return -1;
@@ -324,13 +328,15 @@ int buckets_put_object_with_metadata(const char *bucket, const char *object,
             goto cleanup_chunks;
         }
         
+        PROFILE_START(erasure_encode);
         if (buckets_ec_encode(&ec_ctx, data, size, chunk_size,
-                             data_chunks, parity_chunks) != 0) {
+                              data_chunks, parity_chunks) != 0) {
             buckets_error("Failed to encode object");
             buckets_ec_free(&ec_ctx);
             result = -1;
             goto cleanup_chunks;
         }
+        PROFILE_END(erasure_encode, "Erasure encoding complete: size=%zu", size);
         
         /* Set up erasure metadata */
         meta.erasure.data = k;
@@ -382,15 +388,20 @@ int buckets_put_object_with_metadata(const char *bucket, const char *object,
                 chunk_array[i] = (i < k) ? data_chunks[i] : parity_chunks[i - k];
             }
             
-            /* Write all chunks in parallel */
-            extern int buckets_parallel_write_chunks(const char *bucket, const char *object,
-                                                     const char *object_path,
-                                                     buckets_placement_result_t *placement,
-                                                     const void **chunk_data_array,
-                                                     size_t chunk_size, u32 num_chunks);
+            /* Write all chunks in parallel with batching */
+            PROFILE_START(chunk_write_batched);
+            PROFILE_MARK("Starting batched chunk writes: %u chunks, size=%zu", k + m, chunk_size);
             
-            int write_result = buckets_parallel_write_chunks(bucket, object, object_path, placement,
-                                                             chunk_array, chunk_size, k + m);
+            extern int buckets_batched_parallel_write_chunks(const char *bucket, const char *object,
+                                                             const char *object_path,
+                                                             buckets_placement_result_t *placement,
+                                                             const void **chunk_data_array,
+                                                             size_t chunk_size, u32 num_chunks);
+            
+            int write_result = buckets_batched_parallel_write_chunks(bucket, object, object_path, placement,
+                                                                     chunk_array, chunk_size, k + m);
+            
+            PROFILE_END(chunk_write_batched, "Batched chunk writes complete: %u chunks", k + m);
             
             buckets_free(chunk_array);
             
@@ -470,49 +481,12 @@ cleanup_chunks:
         buckets_placement_free_result(placement);
     }
     
+    PROFILE_END(with_metadata_total, "Object written with metadata result=%d size=%zu", result, size);
+    
     if (result == 0) {
         buckets_info("Object written with metadata: %s/%s (size=%zu, versioned=%d)",
-                    bucket, object, size, enable_versioning);
+                     bucket, object, size, enable_versioning);
     }
     
     return result;
-}
-
-/* Get object by version ID */
-int buckets_get_object_version(const char *bucket, const char *object,
-                                const char *versionId,
-                                void **data, size_t *size)
-{
-    if (!bucket || !object || !data || !size) {
-        buckets_error("NULL parameter in get_object_version");
-        return -1;
-    }
-    
-    /* For now, if versionId is NULL, get latest version */
-    /* Version-specific retrieval will be implemented in version storage */
-    if (!versionId) {
-        return buckets_get_object(bucket, object, data, size);
-    }
-    
-    /* TODO: Implement version-specific retrieval */
-    /* This requires storing multiple xl.meta files per version */
-    buckets_warn("Version-specific retrieval not yet implemented, returning latest");
-    return buckets_get_object(bucket, object, data, size);
-}
-
-/* List object versions */
-int buckets_list_object_versions(const char *bucket, const char *object,
-                                  char ***versions, u32 *count)
-{
-    if (!bucket || !object || !versions || !count) {
-        buckets_error("NULL parameter in list_object_versions");
-        return -1;
-    }
-    
-    /* TODO: Implement version listing */
-    /* This requires directory scanning for version-specific xl.meta files */
-    buckets_warn("Version listing not yet implemented");
-    *versions = NULL;
-    *count = 0;
-    return 0;
 }

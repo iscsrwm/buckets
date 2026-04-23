@@ -20,6 +20,7 @@
 #include "buckets_registry.h"
 #include "buckets_placement.h"
 #include "buckets_group_commit.h"
+#include "buckets_profile.h"
 #include "storage/async_replication.h"
 
 /* Global storage configuration */
@@ -259,6 +260,9 @@ int buckets_put_object(const char *bucket, const char *object,
     struct timespec start_total, end_total;
     clock_gettime(CLOCK_MONOTONIC, &start_total);
     
+    buckets_info("[PROFILE] ═══════════════════════════════════════════════");
+    buckets_info("[PROFILE] PUT OBJECT START: %s/%s size=%zu", bucket, object, size);
+    
     int result = -1;  /* Initialize to error by default */
     
     if (!bucket || !object || !data) {
@@ -398,6 +402,9 @@ int buckets_put_object(const char *bucket, const char *object,
     u32 k = g_storage_config.default_ec_k;
     u32 m = g_storage_config.default_ec_m;
     
+    PROFILE_START(put_total);
+    PROFILE_MARK("═══════ PUT OBJECT: %s/%s size=%zu ═══════", bucket, object, size);
+    
     buckets_info("Erasure encoding object: size=%zu, k=%u, m=%u", size, k, m);
     
     /* Log input data for debugging */
@@ -415,6 +422,7 @@ int buckets_put_object(const char *bucket, const char *object,
     size_t chunk_size = buckets_calculate_chunk_size(size, k);
 
     /* Allocate chunk arrays */
+    PROFILE_START(alloc);
     u8 *data_chunks[k];
     u8 *parity_chunks[m];
     for (u32 i = 0; i < k; i++) {
@@ -423,8 +431,10 @@ int buckets_put_object(const char *bucket, const char *object,
     for (u32 i = 0; i < m; i++) {
         parity_chunks[i] = buckets_malloc(chunk_size);
     }
+    PROFILE_END(alloc, "Allocated %u data + %u parity chunks (chunk_size=%zu)", k, m, chunk_size);
 
     /* Encode with erasure coding */
+    PROFILE_START(encode);
     struct timespec start_encode, end_encode;
     clock_gettime(CLOCK_MONOTONIC, &start_encode);
     
@@ -444,10 +454,12 @@ int buckets_put_object(const char *bucket, const char *object,
     clock_gettime(CLOCK_MONOTONIC, &end_encode);
     double encode_time = (end_encode.tv_sec - start_encode.tv_sec) + 
                         (end_encode.tv_nsec - start_encode.tv_nsec) / 1e9;
+    PROFILE_END(encode, "Erasure encoding complete: %.2f MB/s", (size / 1024.0 / 1024.0) / encode_time);
     buckets_info("⏱️  Erasure encoding: %.3f ms (%.2f MB/s)", 
                  encode_time * 1000, (size / 1024.0 / 1024.0) / encode_time);
 
     /* Compute checksums */
+    PROFILE_START(checksum);
     meta.erasure.data = k;
     meta.erasure.parity = m;
     meta.erasure.blockSize = chunk_size;
@@ -475,6 +487,7 @@ int buckets_put_object(const char *bucket, const char *object,
         buckets_compute_chunk_checksum(parity_chunks[i], chunk_size,
                                        &meta.erasure.checksums[k + i]);
     }
+    PROFILE_END(checksum, "Computed checksums for %u chunks", k + m);
 
     /* Get disk paths from placement (consistent hash set selection) */
     char **set_disk_paths = NULL;
@@ -548,6 +561,7 @@ int buckets_put_object(const char *bucket, const char *object,
         }
         
         /* Write all chunks in parallel with batching optimization */
+        PROFILE_START(chunk_write);
         struct timespec start_write, end_write;
         clock_gettime(CLOCK_MONOTONIC, &start_write);
         
@@ -557,12 +571,14 @@ int buckets_put_object(const char *bucket, const char *object,
                                                          const void **chunk_data_array,
                                                          size_t chunk_size, u32 num_chunks);
         
+        PROFILE_MARK("Starting batched chunk writes: %u chunks, chunk_size=%zu", k + m, chunk_size);
         int write_result = buckets_batched_parallel_write_chunks(bucket, object, object_path, placement,
                                                                  chunk_array, chunk_size, k + m);
         
         clock_gettime(CLOCK_MONOTONIC, &end_write);
         double write_time = (end_write.tv_sec - start_write.tv_sec) + 
                            (end_write.tv_nsec - start_write.tv_nsec) / 1e9;
+        PROFILE_END(chunk_write, "Chunk writes complete: %.2f MB/s", (size / 1024.0 / 1024.0) / write_time);
         
         buckets_free(chunk_array);
         
@@ -577,6 +593,7 @@ int buckets_put_object(const char *bucket, const char *object,
         buckets_info("Parallel write complete: %u chunks written", k + m);
         
         /* Write xl.meta to all disks (local and remote) in PARALLEL */
+        PROFILE_START(metadata);
         struct timespec start_meta, end_meta;
         clock_gettime(CLOCK_MONOTONIC, &start_meta);
         
@@ -596,8 +613,11 @@ int buckets_put_object(const char *bucket, const char *object,
         clock_gettime(CLOCK_MONOTONIC, &end_meta);
         double meta_time = (end_meta.tv_sec - start_meta.tv_sec) + 
                           (end_meta.tv_nsec - start_meta.tv_nsec) / 1e9;
+        PROFILE_END(metadata, "Metadata writes complete: %u disks", k + m);
         buckets_info("⏱️  Metadata writes (PARALLEL): %.3f ms (%u disks)", meta_time * 1000, k + m);
     }
+    
+    PROFILE_END(put_total, "PUT operation complete for %s/%s", bucket, object);
 
     /* Record in registry if write succeeded */
     if (result == 0) {
