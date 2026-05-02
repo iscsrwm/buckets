@@ -26,7 +26,7 @@ extern "C" {
 
 /* Default configuration values */
 #define BUCKETS_GC_DEFAULT_BATCH_SIZE 64
-#define BUCKETS_GC_DEFAULT_BATCH_TIME_MS 10
+#define BUCKETS_GC_DEFAULT_BATCH_TIME_MS 5
 #define BUCKETS_GC_MAX_OPEN_FILES 256
 
 /**

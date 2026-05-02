@@ -427,6 +427,16 @@ buckets_group_commit_config_t buckets_group_commit_default_config(void)
         .use_fdatasync = true,
         .durability = BUCKETS_DURABILITY_BATCHED
     };
+    
+    /* Allow disabling fsync via environment variable for testing/benchmarking */
+    const char *no_fsync = getenv("BUCKETS_NO_FSYNC");
+    if (no_fsync && strcmp(no_fsync, "1") == 0) {
+        buckets_warn("⚠️  FSYNC DISABLED - Data durability NOT guaranteed! (BUCKETS_NO_FSYNC=1)");
+        config.durability = BUCKETS_DURABILITY_NONE;
+        config.batch_size = 0;
+        config.batch_time_ms = 0;
+    }
+    
     return config;
 }
 

@@ -1,11 +1,11 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: benchmark-multi-client
+  name: benchmark-1mb-32workers
   namespace: buckets
 spec:
-  completions: 6  # Run 6 client pods
-  parallelism: 6  # All in parallel
+  completions: 1
+  parallelism: 1
   backoffLimit: 0
   template:
     spec:
@@ -22,32 +22,24 @@ spec:
           value: "minioadmin"
         - name: AWS_EC2_METADATA_DISABLED
           value: "true"
-        - name: POD_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.name
         command:
         - /bin/sh
         - -c
         - |
           set -e
-          echo "=== MULTI-CLIENT BENCHMARK ==="
-          echo "Purpose: Test session affinity - each pod should hit different backend"
-          echo "Client Pod: $POD_NAME"
+          echo "=== 1MB BENCHMARK - 8 WORKERS ==="
+          echo "Purpose: Test with lower concurrency"
           echo "Endpoint: $S3_ENDPOINT"
-          echo "Configuration: 4 workers per client, 60s duration, 1MB objects"
+          echo "Configuration: 8 workers, 60s duration, 1MB objects"
           echo "Starting at $(date)"
           echo ""
           
-          # Use pod name as bucket suffix to avoid conflicts
-          BUCKET_SUFFIX=$(echo $POD_NAME | md5sum | cut -c1-8)
-          
           /benchmark \
             -endpoint=$S3_ENDPOINT \
-            -bucket=multi-client-$BUCKET_SUFFIX \
+            -bucket=test-1mb-32workers \
             -duration=60s \
-            -workers=4 \
+            -workers=32 \
             -size=1048576
           
           echo ""
-          echo "Client $POD_NAME completed at $(date)"
+          echo "Benchmark completed at $(date)"

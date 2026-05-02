@@ -1,0 +1,189 @@
+---
+# PersistentVolumeClaim for Cinder storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cinder-benchmark-pvc
+  namespace: buckets
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: cinder  # Use the same storage class as buckets pods
+---
+# Pod to run storage benchmarks
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cinder-benchmark
+  namespace: buckets
+spec:
+  containers:
+  - name: fio
+    image: ubuntu:22.04
+    command: ["/bin/bash"]
+    args:
+      - -c
+      - |
+        set -e
+        echo "Installing fio benchmark tool..."
+        apt-get update -qq && apt-get install -y -qq fio > /dev/null 2>&1
+        
+        echo ""
+        echo "========================================================================"
+        echo "           CINDER STORAGE BENCHMARK - Direct I/O Testing"
+        echo "========================================================================"
+        echo ""
+        echo "Volume: /data (Cinder PVC)"
+        echo "Size: 20GB"
+        echo "Tests: Sequential write, random write, sequential read, random read"
+        echo ""
+        
+        cd /data
+        
+        # Test 1: Sequential Write Bandwidth (1MB blocks)
+        echo "--------------------------------------------------------------------"
+        echo "TEST 1: Sequential Write Bandwidth (1MB blocks)"
+        echo "--------------------------------------------------------------------"
+        fio --name=seq-write \
+            --ioengine=libaio \
+            --direct=1 \
+            --bs=1M \
+            --iodepth=64 \
+            --rw=write \
+            --size=4G \
+            --numjobs=1 \
+            --runtime=30 \
+            --time_based \
+            --group_reporting \
+            --filename=/data/test-seq-write
+        echo ""
+        
+        # Test 2: Sequential Write with Fsync (simulating our workload)
+        echo "--------------------------------------------------------------------"
+        echo "TEST 2: Sequential Write with Fsync (simulating application)"
+        echo "--------------------------------------------------------------------"
+        fio --name=seq-write-fsync \
+            --ioengine=sync \
+            --direct=0 \
+            --bs=128K \
+            --fsync=1 \
+            --rw=write \
+            --size=2G \
+            --numjobs=1 \
+            --runtime=30 \
+            --time_based \
+            --group_reporting \
+            --filename=/data/test-fsync
+        echo ""
+        
+        # Test 3: Random Write IOPS (4KB blocks)
+        echo "--------------------------------------------------------------------"
+        echo "TEST 3: Random Write IOPS (4KB blocks)"
+        echo "--------------------------------------------------------------------"
+        fio --name=rand-write \
+            --ioengine=libaio \
+            --direct=1 \
+            --bs=4K \
+            --iodepth=64 \
+            --rw=randwrite \
+            --size=2G \
+            --numjobs=1 \
+            --runtime=30 \
+            --time_based \
+            --group_reporting \
+            --filename=/data/test-rand-write
+        echo ""
+        
+        # Test 4: Sequential Read Bandwidth
+        echo "--------------------------------------------------------------------"
+        echo "TEST 4: Sequential Read Bandwidth (1MB blocks)"
+        echo "--------------------------------------------------------------------"
+        fio --name=seq-read \
+            --ioengine=libaio \
+            --direct=1 \
+            --bs=1M \
+            --iodepth=64 \
+            --rw=read \
+            --size=4G \
+            --numjobs=1 \
+            --runtime=30 \
+            --time_based \
+            --group_reporting \
+            --filename=/data/test-seq-write
+        echo ""
+        
+        # Test 5: Multiple concurrent writers (simulating cluster load)
+        echo "--------------------------------------------------------------------"
+        echo "TEST 5: Concurrent Write Bandwidth (4 jobs × 1MB)"
+        echo "--------------------------------------------------------------------"
+        fio --name=concurrent-write \
+            --ioengine=libaio \
+            --direct=1 \
+            --bs=1M \
+            --iodepth=16 \
+            --rw=write \
+            --size=1G \
+            --numjobs=4 \
+            --runtime=30 \
+            --time_based \
+            --group_reporting \
+            --filename=/data/test-concurrent
+        echo ""
+        
+        # Test 6: Fsync latency measurement
+        echo "--------------------------------------------------------------------"
+        echo "TEST 6: Fsync Latency (how long does each fsync take?)"
+        echo "--------------------------------------------------------------------"
+        fio --name=fsync-latency \
+            --ioengine=sync \
+            --direct=0 \
+            --bs=128K \
+            --fsync=1 \
+            --rw=write \
+            --size=500M \
+            --numjobs=1 \
+            --runtime=20 \
+            --time_based \
+            --group_reporting \
+            --lat_percentiles=1 \
+            --filename=/data/test-fsync-lat
+        echo ""
+        
+        echo "======================================================================"
+        echo "                    BENCHMARK COMPLETE"
+        echo "======================================================================"
+        echo ""
+        echo "Key Metrics to Compare:"
+        echo "  - Sequential write bandwidth (TEST 1)"
+        echo "  - Write with fsync bandwidth (TEST 2)"
+        echo "  - Fsync latency percentiles (TEST 6)"
+        echo "  - Concurrent write bandwidth (TEST 5)"
+        echo ""
+        echo "Application Performance:"
+        echo "  - Observed: ~270 MB/s cluster-wide (6 pods × 24 volumes)"
+        echo "  - Per volume: ~11 MB/s average"
+        echo ""
+        
+        # Cleanup
+        rm -f /data/test-*
+        
+        echo "Benchmark pod will now sleep. Check logs for results."
+        sleep 3600
+    volumeMounts:
+    - name: data
+      mountPath: /data
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "500m"
+      limits:
+        memory: "1Gi"
+        cpu: "2000m"
+  restartPolicy: Never
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: cinder-benchmark-pvc
